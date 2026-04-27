@@ -17,8 +17,10 @@ export default defineConfig({
         background_color: '#050505',
         display: 'standalone',
         orientation: 'portrait',
+        id: 'https://tradepilottool.com/',
         start_url: '/',
         scope: '/',
+        categories: ['finance', 'productivity', 'utilities'],
         icons: [
           {
             src: '/icons/icon-192.png',

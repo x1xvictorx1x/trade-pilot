@@ -78,7 +78,7 @@ const marketSpecs = {
   QQQ: { displayName: "QQQ ETF", pointValue: 1, tickSize: 0.01 },
 };
 const dataSources = ["Manual", "TradingView Alerts", "Market Data API", "Broker Connection"];
-const navigationTabs = ["Dashboard", "Journal", "Profile", "Help", "Support", "Settings"];
+const navigationTabs = ["Dashboard", "Install", "Journal", "Profile", "Help", "Support", "Settings"];
 const marketServerUrl = "http://127.0.0.1:8787";
 
 const tooltipText = {
@@ -153,6 +153,8 @@ export default function App() {
   const [onboardingComplete, setOnboardingComplete] = useState(() => localStorage.getItem(onboardingStorageKey) === "true");
   const [fastMessage, setFastMessage] = useState("Ready for manual execution.");
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
   const [feedbackItems, setFeedbackItems] = useState(() => loadList(feedbackStorageKey));
   const [supportMessages, setSupportMessages] = useState(() => loadList(supportStorageKey));
   const [autoPrice, setAutoPrice] = useState(false);
@@ -211,6 +213,28 @@ export default function App() {
   useEffect(() => {
     setRiskPoints(profile.defaultRiskPoints);
   }, [profile.defaultRiskPoints]);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (event) => {
+      event.preventDefault();
+      setInstallPrompt(event);
+    };
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    return () => window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+  }, []);
+
+  const installApp = async () => {
+    if (!installPrompt) {
+      setActivePage("install");
+      return;
+    }
+
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    setInstallPrompt(null);
+    setInstallBannerDismissed(true);
+  };
 
   useEffect(() => {
     const base = marketDefaults[profile.mainMarket] ?? 27400;
@@ -479,6 +503,14 @@ export default function App() {
         </header>
         <div style={styles.alphaBanner}>Trade Pilot Alpha — educational execution assistant. Not financial advice.</div>
         <div style={styles.riskBanner}>⚠ Trading involves risk. Trade responsibly.</div>
+        {!installBannerDismissed ? (
+          <InstallBanner
+            canInstall={Boolean(installPrompt)}
+            onDismiss={() => setInstallBannerDismissed(true)}
+            onInstall={installApp}
+            onInstructions={() => setActivePage("install")}
+          />
+        ) : null}
         {!onboardingComplete ? (
           <OnboardingCard
             onDone={() => {
@@ -531,6 +563,7 @@ export default function App() {
             updateProfile={updateProfile}
           />
         ) : null}
+        {activePage === "install" ? <InstallPage canInstall={Boolean(installPrompt)} onInstall={installApp} /> : null}
         {activePage === "journal" ? <JournalPage activePosition={activePosition} engine={engine} discipline={discipline} /> : null}
         {activePage === "profile" ? <ProfilePage profile={profile} updateProfile={updateProfile} /> : null}
         {activePage === "help" ? <HelpPage /> : null}
@@ -620,6 +653,68 @@ function OnboardingCard({ onDone }) {
       </div>
       <button onClick={onDone} style={styles.settingsButton}>Got it</button>
     </section>
+  );
+}
+
+function InstallBanner({ canInstall, onDismiss, onInstall, onInstructions }) {
+  return (
+    <section style={styles.installBanner}>
+      <div>
+        <strong>Install Trade Pilot</strong>
+        <p style={styles.installBannerText}>Add it to your home screen for a faster app-like experience.</p>
+      </div>
+      <div style={styles.installBannerActions}>
+        <button onClick={canInstall ? onInstall : onInstructions} style={styles.installButton}>
+          {canInstall ? "Install Trade Pilot" : "How to Install"}
+        </button>
+        <button onClick={onDismiss} style={styles.dismissButton}>Not now</button>
+      </div>
+    </section>
+  );
+}
+
+function InstallPage({ canInstall, onInstall }) {
+  return (
+    <main style={styles.installPage}>
+      <section style={styles.installHero}>
+        <div style={styles.installIconWrap}>
+          <img src="/icons/icon-192.png" alt="Trade Pilot app icon" style={styles.installIcon} />
+        </div>
+        <div>
+          <p style={styles.cardLabel}>Install App</p>
+          <h2 style={styles.tradePlanTitle}>Install Trade Pilot</h2>
+          <p style={styles.muted}>Plan trades. Manage risk. Avoid emotional entries from your phone or desktop.</p>
+          <button onClick={onInstall} style={styles.generateButton}>
+            {canInstall ? "Install Trade Pilot" : "Show Install Instructions"}
+          </button>
+        </div>
+      </section>
+
+      <section style={styles.mainGrid}>
+        <div style={styles.card}>
+          <p style={styles.cardLabel}>iPhone / iPad</p>
+          <h2 style={styles.sectionTitle}>Add to Home Screen</h2>
+          <PlanItem title="1. Open in Safari" text="Visit tradepilottool.com in Safari." />
+          <PlanItem title="2. Tap Share" text="Use the Share button at the bottom of Safari." />
+          <PlanItem title="3. Add to Home Screen" text="Choose Add to Home Screen, then tap Add." />
+        </div>
+
+        <div style={styles.card}>
+          <p style={styles.cardLabel}>Android</p>
+          <h2 style={styles.sectionTitle}>Install from Chrome</h2>
+          <PlanItem title="1. Open in Chrome" text="Visit tradepilottool.com in Chrome." />
+          <PlanItem title="2. Tap Install" text="Use the browser install prompt or menu." />
+          <PlanItem title="3. Launch like an app" text="Trade Pilot will appear on your home screen." />
+        </div>
+
+        <div style={styles.card}>
+          <p style={styles.cardLabel}>Desktop</p>
+          <h2 style={styles.sectionTitle}>Install from Browser</h2>
+          <PlanItem title="Chrome / Edge" text="Click the install icon in the address bar." />
+          <PlanItem title="Offline support" text="Core app files are cached after the first visit." />
+        </div>
+      </section>
+    </main>
   );
 }
 
@@ -1828,7 +1923,7 @@ const styles = {
     background: "radial-gradient(circle at top left, #172554 0, #050505 34%, #09090b 100%)",
     color: "#f8fafc",
     fontFamily: "Inter, Arial, sans-serif",
-    padding: "24px",
+    padding: "max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left))",
   },
   shell: {
     margin: "0 auto",
@@ -1883,6 +1978,71 @@ const styles = {
     display: "grid",
     gap: "8px",
     gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+  },
+  installBanner: {
+    alignItems: "center",
+    background: "rgba(15, 23, 42, .94)",
+    border: "1px solid #38bdf8",
+    borderRadius: "14px",
+    display: "flex",
+    gap: "14px",
+    justifyContent: "space-between",
+    marginBottom: "16px",
+    padding: "14px",
+    flexWrap: "wrap",
+  },
+  installBannerText: {
+    color: "#a1a1aa",
+    fontSize: "13px",
+    margin: "4px 0 0",
+  },
+  installBannerActions: {
+    display: "flex",
+    gap: "10px",
+    flexWrap: "wrap",
+  },
+  installButton: {
+    background: "#f8fafc",
+    border: "none",
+    borderRadius: "12px",
+    color: "#020617",
+    cursor: "pointer",
+    fontWeight: 900,
+    padding: "11px 14px",
+  },
+  dismissButton: {
+    background: "#111827",
+    border: "1px solid #334155",
+    borderRadius: "12px",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontWeight: 800,
+    padding: "11px 14px",
+  },
+  installPage: {
+    display: "grid",
+    gap: "16px",
+  },
+  installHero: {
+    alignItems: "center",
+    background: "linear-gradient(135deg, rgba(15, 23, 42, .98), rgba(2, 6, 23, .96))",
+    border: "1px solid #334155",
+    borderRadius: "18px",
+    display: "grid",
+    gap: "22px",
+    gridTemplateColumns: "120px 1fr",
+    padding: "24px",
+  },
+  installIconWrap: {
+    background: "#050505",
+    border: "1px solid #334155",
+    borderRadius: "26px",
+    padding: "12px",
+  },
+  installIcon: {
+    display: "block",
+    height: "96px",
+    width: "96px",
   },
   eyebrow: {
     color: "#38bdf8",
