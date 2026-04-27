@@ -6,6 +6,7 @@ const activePositionStorageKey = "tradePilotActivePosition";
 const disclaimerStorageKey = "tradePilotDisclaimerAccepted";
 const feedbackStorageKey = "tradePilotFeedback";
 const supportStorageKey = "tradePilotSupportMessages";
+const onboardingStorageKey = "tradePilotOnboardingComplete";
 
 const defaultProfile = {
   traderName: "",
@@ -16,7 +17,8 @@ const defaultProfile = {
   maxDailyLoss: 500,
   maxTradesPerDay: 5,
   maxContracts: 5,
-  defaultContracts: 3,
+  maxRiskPerTrade: 100,
+  defaultContracts: 1,
   defaultRiskPoints: 10,
   trim1Points: 10,
   trim2Points: 20,
@@ -91,6 +93,7 @@ const tooltipText = {
   trim2: "Trim 2 = your second profit-taking level.",
   runner: "Runner = the final piece you hold for a bigger move.",
   marketBias: "Market Bias = Trade Pilot's read on whether price favors long, short, or waiting.",
+  tradeScore: "Trade Score = a 0-100 execution quality read based on location, risk/reward, size, bias, and chop.",
   breakout: "Breakout = price pushing through a key level, usually resistance for longs or support for shorts.",
   pullback: "Pullback = price returning toward support or a breakout area after a move.",
   retest: "Retest = price comes back to check whether a broken level will now hold.",
@@ -147,6 +150,7 @@ export default function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [disclaimerAccepted, setDisclaimerAccepted] = useState(() => localStorage.getItem(disclaimerStorageKey) === "true");
+  const [onboardingComplete, setOnboardingComplete] = useState(() => localStorage.getItem(onboardingStorageKey) === "true");
   const [fastMessage, setFastMessage] = useState("Ready for manual execution.");
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [feedbackItems, setFeedbackItems] = useState(() => loadList(feedbackStorageKey));
@@ -454,8 +458,10 @@ export default function App() {
             <p style={styles.eyebrow}>AI Trading Execution Assistant</p>
             <h1 style={styles.title}>Trade Pilot</h1>
             <p style={styles.subtitle}>
-              {profile.traderName ? `${profile.traderName} - ` : ""}
-              {profile.mainMarket} - {profile.traderStyle} - {profile.accountType}
+              Plan trades. Manage risk. Avoid emotional entries.
+            </p>
+            <p style={styles.positioningText}>
+              Trading execution assistant, not a signal service.
             </p>
           </div>
 
@@ -471,7 +477,16 @@ export default function App() {
             ))}
           </div>
         </header>
+        <div style={styles.alphaBanner}>Trade Pilot Alpha — educational execution assistant. Not financial advice.</div>
         <div style={styles.riskBanner}>⚠ Trading involves risk. Trade responsibly.</div>
+        {!onboardingComplete ? (
+          <OnboardingCard
+            onDone={() => {
+              localStorage.setItem(onboardingStorageKey, "true");
+              setOnboardingComplete(true);
+            }}
+          />
+        ) : null}
 
         {activePage === "dashboard" ? (
           <Dashboard
@@ -538,7 +553,7 @@ export default function App() {
         <SettingsModal profile={profile} updateProfile={updateProfile} onClose={() => setSettingsOpen(false)} />
       ) : null}
 
-      <button onClick={() => setFeedbackOpen(true)} style={styles.feedbackButton}>💬 Send Feedback</button>
+      <a href="mailto:support@tradepilot.app?subject=Trade%20Pilot%20Alpha%20Feedback" style={styles.feedbackButton}>Send Feedback</a>
 
       {feedbackOpen ? (
         <FeedbackModal
@@ -591,6 +606,23 @@ function DisclaimerModal({ onAccept }) {
   );
 }
 
+function OnboardingCard({ onDone }) {
+  return (
+    <section style={styles.onboardingCard}>
+      <div>
+        <p style={styles.cardLabel}>Start Here</p>
+        <h2 style={styles.sectionTitle}>Build a trade plan in 3 steps</h2>
+      </div>
+      <div style={styles.onboardingSteps}>
+        <span>1. Choose your market</span>
+        <span>2. Mark support and resistance</span>
+        <span>3. Generate your trade plan</span>
+      </div>
+      <button onClick={onDone} style={styles.settingsButton}>Got it</button>
+    </section>
+  );
+}
+
 function Dashboard({
   activePosition,
   applyQuickSetup,
@@ -632,6 +664,9 @@ function Dashboard({
   updateDiscipline,
   updateProfile,
 }) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [setupDirection, setSetupDirection] = useState("Long");
+  const [setupType, setSetupType] = useState("Pullback");
   const rangePad = Math.max(20, price * 0.01);
   const rangeMin = Math.max(0, price - rangePad);
   const rangeMax = price + rangePad;
@@ -658,6 +693,17 @@ function Dashboard({
   };
   const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
   const rewardRisk = getRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
+  const simpleBias = engine.bias.includes("LONG") ? "LONG" : engine.bias.includes("SHORT") ? "SHORT" : "WAIT";
+  const simpleAction = simpleBias === "LONG" ? "Look Long" : simpleBias === "SHORT" ? "Look Short" : "No trade";
+  const setupName = `${setupType} ${setupDirection}`;
+  const hasPlan = Boolean(plannedTrade || activePosition);
+
+  const generateSelectedPlan = () => {
+    if (setupType === "Retest" && setupDirection === "Long") applyQuickSetup("Breakout Long");
+    else if (setupType === "Retest" && setupDirection === "Short") applyQuickSetup("Breakdown Short");
+    else if (setupType === "Breakout" && setupDirection === "Short") applyQuickSetup("Breakdown Short");
+    else applyQuickSetup(setupName);
+  };
 
   return (
     <>
@@ -672,6 +718,79 @@ function Dashboard({
           <strong>{marketSpec.tickSize}</strong>
         </div>
       </section>
+
+      <section style={styles.alphaTopGrid}>
+        <div style={styles.scoreCard}>
+          <p style={styles.cardLabel}>
+            <span style={styles.labelWithHelp}>
+              Trade Score
+              <HelpTip text={tooltipText.tradeScore} />
+            </span>
+          </p>
+          <h2 style={styles.scoreText}>{engine.score}/100</h2>
+          <div style={{ ...styles.confidencePill, background: engine.confidenceColor }}>{engine.confidence}</div>
+          <div style={styles.scoreTrack}>
+            <div style={{ ...styles.scoreFill, width: `${engine.score}%`, background: engine.confidenceColor }} />
+          </div>
+        </div>
+
+        <div style={styles.coachCard}>
+          <p style={styles.cardLabel}>Trade Coach</p>
+          <div style={styles.coachGrid}>
+            <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={simpleBias === "WAIT" ? "warn" : "good"} />
+            <Metric label="Market State" value={levelCoach.marketState} />
+            <Metric label="Action" value={levelCoach.action === "WAIT" ? simpleAction : levelCoach.action} tone={simpleBias === "WAIT" ? "warn" : "good"} />
+          </div>
+          <p style={styles.coachMessage}>{levelCoach.message}</p>
+        </div>
+      </section>
+
+      <section style={styles.alphaMiddleGrid}>
+        <section style={styles.tradePlanHero}>
+          <p style={styles.cardLabel}>Trade Plan</p>
+          <h2 style={styles.tradePlanTitle}>{hasPlan ? `${setupName} Plan` : "No valid trade yet"}</h2>
+          {hasPlan ? (
+            <>
+              <div style={styles.planMetricGrid}>
+                <Metric label="Entry" tooltip={tooltipText.entry} value={visualPlan.entry.toFixed(2)} />
+                <Metric label="Stop" tooltip={tooltipText.stopLoss} value={visualPlan.stop.toFixed(2)} tone="bad" />
+                <Metric label="Trim 1" tooltip={tooltipText.trim1} value={visualPlan.trim1.toFixed(2)} tone="good" />
+                <Metric label="Trim 2" tooltip={tooltipText.trim2} value={visualPlan.trim2.toFixed(2)} tone="good" />
+                <Metric label="Runner" tooltip={tooltipText.runner} value={(visualPlan.runner ?? visualPlan.target).toFixed(2)} tone="good" />
+                <Metric label="Risk" value={`$${rewardRisk.risk.toFixed(2)}`} tone={rewardRisk.risk > profile.maxRiskPerTrade ? "bad" : "neutral"} />
+                <Metric label="Reward/Risk" value={`${rewardRisk.ratio.toFixed(1)}R`} />
+                <Metric label="Trade Score" tooltip={tooltipText.tradeScore} value={`${engine.score}/100`} />
+              </div>
+              {missedEntry ? <div style={styles.missedEntry}>{missedEntry}</div> : null}
+            </>
+          ) : (
+            <p style={styles.emptyPlan}>No valid trade yet. Wait for price to reach support, resistance, breakout, or retest.</p>
+          )}
+        </section>
+
+        <section style={styles.quickEntryCard}>
+          <p style={styles.cardLabel}>Quick Entry</p>
+          <h2 style={styles.sectionTitle}>Generate a plan</h2>
+          <div style={styles.segmentGroup}>
+            {["Long", "Short"].map((option) => (
+              <button key={option} onClick={() => setSetupDirection(option)} style={{ ...styles.segmentButton, background: setupDirection === option ? "#2563eb" : "#111827" }}>{option} Setup</button>
+            ))}
+          </div>
+          <div style={styles.segmentGroup}>
+            {["Breakout", "Pullback", "Retest"].map((option) => (
+              <button key={option} onClick={() => setSetupType(option)} style={{ ...styles.segmentButton, background: setupType === option ? "#334155" : "#111827" }}>{option}</button>
+            ))}
+          </div>
+          <button onClick={generateSelectedPlan} style={styles.generateButton}>Generate Trade Plan</button>
+          <p style={styles.muted}>Trading execution assistant. Not a signal service.</p>
+        </section>
+      </section>
+
+      <button onClick={() => setAdvancedOpen((value) => !value)} style={styles.advancedToggle}>
+        Advanced Tools {advancedOpen ? "▲" : "▼"}
+      </button>
+
+      <div style={{ display: advancedOpen ? "block" : "none" }}>
 
       <section style={styles.heroGrid}>
         <div style={styles.biasCard}>
@@ -691,7 +810,12 @@ function Dashboard({
         <div style={styles.scoreCard}>
           <div style={styles.scoreTop}>
             <div>
-              <p style={styles.cardLabel}>Trade Score</p>
+              <p style={styles.cardLabel}>
+                <span style={styles.labelWithHelp}>
+                  Trade Score
+                  <HelpTip text={tooltipText.tradeScore} />
+                </span>
+              </p>
               <h2 style={styles.scoreText}>{engine.score}/100</h2>
             </div>
             <div style={{ ...styles.confidencePill, background: engine.confidenceColor }}>{engine.confidence}</div>
@@ -747,13 +871,39 @@ function Dashboard({
           pointValue={marketSpec.pointValue}
           plan={visualPlan}
           rewardRisk={rewardRisk}
+          setupName={setupName}
         />
         <ShareSetupPanel
           contracts={visualPlan.contracts ?? contracts}
+          engine={engine}
           market={profile.mainMarket}
           plan={visualPlan}
           rewardRisk={rewardRisk}
         />
+      </section>
+
+      <section style={styles.mainGrid}>
+        <section style={styles.card}>
+          <p style={styles.cardLabel}>Risk Control</p>
+          <h2 style={styles.sectionTitle}>Position Size Protection</h2>
+          <div style={styles.metricGrid}>
+            <Metric label="Dollar / Point" value={`$${engine.dollarPerPoint.toFixed(2)}`} />
+            <Metric label="Risk per 10 Points" value={`$${engine.riskPerTenPoints.toFixed(2)}`} />
+            <Metric label="Estimated Max Loss" value={`$${engine.estimatedMaxLoss.toFixed(2)}`} tone={engine.estimatedMaxLoss > profile.maxRiskPerTrade ? "bad" : "neutral"} />
+            <Metric label="Max Risk / Trade" value={`$${profile.maxRiskPerTrade.toFixed(2)}`} />
+          </div>
+          <div style={styles.warningStack}>
+            {engine.disciplineWarnings
+              .filter((warning) => warning.includes("Position size") || warning.includes("High risk") || warning.includes("Contracts"))
+              .map((warning) => <div key={warning} style={styles.warningBox}>{warning}</div>)}
+          </div>
+        </section>
+
+        <section style={styles.card}>
+          <p style={styles.cardLabel}>Journal</p>
+          <h2 style={styles.sectionTitle}>Session Notes</h2>
+          <p style={styles.muted}>Trades taken: {discipline.tradesTaken}. Daily P/L: ${discipline.dailyPnl.toFixed(2)}. Current action: {engine.suggestedAction}.</p>
+        </section>
       </section>
 
       <section style={styles.fastCard}>
@@ -890,6 +1040,7 @@ function Dashboard({
           <ScoreRow label="Contracts" value={engine.factors.contracts} />
         </section>
       </main>
+      </div>
     </>
   );
 }
@@ -910,6 +1061,9 @@ function calculateTrade({ activePosition, contracts, direction, discipline, entr
   const { smartStop, stopReason } = getSmartStop({ direction, entry, resistance, riskPoints, support });
   const actualRiskPoints = Math.abs(entry - smartStop);
   const totalRisk = actualRiskPoints * pointValue * contracts;
+  const dollarPerPoint = pointValue * contracts;
+  const riskPerTenPoints = dollarPerPoint * 10;
+  const estimatedMaxLoss = riskPoints * dollarPerPoint;
   const openPnl = (isLong ? price - entry : entry - price) * pointValue * contracts;
   const riskLeft = Math.max(0, totalRisk + Math.min(openPnl, 0));
   const trim1Hit = isLong ? price >= trim1 : price <= trim1;
@@ -926,7 +1080,14 @@ function calculateTrade({ activePosition, contracts, direction, discipline, entr
     reward: rewardRisk >= 2 ? 20 : rewardRisk >= 1.5 ? 15 : rewardRisk >= 1 ? 10 : 3,
     direction: directionAligned ? 15 : inChop ? 4 : 8,
     distance: distanceFromEntry <= riskPoints ? 15 : distanceFromEntry <= riskPoints * 2 ? 9 : 4,
-    contracts: contracts <= profile.defaultContracts ? 15 : contracts <= profile.defaultContracts * 1.5 ? 9 : 3,
+    contracts:
+      estimatedMaxLoss > profile.maxRiskPerTrade || totalRisk > profile.accountSize * 0.015
+        ? 3
+        : contracts <= profile.defaultContracts
+          ? 15
+          : contracts <= profile.defaultContracts * 1.5
+            ? 9
+            : 5,
   };
 
   const chopPenalty = inChop ? 12 : 0;
@@ -938,11 +1099,13 @@ function calculateTrade({ activePosition, contracts, direction, discipline, entr
   const biasMessage = inChop ? "Price is trapped between support and resistance." : `${bias}. Wait for momentum and clean execution.`;
 
   let coachMessage = "Stop should be below structure, not random.";
-  if (inChop) coachMessage = "Price is inside chop. Wait.";
+  if (inChop) coachMessage = "Wait. Price is in the middle.";
   else if (longTrigger && isLong) coachMessage = "Long trigger active. Wait for momentum.";
   else if (shortTrigger && !isLong) coachMessage = "Short trigger active. Wait for momentum.";
+  if ((isLong && Math.abs(price - support) <= riskPoints) || (!isLong && Math.abs(price - resistance) <= riskPoints)) coachMessage = "Good setup: price near support.";
   if (trim1Hit && !trim2Hit) coachMessage = "First trim hit. Take partial profit.";
-  if (totalRisk > profile.accountSize * 0.015) coachMessage = "Risk is too high for this account size.";
+  if (totalRisk > profile.accountSize * 0.015 || estimatedMaxLoss > profile.maxRiskPerTrade) coachMessage = "Risk too high. Lower contracts.";
+  if (Math.abs(price - entry) > riskPoints * 2) coachMessage = "Do not chase after a big candle.";
 
   let suggestedAction = "HOLD";
   let actionTone = "neutral";
@@ -966,6 +1129,8 @@ function calculateTrade({ activePosition, contracts, direction, discipline, entr
   if (dailyLossUsed >= profile.maxDailyLoss) disciplineWarnings.push("Daily loss limit reached. Consider stopping trading today.");
   else if (dailyLossUsed >= profile.maxDailyLoss * 0.75) disciplineWarnings.push("Daily loss limit approaching.");
   if (contracts > profile.maxContracts) disciplineWarnings.push("Contracts exceed your max contract safety setting.");
+  if (estimatedMaxLoss > profile.maxRiskPerTrade) disciplineWarnings.push("Position size too large for this account.");
+  if (profile.mainMarket === "MNQ" && profile.accountSize < 2000 && contracts > 3) disciplineWarnings.push("High risk size detected.");
   if (disciplineWarnings.length === 0) disciplineWarnings.push("Discipline guardrails are clear.");
 
   const autoCoaching = [];
@@ -992,7 +1157,10 @@ function calculateTrade({ activePosition, contracts, direction, discipline, entr
     disciplineWarnings,
     factors,
     openPnl,
+    dollarPerPoint,
+    estimatedMaxLoss,
     riskLeft,
+    riskPerTenPoints,
     score,
     smartStop,
     stopReason,
@@ -1180,13 +1348,14 @@ function RiskRewardPanel({ contracts, market, plan, pointValue, rewardRisk }) {
   );
 }
 
-function ShareSetupPanel({ contracts, market, plan, rewardRisk }) {
+function ShareSetupPanel({ contracts, engine, market, plan, rewardRisk, setupName = "Manual" }) {
   const [copied, setCopied] = useState(false);
   const direction = plan.direction === "short" ? "Short" : "Long";
   const setupText = [
     "Trade Pilot Setup",
     `Market: ${market}`,
-    `Direction: ${direction}`,
+    `Bias: ${direction}`,
+    `Setup: ${setupName}`,
     `Entry: ${plan.entry?.toFixed?.(2) ?? "N/A"}`,
     `Stop: ${plan.stop?.toFixed?.(2) ?? "N/A"}`,
     `Trim 1: ${plan.trim1?.toFixed?.(2) ?? "N/A"}`,
@@ -1195,6 +1364,7 @@ function ShareSetupPanel({ contracts, market, plan, rewardRisk }) {
     `Contracts: ${contracts}`,
     `Risk: $${rewardRisk.risk.toFixed(2)}`,
     `Reward/Risk: ${rewardRisk.ratio.toFixed(1)}R`,
+    `Trade Score: ${engine.score}/100`,
   ].join("\n");
 
   const copySetup = async () => {
@@ -1208,7 +1378,7 @@ function ShareSetupPanel({ contracts, market, plan, rewardRisk }) {
       <p style={styles.cardLabel}>Share Setup</p>
       <h2 style={styles.sectionTitle}>Clean Trade Plan</h2>
       <pre style={styles.sharePreview}>{setupText}</pre>
-      <button onClick={copySetup} style={styles.settingsButton}>{copied ? "Copied" : "Share Setup"}</button>
+      <button onClick={copySetup} style={styles.settingsButton}>{copied ? "Copied" : "Copy Trade Plan"}</button>
       <p style={{ ...styles.muted, marginTop: "12px" }}>Later this can become a shareable URL.</p>
     </section>
   );
@@ -1398,6 +1568,7 @@ function ProfileFields({ profile, updateProfile }) {
         <SelectField label="Account Type" value={profile.accountType} options={["personal", "prop"]} onChange={(value) => updateProfile("accountType", value)} />
         <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
         <Field label="Max Daily Loss" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
+        <Field label="Max Risk Per Trade" type="number" value={profile.maxRiskPerTrade} onChange={(value) => updateProfile("maxRiskPerTrade", value)} />
         <Field label="Max Trades Per Day" type="number" value={profile.maxTradesPerDay} onChange={(value) => updateProfile("maxTradesPerDay", value)} />
         <Field label="Max Contracts" type="number" value={profile.maxContracts} onChange={(value) => updateProfile("maxContracts", value)} />
         <Field label="Default Contracts" type="number" value={profile.defaultContracts} onChange={(value) => updateProfile("defaultContracts", value)} />
@@ -1677,14 +1848,41 @@ const styles = {
     flexWrap: "wrap",
   },
   riskBanner: {
-    background: "rgba(120, 53, 15, .72)",
-    border: "1px solid #a16207",
-    borderRadius: "12px",
+    background: "rgba(120, 53, 15, .35)",
+    border: "1px solid rgba(161, 98, 7, .45)",
+    borderRadius: "10px",
     color: "#fde68a",
+    fontSize: "12px",
+    fontWeight: 800,
+    marginBottom: "10px",
+    padding: "7px 10px",
+  },
+  alphaBanner: {
+    background: "rgba(14, 165, 233, .12)",
+    border: "1px solid rgba(56, 189, 248, .28)",
+    borderRadius: "10px",
+    color: "#bae6fd",
     fontSize: "13px",
     fontWeight: 800,
+    marginBottom: "8px",
+    padding: "8px 10px",
+  },
+  onboardingCard: {
+    alignItems: "center",
+    background: "rgba(15, 23, 42, .94)",
+    border: "1px solid #334155",
+    borderRadius: "16px",
+    display: "grid",
+    gap: "14px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
     marginBottom: "16px",
-    padding: "10px 12px",
+    padding: "18px",
+  },
+  onboardingSteps: {
+    color: "#e5e7eb",
+    display: "grid",
+    gap: "8px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
   },
   eyebrow: {
     color: "#38bdf8",
@@ -1702,6 +1900,12 @@ const styles = {
   subtitle: {
     color: "#a1a1aa",
     margin: "8px 0 0",
+  },
+  positioningText: {
+    color: "#7dd3fc",
+    fontSize: "13px",
+    fontWeight: 800,
+    margin: "6px 0 0",
   },
   settingsButton: {
     background: "#f8fafc",
@@ -1743,6 +1947,88 @@ const styles = {
     gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
     gap: "16px",
     marginBottom: "16px",
+  },
+  alphaTopGrid: {
+    display: "grid",
+    gap: "16px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+    marginBottom: "16px",
+  },
+  alphaMiddleGrid: {
+    display: "grid",
+    gap: "16px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+    marginBottom: "16px",
+  },
+  tradePlanHero: {
+    background: "linear-gradient(135deg, rgba(15, 23, 42, .98), rgba(2, 6, 23, .96))",
+    border: "1px solid #334155",
+    borderRadius: "18px",
+    boxShadow: "0 22px 60px rgba(0,0,0,.42)",
+    padding: "26px",
+  },
+  tradePlanTitle: {
+    fontSize: "34px",
+    lineHeight: 1,
+    margin: "0 0 18px",
+  },
+  planMetricGrid: {
+    display: "grid",
+    gap: "12px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(135px, 1fr))",
+  },
+  emptyPlan: {
+    color: "#d4d4d8",
+    fontSize: "20px",
+    fontWeight: 800,
+    lineHeight: 1.35,
+    margin: 0,
+  },
+  coachGrid: {
+    display: "grid",
+    gap: "10px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+    marginBottom: "14px",
+  },
+  segmentGroup: {
+    display: "grid",
+    gap: "10px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
+    marginBottom: "12px",
+  },
+  segmentButton: {
+    border: "1px solid #334155",
+    borderRadius: "12px",
+    color: "white",
+    cursor: "pointer",
+    fontWeight: 900,
+    minHeight: "46px",
+    padding: "10px",
+  },
+  generateButton: {
+    background: "#f8fafc",
+    border: "none",
+    borderRadius: "14px",
+    color: "#020617",
+    cursor: "pointer",
+    fontSize: "17px",
+    fontWeight: 950,
+    marginBottom: "12px",
+    minHeight: "56px",
+    padding: "14px",
+    width: "100%",
+  },
+  advancedToggle: {
+    background: "#111827",
+    border: "1px solid #334155",
+    borderRadius: "14px",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontSize: "15px",
+    fontWeight: 900,
+    marginBottom: "16px",
+    padding: "13px 16px",
+    width: "100%",
   },
   card: {
     background: "rgba(24, 24, 27, .92)",
@@ -2148,6 +2434,8 @@ const styles = {
     background: "#09090b",
     border: "1px solid #27272a",
     borderRadius: "12px",
+    minWidth: 0,
+    overflow: "hidden",
     padding: "14px",
   },
   metricLabel: {
@@ -2161,6 +2449,9 @@ const styles = {
     fontSize: "22px",
     fontWeight: 900,
     margin: 0,
+    overflowWrap: "anywhere",
+    whiteSpace: "normal",
+    wordBreak: "break-word",
   },
   formGrid: {
     display: "grid",
