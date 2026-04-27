@@ -792,6 +792,11 @@ function Dashboard({
   const simpleAction = simpleBias === "LONG" ? "Look Long" : simpleBias === "SHORT" ? "Look Short" : "No trade";
   const setupName = `${setupType} ${setupDirection}`;
   const hasPlan = Boolean(plannedTrade || activePosition);
+  const riskStatus = engine.disciplineWarnings.some((warning) => warning.includes("Stop") || warning.includes("loss limit reached") || warning.includes("exceeded"))
+    ? "Stop Trading"
+    : engine.disciplineWarnings.some((warning) => warning.includes("Warning") || warning.includes("approaching") || warning.includes("High risk") || warning.includes("too large") || warning.includes("Contracts"))
+      ? "Warning"
+      : "Good";
 
   const generateSelectedPlan = () => {
     if (setupType === "Retest" && setupDirection === "Long") applyQuickSetup("Breakout Long");
@@ -837,6 +842,19 @@ function Dashboard({
             <Metric label="Action" value={levelCoach.action === "WAIT" ? simpleAction : levelCoach.action} tone={simpleBias === "WAIT" ? "warn" : "good"} />
           </div>
           <p style={styles.coachMessage}>{levelCoach.message}</p>
+        </div>
+      </section>
+
+      <section style={styles.rulesCard}>
+        <div>
+          <p style={styles.cardLabel}>Today&apos;s Trading Rules</p>
+          <h2 style={styles.sectionTitle}>Stay inside your limits</h2>
+        </div>
+        <div style={styles.rulesGrid}>
+          <Metric label="Max Trades" value={String(profile.maxTradesPerDay)} />
+          <Metric label="Max Daily Loss" value={`$${profile.maxDailyLoss.toFixed(2)}`} />
+          <Metric label="Current P/L" value={`$${discipline.dailyPnl.toFixed(2)}`} tone={discipline.dailyPnl >= 0 ? "good" : "bad"} />
+          <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : riskStatus === "Warning" ? "warn" : "bad"} />
         </div>
       </section>
 
@@ -2119,6 +2137,21 @@ const styles = {
     gap: "16px",
     gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
     marginBottom: "16px",
+  },
+  rulesCard: {
+    background: "rgba(15, 23, 42, .88)",
+    border: "1px solid #334155",
+    borderRadius: "16px",
+    display: "grid",
+    gap: "16px",
+    gridTemplateColumns: "minmax(220px, .45fr) 1fr",
+    marginBottom: "16px",
+    padding: "18px",
+  },
+  rulesGrid: {
+    display: "grid",
+    gap: "10px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
   },
   tradePlanHero: {
     background: "linear-gradient(135deg, rgba(15, 23, 42, .98), rgba(2, 6, 23, .96))",
