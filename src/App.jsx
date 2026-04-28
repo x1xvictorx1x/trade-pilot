@@ -1,4 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const profileStorageKey = "tradePilotProfile";
 const disciplineStorageKey = "tradePilotDiscipline";
@@ -7,6 +17,8 @@ const disclaimerStorageKey = "tradePilotDisclaimerAccepted";
 const feedbackStorageKey = "tradePilotFeedback";
 const supportStorageKey = "tradePilotSupportMessages";
 const onboardingStorageKey = "tradePilotOnboardingComplete";
+const streamerModeStorageKey = "tradePilotStreamerMode";
+const subscriberStorageKey = "tradePilotSubscribers";
 
 const defaultProfile = {
   traderName: "",
@@ -77,9 +89,53 @@ const marketSpecs = {
   SPY: { displayName: "SPY ETF", pointValue: 1, tickSize: 0.01 },
   QQQ: { displayName: "QQQ ETF", pointValue: 1, tickSize: 0.01 },
 };
-const dataSources = ["Manual", "TradingView Alerts", "Market Data API", "Broker Connection"];
-const navigationTabs = ["Dashboard", "Install", "Journal", "Profile", "Help", "Support", "Settings"];
+const dataSources = ["Manual", "Demo Broker", "Tradovate Demo Read-Only", "Tradovate Live Read-Only", "TradingView Alerts", "Market Data API", "Broker Connection"];
+const navigationTabs = ["Dashboard", "Connections", "Install", "Journal", "Profile", "Help", "Support", "Settings"];
 const marketServerUrl = "http://127.0.0.1:8787";
+const brokerSamplePayload = {
+  platform: "Demo Broker",
+  accountId: "SIM-001",
+  accountBalance: 50000,
+  symbol: "MNQ",
+  price: 27462,
+  bid: 27461.75,
+  ask: 27462.25,
+  openPnl: 14,
+  realizedPnl: 0,
+  position: {
+    symbol: "MNQ",
+    direction: "long",
+    quantity: 1,
+    averagePrice: 27455,
+    openPnl: 14,
+    stop: 27435,
+    target: 27495,
+  },
+  workingOrders: [
+    {
+      id: "demo-stop-1",
+      symbol: "MNQ",
+      side: "sell",
+      quantity: 1,
+      price: 27435,
+      type: "stop",
+    },
+  ],
+  fills: [
+    {
+      id: "demo-fill-1",
+      symbol: "MNQ",
+      side: "buy",
+      quantity: 1,
+      price: 27455,
+    },
+  ],
+};
+
+const tradovateModes = {
+  demo: "Tradovate Demo Read-Only",
+  live: "Tradovate Live Read-Only",
+};
 
 const tooltipText = {
   currentPrice: "Current Price = the latest price Trade Pilot is using for calculations.",
@@ -157,13 +213,26 @@ export default function App() {
   const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
   const [feedbackItems, setFeedbackItems] = useState(() => loadList(feedbackStorageKey));
   const [supportMessages, setSupportMessages] = useState(() => loadList(supportStorageKey));
-  const [autoPrice, setAutoPrice] = useState(false);
-  const [dataSource, setDataSource] = useState("Manual");
+  const [streamerMode, setStreamerMode] = useState(() => localStorage.getItem(streamerModeStorageKey) === "true");
+  const [autoPrice, setAutoPrice] = useState(true);
+  const [dataSource, setDataSource] = useState("Market Data API");
   const [lastUpdated, setLastUpdated] = useState("Manual price");
   const [priceStatus, setPriceStatus] = useState("");
   const [quote, setQuote] = useState(() => {
     const base = marketDefaults[profile.mainMarket] ?? 27500;
     return { bid: base - 0.25, ask: base + 0.25 };
+  });
+  const [brokerConnection, setBrokerConnection] = useState({
+    accountId: "",
+    accountBalance: 0,
+    connected: false,
+    fills: [],
+    openPnl: 0,
+    platform: "Not connected",
+    position: null,
+    realizedPnl: 0,
+    updatedAt: null,
+    workingOrders: [],
   });
 
   const [direction, setDirection] = useState("long");
@@ -205,6 +274,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(supportStorageKey, JSON.stringify(supportMessages));
   }, [supportMessages]);
+
+  useEffect(() => {
+    localStorage.setItem(streamerModeStorageKey, String(streamerMode));
+  }, [streamerMode]);
 
   useEffect(() => {
     setContracts(profile.defaultContracts);
@@ -256,22 +329,110 @@ export default function App() {
       return undefined;
     }
 
-    if (dataSource === "Broker Connection") {
-      setPriceStatus("Live price unavailable. Switch to manual mode.");
-      return undefined;
-    }
-
     setPriceStatus("");
-    if (dataSource === "Market Data API" && typeof EventSource !== "undefined") {
-      const stream = new EventSource(`${marketServerUrl}/api/market/stream?symbol=${profile.mainMarket}`);
+    const canUseLocalMarketServer =
+      typeof EventSource !== "undefined" &&
+      (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+
+    const applyBrokerSnapshot = (snapshot) => {
+      setBrokerConnection(snapshot);
+
+      if (snapshot.quote?.symbol === profile.mainMarket) {
+        setPrice(snapshot.quote.price);
+        setQuote({ bid: snapshot.quote.bid, ask: snapshot.quote.ask });
+        setLastUpdated(new Date(snapshot.quote.timestamp || snapshot.updatedAt).toLocaleTimeString());
+      } else if (snapshot.updatedAt) {
+        setLastUpdated(new Date(snapshot.updatedAt).toLocaleTimeString());
+      }
+
+      if (snapshot.position?.symbol === profile.mainMarket) {
+        const brokerPosition = snapshot.position;
+        const fallbackStop = getSmartStop({
+          direction: brokerPosition.direction,
+          entry: brokerPosition.entry,
+          resistance,
+          riskPoints,
+          support,
+        }).smartStop;
+        const trim1 = brokerPosition.direction === "long" ? brokerPosition.entry + profile.trim1Points : brokerPosition.entry - profile.trim1Points;
+        const trim2 = brokerPosition.direction === "long" ? brokerPosition.entry + profile.trim2Points : brokerPosition.entry - profile.trim2Points;
+        const runner = brokerPosition.direction === "long" ? brokerPosition.entry + profile.runnerPoints : brokerPosition.entry - profile.runnerPoints;
+
+        setDirection(brokerPosition.direction);
+        setEntry(brokerPosition.entry);
+        setContracts(brokerPosition.contracts);
+        setActivePosition({
+          ...brokerPosition,
+          stop: brokerPosition.stop ?? fallbackStop,
+          target: brokerPosition.target ?? runner,
+          trim1,
+          trim2,
+          runner,
+        });
+        setPlannedTrade({
+          ...brokerPosition,
+          setupType: "Broker Connection",
+          status: "active",
+          stop: brokerPosition.stop ?? fallbackStop,
+          target: brokerPosition.target ?? runner,
+          trim1,
+          trim2,
+          runner,
+        });
+        setFastMessage(`${snapshot.platform} synced an active ${brokerPosition.direction} position.`);
+      } else if (snapshot.connected && !snapshot.position) {
+        setActivePosition(null);
+        setPlannedTrade(null);
+        setFastMessage(`${snapshot.platform} is connected. No active position detected.`);
+      }
+    };
+
+    if (dataSource === "Broker Connection") {
+      if (!canUseLocalMarketServer) {
+        setPriceStatus("Broker connection requires the local market server at 127.0.0.1:8787.");
+        return undefined;
+      }
+
+      const stream = new EventSource(`${marketServerUrl}/api/broker/stream?symbol=${profile.mainMarket}`);
+      let demoTimer;
 
       stream.onmessage = (event) => {
+        applyBrokerSnapshot(JSON.parse(event.data));
+        setPriceStatus("");
+      };
+
+      stream.onerror = () => {
+        stream.close();
+        setPriceStatus("Broker stream unavailable. Start the local market server, then reconnect.");
+      };
+
+      if (brokerConnection.platform === "Demo Broker") {
+        demoTimer = setInterval(() => {
+          fetch(`${marketServerUrl}/api/broker/demo/tick?symbol=${profile.mainMarket}`).catch(() => {
+            setPriceStatus("Demo broker tick unavailable. Start the local market server.");
+          });
+        }, 1000);
+      }
+
+      return () => {
+        stream.close();
+        if (demoTimer) clearInterval(demoTimer);
+      };
+    }
+
+    if (dataSource === "Market Data API" && canUseLocalMarketServer) {
+      const stream = new EventSource(`${marketServerUrl}/api/market/stream?symbol=${profile.mainMarket}`);
+
+      const handleQuote = (event) => {
         const quotePayload = JSON.parse(event.data);
         setPrice(quotePayload.price);
         setQuote({ bid: quotePayload.bid, ask: quotePayload.ask });
         setLastUpdated(new Date(quotePayload.timestamp).toLocaleTimeString());
         setPriceStatus("");
       };
+
+      stream.onmessage = handleQuote;
+      stream.addEventListener("quote", handleQuote);
 
       stream.onerror = () => {
         stream.close();
@@ -298,7 +459,7 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [autoPrice, dataSource, profile.mainMarket]);
+  }, [autoPrice, brokerConnection.platform, dataSource, profile, resistance, riskPoints, support]);
 
   const engine = useMemo(() => {
     return calculateTrade({
@@ -474,6 +635,48 @@ export default function App() {
     setActivePage("dashboard");
   };
 
+  const startDemoBroker = async () => {
+    try {
+      const response = await fetch(`${marketServerUrl}/api/broker/demo/start`, {
+        body: JSON.stringify({ symbol: profile.mainMarket }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Demo broker unavailable.");
+
+      setBrokerConnection(result.snapshot);
+      setDataSource("Broker Connection");
+      setAutoPrice(true);
+      setFastMessage("Demo Broker connected. Live simulated price and position data are streaming.");
+      setActivePage("dashboard");
+    } catch (error) {
+      setPriceStatus(error.message || "Start the local market server to use Demo Broker mode.");
+      setActivePage("connections");
+    }
+  };
+
+  const connectTradovateReadOnly = async (mode) => {
+    try {
+      const response = await fetch(`${marketServerUrl}/api/tradovate/auth?mode=${mode}`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Tradovate read-only connection failed.");
+
+      const snapshotResponse = await fetch(`${marketServerUrl}/api/tradovate/market-price?mode=${mode}&symbol=${profile.mainMarket}`);
+      const snapshot = await snapshotResponse.json();
+      if (!snapshotResponse.ok) throw new Error(snapshot.error || "Tradovate market data unavailable.");
+
+      setBrokerConnection(snapshot.snapshot || snapshot);
+      setDataSource(mode === "live" ? tradovateModes.live : tradovateModes.demo);
+      setAutoPrice(true);
+      setFastMessage(`${mode === "live" ? "Live" : "Demo"} Tradovate read-only connected. Trading actions remain disabled.`);
+      setActivePage("dashboard");
+    } catch (error) {
+      setPriceStatus(error.message || "Tradovate read-only connection is not configured.");
+      setActivePage("connections");
+    }
+  };
+
   return (
     <div style={styles.page}>
       <div style={styles.shell}>
@@ -490,6 +693,14 @@ export default function App() {
           </div>
 
           <div style={styles.topActions}>
+            <label style={styles.streamerToggle}>
+              <input
+                type="checkbox"
+                checked={streamerMode}
+                onChange={(event) => setStreamerMode(event.target.checked)}
+              />
+              Streamer Mode
+            </label>
             {navigationTabs.map((tab) => (
               <button
                 key={tab}
@@ -525,6 +736,7 @@ export default function App() {
             activePosition={activePosition}
             applyQuickSetup={applyQuickSetup}
             autoPrice={autoPrice}
+            brokerConnection={brokerConnection}
             contracts={contracts}
             dataSource={dataSource}
             direction={direction}
@@ -558,9 +770,25 @@ export default function App() {
             setResistance={setResistance}
             setRiskPoints={setRiskPoints}
             setSupport={setSupport}
+            streamerMode={streamerMode}
             support={support}
             updateDiscipline={updateDiscipline}
             updateProfile={updateProfile}
+          />
+        ) : null}
+        {activePage === "connections" ? (
+          <ConnectionsPage
+            activePosition={activePosition}
+            brokerConnection={brokerConnection}
+            dataSource={dataSource}
+            discipline={discipline}
+            engine={engine}
+            lastUpdated={lastUpdated}
+            price={price}
+            profile={profile}
+            quote={quote}
+            connectTradovateReadOnly={connectTradovateReadOnly}
+            startDemoBroker={startDemoBroker}
           />
         ) : null}
         {activePage === "install" ? <InstallPage canInstall={Boolean(installPrompt)} onInstall={installApp} /> : null}
@@ -580,6 +808,8 @@ export default function App() {
             updateProfile={updateProfile}
           />
         ) : null}
+        <AlphaSignup />
+        <AppFooter />
       </div>
 
       {settingsOpen ? (
@@ -618,6 +848,9 @@ function DisclaimerModal({ onAccept }) {
         <h2 style={styles.sectionTitle}>Before You Use Trade Pilot</h2>
         <p style={styles.disclaimerText}>
           Trade Pilot is an educational trading assistant designed to help users organize trade ideas and manage risk.
+        </p>
+        <p style={styles.muted}>
+          Trade Pilot is an educational execution assistant. It does not provide financial advice and does not place trades.
         </p>
         <p style={styles.muted}>
           Trade Pilot does not provide financial advice and does not guarantee profits.
@@ -722,6 +955,7 @@ function Dashboard({
   activePosition,
   applyQuickSetup,
   autoPrice,
+  brokerConnection,
   contracts,
   dataSource,
   direction,
@@ -755,6 +989,7 @@ function Dashboard({
   setResistance,
   setRiskPoints,
   setSupport,
+  streamerMode,
   support,
   updateDiscipline,
   updateProfile,
@@ -792,6 +1027,11 @@ function Dashboard({
   const simpleAction = simpleBias === "LONG" ? "Look Long" : simpleBias === "SHORT" ? "Look Short" : "No trade";
   const setupName = `${setupType} ${setupDirection}`;
   const hasPlan = Boolean(plannedTrade || activePosition);
+  const chartData = useMemo(
+    () => buildChartData({ price, entry, stop: engine.smartStop, support, resistance, trim1: engine.trim1, trim2: engine.trim2, runner: engine.runner }),
+    [engine.runner, engine.smartStop, engine.trim1, engine.trim2, entry, price, resistance, support],
+  );
+  const liveCoach = getLiveCoachMessage({ activePosition, discipline, engine, price, profile, visualPlan });
   const riskStatus = engine.disciplineWarnings.some((warning) => warning.includes("Stop") || warning.includes("loss limit reached") || warning.includes("exceeded"))
     ? "Stop Trading"
     : engine.disciplineWarnings.some((warning) => warning.includes("Warning") || warning.includes("approaching") || warning.includes("High risk") || warning.includes("too large") || warning.includes("Contracts"))
@@ -807,6 +1047,18 @@ function Dashboard({
 
   return (
     <>
+      {streamerMode ? (
+        <LivestreamDashboard
+          activePosition={activePosition}
+          engine={engine}
+          price={price}
+          profile={profile}
+          riskStatus={riskStatus}
+          visualPlan={visualPlan}
+          coachMessage={liveCoach}
+        />
+      ) : null}
+
       <section style={styles.marketTopBar}>
         <SelectField label="Market" value={profile.mainMarket} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
         <div style={styles.marketTopMetric}>
@@ -818,6 +1070,18 @@ function Dashboard({
           <strong>{marketSpec.tickSize}</strong>
         </div>
       </section>
+
+      <TradeChartPanel
+        chartData={chartData}
+        currentPrice={price}
+        entry={entry}
+        runner={engine.runner}
+        stop={engine.smartStop}
+        support={support}
+        resistance={resistance}
+        trim1={engine.trim1}
+        trim2={engine.trim2}
+      />
 
       <section style={styles.alphaTopGrid}>
         <div style={styles.scoreCard}>
@@ -1081,6 +1345,18 @@ function Dashboard({
             <span>Last updated: {lastUpdated}</span>
           </div>
           {priceStatus ? <div style={styles.priceWarning}>{priceStatus}</div> : null}
+          {dataSource === "Broker Connection" ? (
+            <div style={styles.brokerStatusCard}>
+              <span style={{ ...styles.statusPill, background: brokerConnection.connected ? "#166534" : "#3f3f46" }}>
+                {brokerConnection.connected ? "Connected" : "Waiting"}
+              </span>
+              <span>{brokerConnection.platform}</span>
+              <span>{brokerConnection.accountId || "No account linked"}</span>
+              <span>Balance: ${Number(brokerConnection.accountBalance || 0).toFixed(2)}</span>
+              <span>Open P/L: ${Number(brokerConnection.openPnl || 0).toFixed(2)}</span>
+              <span>Realized P/L: ${Number(brokerConnection.realizedPnl || 0).toFixed(2)}</span>
+            </div>
+          ) : null}
 
           <Control label="Current Price" tooltip={tooltipText.currentPrice} value={price} setValue={setPrice} min={rangeMin} max={rangeMax} disabled={autoPrice} />
           <Control label="Support" tooltip={tooltipText.support} value={support} setValue={setSupport} min={rangeMin} max={rangeMax} />
@@ -1093,6 +1369,11 @@ function Dashboard({
         <section style={styles.card}>
           <p style={styles.cardLabel}>Active Position Detection</p>
           <h2 style={styles.sectionTitle}>{activePosition ? "Position Detected" : "No Active Position"}</h2>
+          {brokerConnection.connected ? (
+            <p style={{ ...styles.muted, marginBottom: "14px" }}>
+              Broker bridge: {brokerConnection.platform}. Recent fills: {brokerConnection.fills?.length ?? 0}.
+            </p>
+          ) : null}
           <div style={styles.metricGrid}>
             <Metric label="Direction" value={activePosition ? activePosition.direction.toUpperCase() : direction.toUpperCase()} />
             <Metric label="Entry" value={(activePosition?.entry ?? entry).toFixed(2)} />
@@ -1497,6 +1778,93 @@ function ShareSetupPanel({ contracts, engine, market, plan, rewardRisk, setupNam
   );
 }
 
+function buildChartData({ price, entry, stop, support, resistance, trim1, trim2, runner }) {
+  const levels = [price, entry, stop, support, resistance, trim1, trim2, runner].filter((value) => Number.isFinite(Number(value)));
+  const center = Number(price) || 0;
+  const spread = Math.max(8, (Math.max(...levels) - Math.min(...levels)) || center * 0.002);
+
+  return Array.from({ length: 34 }, (_, index) => {
+    const wave = Math.sin(index / 2.4) * spread * 0.22;
+    const slope = (index - 17) * spread * 0.012;
+    const close = index === 33 ? price : center + wave + slope + Math.cos(index / 1.7) * spread * 0.08;
+    return {
+      close: Number(close.toFixed(2)),
+      label: `${index + 1}`,
+    };
+  });
+}
+
+function getLiveCoachMessage({ activePosition, discipline, engine, price, profile, visualPlan }) {
+  if (discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss)) return "Daily loss limit reached. Stop trading.";
+  if (!visualPlan?.entry || !visualPlan?.stop) return "No active trade plan. Define entry, stop, and targets first.";
+  if ((activePosition?.contracts || visualPlan.contracts || 0) > profile.maxContracts) return "High risk size detected. Reduce contracts.";
+
+  const isLong = (activePosition?.direction || visualPlan.direction) !== "short";
+  const stopHit = isLong ? price <= visualPlan.stop : price >= visualPlan.stop;
+  const trim1Hit = isLong ? price >= visualPlan.trim1 : price <= visualPlan.trim1;
+
+  if (stopHit) return "Stop area reached. Respect your plan.";
+  if (trim1Hit) return "Trim 1 reached. Consider taking partial profit.";
+  if (engine.bias.includes("WAIT")) return "Price is mid-range. Wait for support, resistance, or breakout.";
+  return engine.autoCoaching[0] || "Hold plan. Let price reach a decision level.";
+}
+
+function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support, resistance, trim1, trim2 }) {
+  return (
+    <section style={styles.chartPanel}>
+      <div style={styles.sectionHeader}>
+        <div>
+          <p style={styles.cardLabel}>Chart View</p>
+          <h2 style={styles.sectionTitle}>Live Trade Map</h2>
+        </div>
+        <strong style={styles.chartPrice}>{Number(currentPrice).toFixed(2)}</strong>
+      </div>
+      <div style={styles.chartWrap}>
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={chartData} margin={{ top: 12, right: 22, bottom: 8, left: 0 }}>
+            <CartesianGrid stroke="#1f2937" strokeDasharray="4 4" />
+            <XAxis dataKey="label" hide />
+            <YAxis domain={["dataMin - 12", "dataMax + 12"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={64} />
+            <Tooltip contentStyle={{ background: "#020617", border: "1px solid #334155", borderRadius: "10px", color: "#f8fafc" }} />
+            <Line type="monotone" dataKey="close" stroke="#f8fafc" strokeWidth={3} dot={false} isAnimationActive={false} />
+            <ReferenceLine y={currentPrice} label="Price" stroke="#facc15" strokeWidth={2} />
+            <ReferenceLine y={entry} label="Entry" stroke="#3b82f6" strokeWidth={2} />
+            <ReferenceLine y={stop} label="Stop" stroke="#ef4444" strokeWidth={2} />
+            <ReferenceLine y={trim1} label="Trim 1" stroke="#22c55e" />
+            <ReferenceLine y={trim2} label="Trim 2" stroke="#16a34a" />
+            <ReferenceLine y={runner} label="Runner" stroke="#86efac" />
+            <ReferenceLine y={support} label="Support" stroke="#14b8a6" strokeDasharray="5 5" />
+            <ReferenceLine y={resistance} label="Resistance" stroke="#f97316" strokeDasharray="5 5" />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </section>
+  );
+}
+
+function LivestreamDashboard({ activePosition, coachMessage, engine, price, profile, riskStatus, visualPlan }) {
+  const positionLabel = activePosition ? `${activePosition.direction.toUpperCase()} ${activePosition.contracts}` : "No Position";
+
+  return (
+    <section style={styles.livestreamPanel}>
+      <div>
+        <p style={styles.cardLabel}>Livestream Dashboard</p>
+        <h2 style={styles.livePrice}>{profile.mainMarket} {Number(price).toFixed(2)}</h2>
+        <p style={styles.liveSubline}>{positionLabel} | Entry {Number(visualPlan.entry || 0).toFixed(2)}</p>
+      </div>
+      <div style={styles.liveMetricGrid}>
+        <Metric label="Trade Score" value={`${engine.score}/100`} />
+        <Metric label="Open P/L" value={`$${engine.openPnl.toFixed(2)}`} tone={engine.openPnl >= 0 ? "good" : "bad"} />
+        <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : "warn"} />
+        <Metric label="Stop" value={Number(visualPlan.stop || engine.smartStop).toFixed(2)} />
+        <Metric label="Trim 1" value={Number(visualPlan.trim1 || engine.trim1).toFixed(2)} />
+        <Metric label="Runner" value={Number(visualPlan.runner || engine.runner).toFixed(2)} />
+      </div>
+      <div style={styles.liveCoach}>{coachMessage}</div>
+    </section>
+  );
+}
+
 function getSmartStop({ direction, entry, resistance, riskPoints, support }) {
   const isLong = direction === "long";
   const structureStop = isLong ? support - 1 : resistance + 1;
@@ -1513,8 +1881,152 @@ function getSmartStop({ direction, entry, resistance, riskPoints, support }) {
   };
 }
 
+function getConnectionStatusLabel(connection) {
+  if (!connection?.connected) return "Not Connected";
+  if (connection.platform === "Demo Broker") return "Demo Connected";
+  if (connection.platform?.toLowerCase().includes("tradovate")) return "Tradovate Connected";
+  if (connection.platform === "TradingView Webhook") return "TradingView Connected";
+  return `${connection.platform} Connected`;
+}
+
+function buildBrokerSafetyWarnings({ activePosition, brokerConnection, discipline, engine, profile }) {
+  const warnings = [...engine.disciplineWarnings];
+  const position = brokerConnection?.position || activePosition;
+  const contracts = Number(position?.contracts || 0);
+  const dailyLossHit = discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss);
+
+  if (contracts > profile.maxContracts) warnings.push("Position size too large for your profile.");
+  if (dailyLossHit) warnings.push("Daily loss limit hit. Stop trading and review.");
+  if (discipline.tradesTaken >= profile.maxTradesPerDay) warnings.push("Too many trades today. Further trades increase mistake risk.");
+  if (discipline.tradesTaken >= Math.max(3, profile.maxTradesPerDay - 1) && discipline.dailyPnl < 0) warnings.push("Revenge trading risk detected after repeated losses.");
+  if (position && !Number.isFinite(Number(position.stop))) warnings.push("Stop missing. Add a defined exit before continuing.");
+  if (!position && !activePosition) warnings.push("No trade plan active.");
+
+  return [...new Set(warnings)];
+}
+
+function ConnectionsPage({
+  activePosition,
+  brokerConnection,
+  connectTradovateReadOnly,
+  dataSource,
+  discipline,
+  engine,
+  lastUpdated,
+  price,
+  profile,
+  quote,
+  startDemoBroker,
+}) {
+  const [tradovateStatus, setTradovateStatus] = useState(null);
+  const statusLabel = brokerConnection.error ? "Error" : getConnectionStatusLabel(brokerConnection);
+  const position = brokerConnection.position || activePosition;
+  const safetyWarnings = buildBrokerSafetyWarnings({ activePosition, brokerConnection, discipline, engine, profile });
+
+  const checkTradovateReadOnly = async () => {
+    try {
+      const response = await fetch(`${marketServerUrl}/api/tradovate/read-only/status`);
+      setTradovateStatus(await response.json());
+    } catch {
+      setTradovateStatus({
+        connected: false,
+        provider: "Tradovate",
+        security: "Start the local market server to inspect read-only readiness.",
+      });
+    }
+  };
+
+  return (
+    <main style={styles.mainGrid}>
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Connection Status</p>
+        <h2 style={styles.sectionTitle}>{statusLabel}</h2>
+        <div style={styles.connectionGrid}>
+          <Metric label="Market" value={profile.mainMarket} />
+          <Metric label="Current Price" value={Number(price).toFixed(2)} />
+          <Metric label="Bid" value={Number(quote.bid || 0).toFixed(2)} />
+          <Metric label="Ask" value={Number(quote.ask || 0).toFixed(2)} />
+          <Metric label="Position" value={position ? position.direction.toUpperCase() : "Flat"} />
+          <Metric label="Entry" value={position ? Number(position.entry).toFixed(2) : "None"} />
+          <Metric label="Contracts" value={String(position?.contracts ?? 0)} />
+          <Metric label="Open P/L" value={`$${Number(brokerConnection.openPnl ?? engine.openPnl ?? 0).toFixed(2)}`} tone={Number(brokerConnection.openPnl ?? 0) >= 0 ? "good" : "bad"} />
+          <Metric label="Realized P/L" value={`$${Number(brokerConnection.realizedPnl || 0).toFixed(2)}`} />
+          <Metric label="Account Balance" value={`$${Number(brokerConnection.accountBalance || profile.accountSize).toFixed(2)}`} />
+          <Metric label="Data Source" value={dataSource} />
+          <Metric label="Last Updated" value={lastUpdated} />
+        </div>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Phase 1</p>
+        <h2 style={styles.sectionTitle}>Demo / Simulated Broker</h2>
+        <p style={styles.muted}>Simulates live price, open position, entry, contracts, open P/L, realized P/L, and account balance.</p>
+        <button onClick={startDemoBroker} style={{ ...styles.settingsButton, marginTop: "16px" }}>Connect Demo Broker</button>
+        <div style={{ ...styles.metricGrid, marginTop: "16px" }}>
+          <Metric label="Bid" value={Number(quote.bid || 0).toFixed(2)} />
+          <Metric label="Ask" value={Number(quote.ask || 0).toFixed(2)} />
+          <Metric label="Working Orders" value={String(brokerConnection.workingOrders?.length || 0)} />
+          <Metric label="Filled Orders" value={String(brokerConnection.fills?.length || 0)} />
+        </div>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Connection Options</p>
+        <h2 style={styles.sectionTitle}>Read-Only Sources</h2>
+        <div style={styles.sourceGrid}>
+          <SourceOption title="Manual Mode" text="Use dashboard inputs, sliders, and Fast Mode without external broker data." active={dataSource === "Manual"} />
+          <SourceOption title="Demo / Simulated Broker" text="Connects to the local demo stream for safe testing." active={brokerConnection.platform === "Demo Broker"} />
+          <SourceOption title="Tradovate Demo Read-Only" text="Uses demo.tradovateapi.com/v1 and server-side credentials only." active={dataSource === tradovateModes.demo} />
+          <SourceOption title="Tradovate Live Read-Only" text="Uses live.tradovateapi.com/v1 with order placement disabled." active={dataSource === tradovateModes.live} />
+          <SourceOption title="TradingView Webhook Later" text="Accepts symbol, price, signal type, support, resistance, and timestamp." />
+          <SourceOption title="CSV Import" text="Reserved for trade-history review and coaching analytics." />
+        </div>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Phase 2</p>
+        <h2 style={styles.sectionTitle}>Tradovate Read-Only Prep</h2>
+        <p style={styles.muted}>Broker passwords never go in frontend code. Environment variables and OAuth/API tokens belong on the backend only.</p>
+        <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
+          <button onClick={() => connectTradovateReadOnly("demo")} style={styles.settingsButton}>Connect Demo Read-Only</button>
+          <button onClick={() => connectTradovateReadOnly("live")} style={styles.dismissButton}>Connect Live Read-Only</button>
+          <button onClick={checkTradovateReadOnly} style={styles.secondaryButton}>Check API Plan</button>
+        </div>
+        {tradovateStatus ? (
+          <div style={{ ...styles.warningStack, marginTop: "16px" }}>
+            <PlanItem title="Reads" text={(tradovateStatus.reads || tradovateStatus.capabilities || []).join(", ")} />
+            <PlanItem title="Security" text={tradovateStatus.security} />
+            <PlanItem title="Trading Actions" text={tradovateStatus.tradingActionsEnabled === false ? "Disabled. No order placement endpoints are available." : "Disabled until explicitly approved later."} />
+          </div>
+        ) : null}
+      </section>
+
+      <section style={styles.safetyCard}>
+        <p style={styles.cardLabel}>Phase 4</p>
+        <h2 style={styles.sectionTitle}>Broker Safety Layer</h2>
+        <div style={styles.warningStack}>
+          {safetyWarnings.map((warning) => (
+            <div key={warning} style={styles.warningBox}>{warning}</div>
+          ))}
+        </div>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Phase 5</p>
+        <h2 style={styles.sectionTitle}>Future Approval Mode</h2>
+        <PlanItem title="Manual Confirmation" text="Any future order action must require explicit user confirmation." />
+        <PlanItem title="No Fully Automatic Trading" text="Autonomous order placement remains out of scope." />
+        <PlanItem title="Audit Log" text="Future approvals should create a permanent action log with timestamp, user intent, and broker response." />
+        <PlanItem title="Legal Disclaimers" text="Any trading action workflow must include clear risk and responsibility language." />
+      </section>
+    </main>
+  );
+}
+
 function DataSourcePage({ applyAlert }) {
   const [webhookText, setWebhookText] = useState('{"symbol":"MNQ","price":27462,"direction":"long","support":27420,"resistance":27450,"signalType":"breakout"}');
+  const [brokerText, setBrokerText] = useState(JSON.stringify(brokerSamplePayload, null, 2));
+  const [brokerStatus, setBrokerStatus] = useState(null);
   const [message, setMessage] = useState("Broker trading is disabled. Trade Pilot only reads data and coaches execution.");
 
   const applyWebhookPreview = () => {
@@ -1534,6 +2046,23 @@ function DataSourcePage({ applyAlert }) {
     }
   };
 
+  const syncBrokerPreview = async () => {
+    try {
+      const parsed = JSON.parse(brokerText);
+      const response = await fetch(`${marketServerUrl}/api/broker/sync`, {
+        body: JSON.stringify(parsed),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Broker sync failed.");
+      setBrokerStatus(result.snapshot);
+      setMessage("Broker snapshot synced. Choose Broker Connection on the dashboard to stream it live.");
+    } catch (error) {
+      setMessage(error.message || "Broker payload must be valid JSON.");
+    }
+  };
+
   return (
     <main style={styles.mainGrid}>
       <section style={styles.card}>
@@ -1541,17 +2070,33 @@ function DataSourcePage({ applyAlert }) {
         <h2 style={styles.sectionTitle}>Read-Only Modes</h2>
         <div style={styles.sourceGrid}>
           <SourceOption title="Manual Mode" text="Use sliders and Fast Mode buttons during live execution." active />
-          <SourceOption title="TradingView Alerts" text="Future webhook alerts can send symbol, price, direction, support, resistance, and signal type." />
-          <SourceOption title="Market Data API" text="Uses the local read-only market server at 127.0.0.1:8787 for mock streaming now, and can be swapped for a licensed provider later." />
-          <SourceOption title="Broker Connection" text="Planned read-only connectors for Tradovate, NinjaTrader data, Rithmic data, and Interactive Brokers." />
+          <SourceOption title="TradingView Alerts" text="Webhook alerts can send symbol, price, direction, support, resistance, and signal type." />
+          <SourceOption title="Market Data API" text="Uses the local read-only market server at 127.0.0.1:8787 for streaming prices." />
+          <SourceOption title="Broker Connection" text="Reads position, fill, account, and quote snapshots from a local platform bridge." />
           <SourceOption title="CSV Upload" text="Planned manual trade-history import for review and coaching analytics." />
         </div>
       </section>
 
       <section style={styles.card}>
+        <p style={styles.cardLabel}>Broker Connection</p>
+        <h2 style={styles.sectionTitle}>Local Read-Only Bridge</h2>
+        <p style={styles.muted}>A brokerage or platform adapter can post snapshots here. Trade Pilot reads positions and fills for coaching; it never sends orders.</p>
+        <textarea value={brokerText} onChange={(event) => setBrokerText(event.target.value)} style={styles.textArea} />
+        <button onClick={syncBrokerPreview} style={styles.settingsButton}>Sync Broker Snapshot</button>
+        {brokerStatus ? (
+          <div style={{ ...styles.metricGrid, marginTop: "14px" }}>
+            <Metric label="Platform" value={brokerStatus.platform} />
+            <Metric label="Account" value={brokerStatus.accountId || "Read-only"} />
+            <Metric label="Position" value={brokerStatus.position ? `${brokerStatus.position.direction.toUpperCase()} ${brokerStatus.position.contracts} ${brokerStatus.position.symbol}` : "Flat"} />
+            <Metric label="Updated" value={brokerStatus.updatedAt ? new Date(brokerStatus.updatedAt).toLocaleTimeString() : "Pending"} />
+          </div>
+        ) : null}
+      </section>
+
+      <section style={styles.card}>
         <p style={styles.cardLabel}>TradingView Webhook Mode</p>
         <h2 style={styles.sectionTitle}>Local Preview</h2>
-        <p style={styles.muted}>Paste a sample alert payload to populate the dashboard. No server endpoint is active yet.</p>
+        <p style={styles.muted}>Paste a sample alert payload to populate the dashboard.</p>
         <textarea value={webhookText} onChange={(event) => setWebhookText(event.target.value)} style={styles.textArea} />
         <button onClick={applyWebhookPreview} style={styles.settingsButton}>Apply Alert Preview</button>
         <p style={{ ...styles.muted, marginTop: "12px" }}>{message}</p>
@@ -1560,9 +2105,9 @@ function DataSourcePage({ applyAlert }) {
       <section style={styles.card}>
         <p style={styles.cardLabel}>Broker/Platform Plan</p>
         <h2 style={styles.sectionTitle}>Safety-First Integrations</h2>
-        <PlanItem title="Tradovate API" text="Read account, position, and fill data for coaching. Order placement remains disabled." />
-        <PlanItem title="NinjaTrader Add-on/Export" text="Import position and trade-history exports before considering a local add-on." />
-        <PlanItem title="Rithmic / Prop Firm Data" text="Use only approved read data if available from the platform or firm." />
+        <PlanItem title="Tradovate API" text="Use an adapter to post read-only account, position, and fill data into the local bridge." />
+        <PlanItem title="NinjaTrader Add-on/Export" text="A local add-on can post snapshots while the platform keeps order control." />
+        <PlanItem title="Rithmic / Prop Firm Data" text="Use approved read data only, based on the platform and firm rules." />
         <PlanItem title="CSV / Manual Import" text="Start with uploadable trade history for review and analytics." />
       </section>
 
@@ -1815,6 +2360,73 @@ function SourceOption({ title, text, active }) {
   );
 }
 
+function AlphaSignup() {
+  const [form, setForm] = useState({ email: "", market: "MNQ", traderType: "intermediate" });
+  const [status, setStatus] = useState("");
+
+  const submit = async (event) => {
+    event.preventDefault();
+    const email = form.email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setStatus("Enter a valid email.");
+      return;
+    }
+
+    const payload = { ...form, email, timestamp: new Date().toISOString() };
+
+    try {
+      const response = await fetch(`${marketServerUrl}/api/subscribe`, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      if (!response.ok) throw new Error("Subscriber endpoint unavailable.");
+    } catch {
+      const saved = loadList(subscriberStorageKey);
+      localStorage.setItem(subscriberStorageKey, JSON.stringify([payload, ...saved]));
+    }
+
+    setForm((current) => ({ ...current, email: "" }));
+    setStatus("You're on the Trade Pilot alpha list.");
+  };
+
+  return (
+    <section style={styles.signupSection}>
+      <div>
+        <p style={styles.cardLabel}>Early Access</p>
+        <h2 style={styles.sectionTitle}>Join the Trade Pilot alpha list.</h2>
+      </div>
+      <form onSubmit={submit} style={styles.signupForm}>
+        <input
+          aria-label="Email"
+          placeholder="email@example.com"
+          value={form.email}
+          onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
+          style={styles.fieldInput}
+        />
+        <select value={form.traderType} onChange={(event) => setForm((current) => ({ ...current, traderType: event.target.value }))} style={styles.fieldInput}>
+          <option value="beginner">Beginner</option>
+          <option value="intermediate">Intermediate</option>
+          <option value="advanced">Advanced</option>
+        </select>
+        <select value={form.market} onChange={(event) => setForm((current) => ({ ...current, market: event.target.value }))} style={styles.fieldInput}>
+          {["MNQ", "NQ", "ES", "options", "crypto", "other"].map((option) => <option key={option} value={option}>{option}</option>)}
+        </select>
+        <button style={styles.settingsButton}>Join Alpha</button>
+      </form>
+      {status ? <p style={styles.signupStatus}>{status}</p> : null}
+    </section>
+  );
+}
+
+function AppFooter() {
+  return (
+    <footer style={styles.footer}>
+      Trading futures involves substantial risk. Trade Pilot is for education and trade planning only.
+    </footer>
+  );
+}
+
 function PlanItem({ title, text }) {
   return (
     <div style={styles.planItem}>
@@ -1959,6 +2571,19 @@ const styles = {
     display: "flex",
     gap: "10px",
     flexWrap: "wrap",
+  },
+  streamerToggle: {
+    alignItems: "center",
+    background: "#020617",
+    border: "1px solid #334155",
+    borderRadius: "12px",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    display: "flex",
+    fontSize: "13px",
+    fontWeight: 900,
+    gap: "8px",
+    padding: "10px 12px",
   },
   riskBanner: {
     background: "rgba(120, 53, 15, .35)",
@@ -2229,6 +2854,57 @@ const styles = {
     borderRadius: "16px",
     boxShadow: "0 18px 45px rgba(0,0,0,.35)",
     padding: "22px",
+  },
+  chartPanel: {
+    background: "rgba(2, 6, 23, .94)",
+    border: "1px solid #334155",
+    borderRadius: "16px",
+    marginBottom: "16px",
+    padding: "18px",
+  },
+  chartWrap: {
+    height: "320px",
+    minWidth: 0,
+  },
+  chartPrice: {
+    color: "#facc15",
+    fontSize: "28px",
+  },
+  livestreamPanel: {
+    background: "linear-gradient(135deg, rgba(2,6,23,.98), rgba(12,74,110,.9))",
+    border: "1px solid #38bdf8",
+    borderRadius: "16px",
+    display: "grid",
+    gap: "18px",
+    marginBottom: "16px",
+    padding: "24px",
+  },
+  livePrice: {
+    color: "#f8fafc",
+    fontSize: "54px",
+    lineHeight: 1,
+    margin: 0,
+  },
+  liveSubline: {
+    color: "#bae6fd",
+    fontSize: "18px",
+    fontWeight: 900,
+    margin: "10px 0 0",
+  },
+  liveMetricGrid: {
+    display: "grid",
+    gap: "12px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+  },
+  liveCoach: {
+    background: "#020617",
+    border: "1px solid #0e7490",
+    borderRadius: "12px",
+    color: "#e0f2fe",
+    fontSize: "24px",
+    fontWeight: 900,
+    lineHeight: 1.2,
+    padding: "16px",
   },
   fastCard: {
     alignItems: "center",
@@ -2549,6 +3225,27 @@ const styles = {
     justifyContent: "space-between",
     marginBottom: "10px",
   },
+  brokerStatusCard: {
+    alignItems: "center",
+    background: "#020617",
+    border: "1px solid #1e293b",
+    borderRadius: "12px",
+    color: "#dbeafe",
+    display: "flex",
+    flexWrap: "wrap",
+    fontSize: "13px",
+    fontWeight: 800,
+    gap: "10px",
+    marginBottom: "12px",
+    padding: "10px 12px",
+  },
+  statusPill: {
+    borderRadius: "999px",
+    color: "white",
+    fontSize: "12px",
+    fontWeight: 900,
+    padding: "5px 9px",
+  },
   priceTape: {
     display: "grid",
     gap: "10px",
@@ -2701,11 +3398,44 @@ const styles = {
     gap: "12px",
     gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
   },
+  connectionGrid: {
+    display: "grid",
+    gap: "12px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))",
+  },
   sourceOption: {
     background: "#09090b",
     border: "1px solid #27272a",
     borderRadius: "14px",
     padding: "14px",
+  },
+  signupSection: {
+    alignItems: "center",
+    background: "rgba(15, 23, 42, .94)",
+    border: "1px solid #334155",
+    borderRadius: "16px",
+    display: "grid",
+    gap: "16px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+    marginTop: "18px",
+    padding: "18px",
+  },
+  signupForm: {
+    display: "grid",
+    gap: "10px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+  },
+  signupStatus: {
+    color: "#86efac",
+    fontWeight: 900,
+    margin: 0,
+  },
+  footer: {
+    color: "#a1a1aa",
+    fontSize: "12px",
+    fontWeight: 800,
+    padding: "22px 0 8px",
+    textAlign: "center",
   },
   planItem: {
     borderBottom: "1px solid #27272a",
