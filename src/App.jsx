@@ -1225,8 +1225,8 @@ export default function App() {
           .mobile-menu-button { display: inline-flex !important; }
           .mobile-launch-button { display: inline-flex !important; align-items: center; }
           .tradepilot-title { font-size: 34px !important; }
-          .tradepilot-header { align-items: flex-start !important; }
-          .tradepilot-top-actions { width: 100%; justify-content: space-between !important; }
+          .tradepilot-header { align-items: center !important; padding-top: 8px !important; }
+          .tradepilot-top-actions { position: static !important; width: 100%; justify-content: center !important; }
           .tradepilot-more-menu { left: 16px !important; right: 16px !important; top: calc(100% + 8px) !important; }
           .tradepilot-feedback { align-items: center; display: flex; font-size: 0 !important; height: 38px; justify-content: center; padding: 0 !important; width: 38px; }
           .tradepilot-feedback::after { content: "?"; font-size: 16px; }
@@ -1235,7 +1235,7 @@ export default function App() {
       `}</style>
       <div className="app-container" style={styles.shell}>
         <header className="tradepilot-header" style={styles.header}>
-          <div>
+          <div style={styles.headerBrand}>
             <p style={styles.eyebrow}>Trade Pilot Alpha</p>
             <h1 className="tradepilot-title" style={styles.title}>Trade Pilot</h1>
             <p style={styles.subtitle}>
@@ -1294,8 +1294,15 @@ export default function App() {
                   Launch App
                 </button>
                 <div style={styles.moreWrap}>
-                  <button className="mobile-menu-button" onClick={() => setMoreMenuOpen((open) => !open)} style={styles.secondaryButton}>
-                    More
+                  <button
+                    aria-label={moreMenuOpen ? "Close menu" : "Open menu"}
+                    className="mobile-menu-button"
+                    onClick={() => setMoreMenuOpen((open) => !open)}
+                    style={styles.menuButton}
+                  >
+                    <span style={styles.menuBar} />
+                    <span style={styles.menuBar} />
+                    <span style={styles.menuBar} />
                   </button>
                   {moreMenuOpen ? (
                     <div className="tradepilot-more-menu" style={styles.moreMenu}>
@@ -4608,9 +4615,15 @@ const styles = {
     alignItems: "center",
     display: "flex",
     gap: "18px",
-    justifyContent: "space-between",
+    justifyContent: "center",
     marginBottom: "22px",
+    minHeight: "104px",
+    position: "relative",
     flexWrap: "wrap",
+  },
+  headerBrand: {
+    maxWidth: "720px",
+    textAlign: "center",
   },
   headerMeta: {
     color: "#cbd5e1",
@@ -4619,14 +4632,41 @@ const styles = {
     fontSize: "12px",
     fontWeight: 900,
     gap: "8px",
+    justifyContent: "center",
     marginTop: "10px",
   },
   topActions: {
+    alignItems: "center",
     display: "flex",
     gap: "10px",
     flexWrap: "wrap",
     justifyContent: "flex-end",
-    position: "relative",
+    position: "absolute",
+    right: 0,
+    top: 0,
+    zIndex: 20,
+  },
+  menuButton: {
+    alignItems: "center",
+    background: "rgba(15, 23, 42, .96)",
+    border: "1px solid rgba(148, 163, 184, .36)",
+    borderRadius: "12px",
+    boxShadow: "0 12px 30px rgba(0,0,0,.28)",
+    cursor: "pointer",
+    display: "inline-flex",
+    flexDirection: "column",
+    gap: "4px",
+    height: "42px",
+    justifyContent: "center",
+    padding: 0,
+    width: "42px",
+  },
+  menuBar: {
+    background: "#e2e8f0",
+    borderRadius: "999px",
+    display: "block",
+    height: "2px",
+    width: "18px",
   },
   authActions: {
     alignItems: "center",
@@ -4672,6 +4712,7 @@ const styles = {
   },
   moreWrap: {
     position: "relative",
+    zIndex: 30,
   },
   moreMenu: {
     background: "rgba(2, 6, 23, .98)",
@@ -4685,7 +4726,7 @@ const styles = {
     position: "absolute",
     right: 0,
     top: "calc(100% + 8px)",
-    zIndex: 30,
+    zIndex: 40,
   },
   moreMenuItem: {
     background: "transparent",
@@ -4933,11 +4974,13 @@ const styles = {
   },
   title: {
     fontSize: "46px",
+    fontWeight: 950,
     lineHeight: 1,
     margin: 0,
   },
   subtitle: {
     color: "#a1a1aa",
+    fontSize: "16px",
     margin: "8px 0 0",
   },
   positioningText: {
