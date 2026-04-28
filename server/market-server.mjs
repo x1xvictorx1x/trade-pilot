@@ -101,6 +101,9 @@ function createDemoBrokerSnapshot(symbolInput) {
     accountId: demoBrokerState.accountId,
     ask: Number((nextPrice + tick).toFixed(2)),
     bid: Number((nextPrice - tick).toFixed(2)),
+    connected: true,
+    connectionStatus: "Demo Broker Connected",
+    dailyPnl: openPnl,
     fills: demoBrokerState.fills.length
       ? demoBrokerState.fills
       : [
@@ -124,6 +127,7 @@ function createDemoBrokerSnapshot(symbolInput) {
     },
     price: nextPrice,
     realizedPnl: demoBrokerState.realizedPnl,
+    source: "Simulated demo data",
     symbol,
     timestamp: new Date().toISOString(),
     workingOrders: [
@@ -152,11 +156,25 @@ function sendTradovateReadOnlyPlan(response) {
   });
 }
 
-function normalizeTradovateSnapshot({ accounts = [], market = {}, mode, orders = [], positions = [], symbol }) {
+function normalizeTradovateMode(value) {
+  const mode = String(value || "demo").toLowerCase();
+  if (mode === "prop" || mode === "funded") return "prop";
+  if (mode === "live") return "live";
+  return "demo";
+}
+
+function getTradovatePlatformLabel(mode) {
+  if (mode === "prop" || mode === "funded") return "Tradovate Prop/Funded Read-Only";
+  if (mode === "live") return "Tradovate Live Read-Only";
+  return "Tradovate Demo Read-Only";
+}
+
+function normalizeTradovateSnapshot({ accounts = [], fills = [], market = {}, mode, orders = [], positions = [], symbol }) {
   const normalizedSymbol = normalizeSymbol(symbol);
   const account = Array.isArray(accounts) ? accounts[0] || {} : accounts;
   const positionList = Array.isArray(positions) ? positions : [];
   const orderList = Array.isArray(orders) ? orders : [];
+  const fillList = Array.isArray(fills) ? fills : [];
   const position = positionList.find((item) => normalizeSymbol(item.symbol || item.contractName || item.contract?.name || normalizedSymbol) === normalizedSymbol) || positionList[0];
   const fallbackQuote = quoteFromBase(normalizedSymbol, latestQuotes.get(normalizedSymbol)?.price ?? marketDefaults[normalizedSymbol]);
   const quote = market.quote
@@ -175,22 +193,31 @@ function normalizeTradovateSnapshot({ accounts = [], market = {}, mode, orders =
     const status = String(order.ordStatus || order.status || "").toLowerCase();
     return status.includes("working") || status.includes("submitted") || status.includes("accepted") || (!status.includes("filled") && !status.includes("cancel"));
   });
-  const fills = orderList.filter((order) => String(order.ordStatus || order.status || "").toLowerCase().includes("filled"));
   const openPnl = Number(position?.openPnl ?? position?.unrealizedPnl ?? position?.pnl ?? position?.profitAndLoss ?? 0);
   const realizedPnl = Number(account.realizedPnl ?? account.realizedPnL ?? account.realizedProfitLoss ?? 0);
+  const accountOpenPnl = Number(account.openPnl) || 0;
+  const dailyPnlRaw = account.dailyPnl ?? account.dailyPnL ?? account.todayPnl ?? account.todayPnL ?? (accountOpenPnl + realizedPnl);
+  const dailyPnl = Number.isFinite(Number(dailyPnlRaw)) ? Number(dailyPnlRaw) : openPnl + realizedPnl;
+  const accountBalance = Number(account.cashBalance ?? account.netLiq ?? account.balance ?? account.netLiquidation ?? account.netLiquidatingValue ?? 0);
+  const accountId = account.id ? String(account.id) : account.accountId ? String(account.accountId) : account.name || "";
 
   return {
-    accountBalance: Number(account.cashBalance ?? account.netLiq ?? account.balance ?? account.netLiquidation ?? 0),
-    accountId: account.id ? String(account.id) : account.name || "",
+    accountBalance,
+    accountId,
+    accountName: account.name || account.nickname || accountId || "Tradovate Account",
+    accountType: mode === "prop" || mode === "funded" ? "funded/prop" : mode === "live" ? "personal live" : "demo",
     ask: quote.ask,
     bid: quote.bid,
-    fills,
+    dailyPnl,
+    fills: fillList,
     openPnl,
-    platform: mode === "live" ? "Tradovate Live Read-Only" : "Tradovate Demo Read-Only",
+    platform: getTradovatePlatformLabel(mode),
     position: size
       ? {
           averagePrice: entry,
+          contracts: Math.abs(size),
           direction: size > 0 ? "long" : "short",
+          entry,
           openPnl,
           quantity: Math.abs(size),
           status: "active",
@@ -206,15 +233,16 @@ function normalizeTradovateSnapshot({ accounts = [], market = {}, mode, orders =
 }
 
 async function buildTradovateSnapshot(mode, symbol) {
-  const [accounts, positions, orders, market] = await Promise.all([
+  const [accounts, positions, orders, fills, market] = await Promise.all([
     getTradovateAccounts(mode),
     getTradovatePositions(mode),
     getTradovateOrders(mode),
+    getTradovateFills(mode),
     getTradovateMarketPrice(mode, symbol),
   ]);
-  const snapshot = brokerBridge.applyPayload(normalizeTradovateSnapshot({ accounts, market, mode, orders, positions, symbol }));
+  const snapshot = brokerBridge.applyPayload(normalizeTradovateSnapshot({ accounts, fills, market, mode, orders, positions, symbol }));
   if (snapshot.quote) latestQuotes.set(snapshot.quote.symbol, snapshot.quote);
-  return { accounts, market, orders, positions, snapshot };
+  return { accounts, fills, market, orders, positions, snapshot };
 }
 
 const server = http.createServer(async (request, response) => {
@@ -241,7 +269,10 @@ const server = http.createServer(async (request, response) => {
     sendJson(response, 200, {
       accountId: snapshot.accountId,
       accountBalance: snapshot.accountBalance,
+      accountName: snapshot.accountName,
+      accountType: snapshot.accountType,
       connected: snapshot.connected,
+      dailyPnl: snapshot.dailyPnl,
       dataSource: snapshot.source,
       openPnl: snapshot.openPnl,
       platform: snapshot.platform,
@@ -296,9 +327,10 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "POST" && url.pathname === "/api/tradovate/auth") {
     const payload = await readBody(request);
-    const mode = payload.mode === "live" ? "live" : "demo";
+    const mode = normalizeTradovateMode(payload.mode || payload.accountType);
     const token = await authenticateTradovate(mode);
     sendJson(response, 200, {
+      accountType: token.accountType,
       connected: true,
       endpoint: token.endpoint.apiBase,
       hasLive: token.hasLive,
@@ -343,14 +375,14 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && (url.pathname === "/api/tradovate/market-price" || url.pathname === "/api/tradovate/quote" || url.pathname === "/api/tradovate/price")) {
-    const mode = url.searchParams.get("mode") === "live" ? "live" : "demo";
+    const mode = normalizeTradovateMode(url.searchParams.get("mode"));
     const symbol = normalizeSymbol(url.searchParams.get("symbol"));
     const { market, snapshot } = await buildTradovateSnapshot(mode, symbol);
     sendJson(response, 200, { market, snapshot });
     return;
   }
 
-  if (request.method === "POST" && url.pathname === "/api/tradingview/webhook") {
+  if (request.method === "POST" && (url.pathname === "/api/tradingview/webhook" || url.pathname === "/api/webhook/tradingview")) {
     const payload = await readBody(request);
     const symbol = normalizeSymbol(payload.symbol);
     const price = Number(payload.price);
@@ -358,19 +390,21 @@ const server = http.createServer(async (request, response) => {
       ask: Number((price + 0.25).toFixed(2)),
       bid: Number((price - 0.25).toFixed(2)),
       price,
-      signalType: payload.signalType,
-      source: "TradingView Alerts",
+      bias: payload.bias,
+      signalType: payload.signalType || payload.bias,
+      source: "TradingView Webhook",
       support: Number(payload.support),
       resistance: Number(payload.resistance),
       symbol,
       timestamp: payload.timestamp || new Date().toISOString(),
+      timeframe: payload.timeframe,
     };
     latestQuotes.set(symbol, quote);
     const snapshot = brokerBridge.applyPayload({
       platform: "TradingView Webhook",
       quote,
-      signalType: payload.signalType,
-      source: "TradingView Alerts",
+      signalType: payload.signalType || payload.bias,
+      source: "TradingView Webhook",
       symbol,
       timestamp: quote.timestamp,
     });

@@ -27,11 +27,11 @@ const watchlistStorageKey = "tradePilotWatchlist";
 const defaultProfile = {
   traderName: "",
   accountSize: 50000,
-  accountType: "personal",
+  accountType: "Personal Trading Account",
   accountPhase: "evaluation",
   consistencyRuleTarget: 30,
-  fundedPlatform: "Tradovate",
-  fundedProvider: "Apex",
+  fundedPlatform: "Manual Mode",
+  fundedProvider: "None",
   profitGoal: 3000,
   startingBalance: 50000,
   trailingDrawdown: 2500,
@@ -101,11 +101,12 @@ const marketSpecs = {
   SPY: { displayName: "SPY ETF", pointValue: 1, tickSize: 0.01 },
   QQQ: { displayName: "QQQ ETF", pointValue: 1, tickSize: 0.01 },
 };
-const dataSources = ["Manual", "Demo Broker", "Tradovate Demo Read-Only", "Tradovate Live Read-Only", "TradingView Alerts", "Market Data API", "Broker Connection"];
-const fundedProviders = ["Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other prop/funded account"];
-const fundedPlatforms = ["Tradovate", "Rithmic", "TopstepX", "NinjaTrader/CQG", "CSV Import", "Manual Mode"];
-const navigationTabs = ["Home", "Dashboard", "Journal", "Account", "Profile"];
-const moreTabs = ["Connections", "Install", "Help", "Support", "Settings"];
+const dataSources = ["Manual Mode", "TradingView Webhook", "CSV Import", "Tradovate Demo Read-Only", "Tradovate Prop/Funded Read-Only", "Tradovate Live Read-Only", "Demo Broker", "Market Data API"];
+const accountTypeOptions = ["Personal Trading Account", "Funded / Prop Firm Account", "Demo / Practice Account"];
+const fundedProviders = ["None", "Lucid Trading", "Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other"];
+const fundedPlatforms = ["Manual Mode", "TradingView Webhook", "Tradovate", "Rithmic", "TopstepX", "CSV Import", "Other"];
+const navigationTabs = ["Home", "Dashboard", "Journal", "Account"];
+const moreTabs = ["Profile", "Settings", "Connections", "Install", "Help", "Support"];
 const authRedirectUrl = "https://tradepilottool.com";
 const marketServerUrl = "http://127.0.0.1:8787";
 const brokerSamplePayload = {
@@ -150,8 +151,19 @@ const brokerSamplePayload = {
 
 const tradovateModes = {
   demo: "Tradovate Demo Read-Only",
+  prop: "Tradovate Prop/Funded Read-Only",
   live: "Tradovate Live Read-Only",
 };
+
+function normalizeAccountType(value) {
+  if (value === "funded" || value === "prop" || value === "both" || value === "Funded/prop account") return "Funded / Prop Firm Account";
+  if (value === "Demo broker" || value === "demo" || value === "Demo / Practice Account") return "Demo / Practice Account";
+  return "Personal Trading Account";
+}
+
+function isFundedAccountType(value) {
+  return normalizeAccountType(value) === "Funded / Prop Firm Account";
+}
 
 const tooltipText = {
   currentPrice: "Current Price = the latest price Trade Pilot is using for calculations.",
@@ -178,7 +190,11 @@ const todayKey = () => new Date().toISOString().slice(0, 10);
 function loadProfile() {
   try {
     const saved = localStorage.getItem(profileStorageKey);
-    return saved ? { ...defaultProfile, ...JSON.parse(saved) } : defaultProfile;
+    const profile = saved ? { ...defaultProfile, ...JSON.parse(saved) } : defaultProfile;
+    profile.accountType = normalizeAccountType(profile.accountType);
+    if (!fundedProviders.includes(profile.fundedProvider)) profile.fundedProvider = defaultProfile.fundedProvider;
+    if (!fundedPlatforms.includes(profile.fundedPlatform)) profile.fundedPlatform = defaultProfile.fundedPlatform;
+    return profile;
   } catch {
     return defaultProfile;
   }
@@ -215,13 +231,19 @@ function loadList(key) {
 }
 
 const defaultLayout = {
+  alerts: true,
   chart: true,
   coach: true,
   connections: true,
   fastMode: true,
   journal: true,
+  mode: "Pro",
+  performanceStats: true,
+  propFirmRules: true,
   risk: true,
   score: true,
+  tradePlan: true,
+  watchlist: true,
 };
 
 function profileToDatabase(profile, user, streamerMode) {
@@ -486,7 +508,7 @@ export default function App() {
 
   useEffect(() => {
     if (!autoPrice) {
-      setDataSource("Manual");
+      setDataSource("Manual Mode");
       setPriceStatus("");
       setLastUpdated("Manual price");
       return undefined;
@@ -507,6 +529,7 @@ export default function App() {
       } else if (snapshot.updatedAt) {
         setLastUpdated(new Date(snapshot.updatedAt).toLocaleTimeString());
       }
+      if (Number.isFinite(Number(snapshot.dailyPnl))) updateDiscipline("dailyPnl", Number(snapshot.dailyPnl));
 
       if (snapshot.position?.symbol === profile.mainMarket) {
         const brokerPosition = snapshot.position;
@@ -583,7 +606,26 @@ export default function App() {
       };
     }
 
-    if (dataSource === "Market Data API" && canUseLocalMarketServer) {
+    if (dataSource.includes("Tradovate") && canUseLocalMarketServer) {
+      const mode = dataSource === tradovateModes.prop ? "prop" : dataSource === tradovateModes.live ? "live" : "demo";
+      const refreshTradovateSnapshot = async () => {
+        try {
+          const response = await fetch(`${marketServerUrl}/api/tradovate/quote?mode=${mode}&symbol=${profile.mainMarket}`);
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || "Tradovate read-only data unavailable.");
+          applyBrokerSnapshot(result.snapshot || result);
+          setPriceStatus("");
+        } catch (error) {
+          setPriceStatus(`${error.message || "Tradovate unavailable."} Use TradingView Webhook or Manual Mode as fallback.`);
+        }
+      };
+
+      refreshTradovateSnapshot();
+      const timer = setInterval(refreshTradovateSnapshot, 5000);
+      return () => clearInterval(timer);
+    }
+
+    if ((dataSource === "Market Data API" || dataSource === "TradingView Webhook") && canUseLocalMarketServer) {
       const stream = new EventSource(`${marketServerUrl}/api/market/stream?symbol=${profile.mainMarket}`);
 
       const handleQuote = (event) => {
@@ -672,13 +714,29 @@ export default function App() {
       voiceAlerts: profile.voiceAlerts,
       streamerMode,
     };
+    const connectionSettings = {
+      accountType: profile.accountType,
+      dataSource,
+      demoModeEnabled: brokerConnection.platform === "Demo Broker",
+      fundedProvider: profile.fundedProvider,
+      fundedPlatform: profile.fundedPlatform,
+      manualFundedRules: {
+        accountSize: profile.accountSize,
+        consistencyRuleTarget: profile.consistencyRuleTarget,
+        maxContracts: profile.maxContracts,
+        maxDailyLoss: profile.maxDailyLoss,
+        profitGoal: profile.profitGoal,
+        startingBalance: profile.startingBalance,
+        trailingDrawdown: profile.trailingDrawdown,
+      },
+    };
 
     await Promise.all([
       supabase.from("profiles").upsert(profileToDatabase(profile, session.user, streamerMode)),
       supabase.from("trade_settings").upsert({
         coach_preferences: { voiceAlerts: profile.voiceAlerts },
         preferred_layout: layoutPrefs,
-        risk_settings: riskSettings,
+        risk_settings: { ...riskSettings, connectionSettings },
         selected_market: profile.mainMarket,
         support,
         resistance,
@@ -869,10 +927,131 @@ export default function App() {
       bid: Number((alert.price - 0.25).toFixed(2)),
       ask: Number((alert.price + 0.25).toFixed(2)),
     });
-    setDataSource("TradingView Alerts");
+    if (alert.bias) setLevelBias(alert.bias);
+    setDataSource("TradingView Webhook");
     setAutoPrice(true);
     setFastMessage(`Webhook preview applied: ${alert.signalType || "signal"} populated the dashboard.`);
     setActivePage("dashboard");
+  };
+
+  const applyDemoBrokerSnapshot = (snapshot) => {
+    setBrokerConnection({
+      ...snapshot,
+      connected: true,
+      connectionStatus: "Demo Broker Connected",
+      platform: "Demo Broker",
+      source: "Simulated demo data",
+    });
+    setDataSource("Demo Broker");
+    setAutoPrice(true);
+    updateProfile("accountType", "Demo / Practice Account");
+    updateProfile("fundedPlatform", "Manual Mode");
+    setPrice(snapshot.price || snapshot.quote?.price || marketDefaults[profile.mainMarket] || 27500);
+    setQuote({
+      bid: Number(snapshot.bid ?? snapshot.quote?.bid ?? ((snapshot.price || 27500) - 0.25)),
+      ask: Number(snapshot.ask ?? snapshot.quote?.ask ?? ((snapshot.price || 27500) + 0.25)),
+    });
+    updateDiscipline("dailyPnl", Number(snapshot.dailyPnl ?? snapshot.openPnl ?? 0));
+    if (snapshot.position) {
+      setActivePosition(snapshot.position);
+      setPlannedTrade({
+        ...snapshot.position,
+        runner: snapshot.position.target ?? snapshot.position.entry + profile.runnerPoints,
+        setupType: "Demo Broker",
+        status: "active",
+        stop: snapshot.position.stop ?? snapshot.position.entry - profile.defaultRiskPoints,
+        target: snapshot.position.target ?? snapshot.position.entry + profile.runnerPoints,
+        trim1: snapshot.position.trim1 ?? snapshot.position.entry + profile.trim1Points,
+        trim2: snapshot.position.trim2 ?? snapshot.position.entry + profile.trim2Points,
+      });
+    }
+    setLastUpdated(new Date(snapshot.timestamp || snapshot.updatedAt || Date.now()).toLocaleTimeString());
+    setFastMessage("Demo Broker Connected - simulated data is powering the dashboard.");
+    setPriceStatus("");
+    setActivePage("connections");
+  };
+
+  const createLocalDemoBrokerSnapshot = () => {
+    const symbol = profile.mainMarket || "MNQ";
+    const base = marketDefaults[symbol] || 27500;
+    const priceValue = Number((base + 4.5).toFixed(2));
+    const entryValue = Number((priceValue - 7.25).toFixed(2));
+    const openPnl = Number(((priceValue - entryValue) * (pointValues[symbol] || 2)).toFixed(2));
+    return {
+      accountBalance: 50000,
+      accountId: "DEMO-SIM-001",
+      accountName: "Demo Broker",
+      accountType: "demo",
+      ask: Number((priceValue + 0.25).toFixed(2)),
+      bid: Number((priceValue - 0.25).toFixed(2)),
+      connected: true,
+      connectionStatus: "Demo Broker Connected",
+      dailyPnl: openPnl,
+      fills: brokerSamplePayload.fills,
+      openPnl,
+      platform: "Demo Broker",
+      position: {
+        contracts: 1,
+        direction: "long",
+        entry: entryValue,
+        lastAction: "Demo position generated",
+        openPnl,
+        status: "active",
+        stop: Number((entryValue - 20).toFixed(2)),
+        symbol,
+        target: Number((entryValue + 40).toFixed(2)),
+      },
+      price: priceValue,
+      quote: {
+        ask: Number((priceValue + 0.25).toFixed(2)),
+        bid: Number((priceValue - 0.25).toFixed(2)),
+        price: priceValue,
+        source: "Simulated demo data",
+        symbol,
+        timestamp: new Date().toISOString(),
+      },
+      realizedPnl: 0,
+      source: "Simulated demo data",
+      symbol,
+      timestamp: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      workingOrders: brokerSamplePayload.workingOrders,
+    };
+  };
+
+  const activateManualMode = () => {
+    setAutoPrice(false);
+    setDataSource("Manual Mode");
+    updateProfile("accountType", "Personal Trading Account");
+    updateProfile("fundedPlatform", "Manual Mode");
+    setBrokerConnection((current) => ({
+      ...current,
+      connected: false,
+      connectionStatus: "Manual Mode Active",
+      error: "",
+      platform: "Manual Mode",
+      source: "Manual entry",
+    }));
+    setFastMessage("Manual Mode Active - enter price and levels yourself.");
+    setPriceStatus("");
+    setActivePage("connections");
+  };
+
+  const activateTradingViewMode = () => {
+    setAutoPrice(true);
+    setDataSource("TradingView Webhook");
+    updateProfile("fundedPlatform", "TradingView Webhook");
+    setBrokerConnection((current) => ({
+      ...current,
+      connected: false,
+      connectionStatus: "Waiting for webhook data",
+      error: "",
+      platform: "TradingView Webhook",
+      source: "Webhook",
+    }));
+    setFastMessage("Waiting for TradingView webhook data.");
+    setPriceStatus("");
+    setActivePage("connections");
   };
 
   const startDemoBroker = async () => {
@@ -885,19 +1064,22 @@ export default function App() {
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Demo broker unavailable.");
 
-      setBrokerConnection(result.snapshot);
-      setDataSource("Broker Connection");
-      setAutoPrice(true);
-      setFastMessage("Demo Broker connected. Live simulated price and position data are streaming.");
-      setActivePage("dashboard");
+      applyDemoBrokerSnapshot({
+        ...result.snapshot,
+        connectionStatus: "Demo Broker Connected",
+        dailyPnl: result.snapshot.dailyPnl ?? result.snapshot.openPnl ?? 0,
+        source: "Simulated demo data",
+      });
+      setActivePage("connections");
     } catch (error) {
-      setPriceStatus(error.message || "Start the local market server to use Demo Broker mode.");
+      applyDemoBrokerSnapshot(createLocalDemoBrokerSnapshot());
+      setPriceStatus("Local demo data is active. Start the market server later for streaming ticks.");
       setActivePage("connections");
     }
   };
 
   const connectTradovateReadOnly = async (mode) => {
-    const platform = mode === "live" ? "Tradovate Live Read-Only" : "Tradovate Demo Read-Only";
+    const platform = mode === "prop" ? tradovateModes.prop : mode === "live" ? tradovateModes.live : tradovateModes.demo;
     setBrokerConnection((current) => ({
       ...current,
       connected: false,
@@ -920,21 +1102,29 @@ export default function App() {
       const snapshot = await snapshotResponse.json();
       if (!snapshotResponse.ok) throw new Error(snapshot.error || "Tradovate market data unavailable.");
 
-      setBrokerConnection({
+      const nextSnapshot = {
         ...(snapshot.snapshot || snapshot),
-        connectionStatus: mode === "live" ? "Live Read-Only Connected" : "Demo Connected",
+        accountType: mode === "prop" ? "funded/prop" : mode === "live" ? "personal live" : "demo",
+        connectionStatus: mode === "prop" ? "Prop/Funded Read-Only Connected" : mode === "live" ? "Live Read-Only Connected" : "Demo Connected",
         error: "",
-      });
-      setDataSource(mode === "live" ? tradovateModes.live : tradovateModes.demo);
+        platform,
+      };
+      setBrokerConnection(nextSnapshot);
+      if (Number.isFinite(Number(nextSnapshot.price))) setPrice(Number(nextSnapshot.price));
+      if (Number.isFinite(Number(nextSnapshot.bid)) && Number.isFinite(Number(nextSnapshot.ask))) {
+        setQuote({ bid: Number(nextSnapshot.bid), ask: Number(nextSnapshot.ask) });
+      }
+      if (Number.isFinite(Number(nextSnapshot.dailyPnl))) updateDiscipline("dailyPnl", Number(nextSnapshot.dailyPnl));
+      setDataSource(mode === "prop" ? tradovateModes.prop : mode === "live" ? tradovateModes.live : tradovateModes.demo);
       setAutoPrice(true);
-      setFastMessage(`${mode === "live" ? "Live" : "Demo"} Tradovate read-only connected. Trading actions remain disabled.`);
+      setFastMessage(`${mode === "prop" ? "Prop/Funded" : mode === "live" ? "Live" : "Demo"} Tradovate read-only connected. Trading actions remain disabled.`);
       setActivePage("dashboard");
     } catch (error) {
-      const message = error.message || "Tradovate read-only connection is not configured.";
+      const message = "Tradovate direct connection requires API access. Use Manual Mode or TradingView Webhook for now.";
       setBrokerConnection((current) => ({
         ...current,
         connected: false,
-        connectionStatus: "Error",
+        connectionStatus: "Tradovate API Required",
         error: message,
         platform,
       }));
@@ -970,13 +1160,69 @@ export default function App() {
   };
 
   return (
-    <div style={styles.page}>
+    <div className="app-shell" style={styles.page}>
       <style>{`
+        html,
+        body,
+        #root {
+          width: 100% !important;
+          min-width: 100% !important;
+          min-height: 100vh !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #05070d !important;
+          overflow-x: hidden !important;
+        }
+        body {
+          display: block !important;
+          place-items: unset !important;
+          justify-content: unset !important;
+          align-items: unset !important;
+        }
+        main { max-width: none !important; }
+        .app-shell { width: 100%; min-height: 100vh; overflow-x: hidden; background: #05070d; }
+        .app-container,
+        .page-container,
+        .dashboard-container {
+          width: 100%;
+          max-width: none;
+          margin: 0;
+          padding: 24px 32px;
+          box-sizing: border-box;
+        }
+        .desktop-dashboard {
+          display: grid;
+          grid-template-columns: 240px minmax(0, 1fr) 320px;
+          gap: 20px;
+          width: 100%;
+          min-height: calc(100vh - 80px);
+          align-items: start;
+        }
+        .dashboard-grid {
+          width: 100%;
+          display: grid;
+          grid-template-columns: minmax(420px, 0.95fr) minmax(520px, 1.35fr);
+          gap: 24px;
+          align-items: start;
+          margin-bottom: 24px;
+        }
+        .full-width-section { grid-column: 1 / -1; }
+        @media (max-width: 900px) {
+          .desktop-dashboard { grid-template-columns: 1fr; }
+          .left-sidebar, .right-panel { display: none !important; }
+          .dashboard-grid { grid-template-columns: 1fr !important; }
+          .app-container, .page-container, .dashboard-container { padding: 16px; }
+          .home-feature-grid { grid-template-columns: 1fr !important; }
+          .tradepilot-chart-wrap { height: 280px !important; }
+        }
         .mobile-launch-button { display: none !important; }
         .mobile-menu-item { display: none !important; }
+        .desktop-nav-item { display: none !important; }
+        .mobile-menu-button { display: inline-flex !important; }
         @media (max-width: 760px) {
           .desktop-nav-item { display: none !important; }
           .mobile-menu-item { display: block !important; }
+          .mobile-menu-button { display: inline-flex !important; }
           .mobile-launch-button { display: inline-flex !important; align-items: center; }
           .tradepilot-title { font-size: 34px !important; }
           .tradepilot-header { align-items: flex-start !important; }
@@ -984,9 +1230,10 @@ export default function App() {
           .tradepilot-more-menu { left: 16px !important; right: 16px !important; top: calc(100% + 8px) !important; }
           .tradepilot-feedback { align-items: center; display: flex; font-size: 0 !important; height: 38px; justify-content: center; padding: 0 !important; width: 38px; }
           .tradepilot-feedback::after { content: "?"; font-size: 16px; }
+          .home-title { font-size: 42px !important; }
         }
       `}</style>
-      <div style={styles.shell}>
+      <div className="app-container" style={styles.shell}>
         <header className="tradepilot-header" style={styles.header}>
           <div>
             <p style={styles.eyebrow}>Trade Pilot Alpha</p>
@@ -997,6 +1244,11 @@ export default function App() {
             <p style={styles.positioningText}>
               Trade Pilot is an execution assistant for futures traders.
             </p>
+            <div style={styles.headerMeta}>
+              <span>{profile.mainMarket}</span>
+              <span>{getConnectionStatusLabel(brokerConnection)}</span>
+              <span>{session?.user ? session.user.email : "Guest workspace"}</span>
+            </div>
           </div>
 
           <div className="tradepilot-top-actions" style={styles.topActions}>
@@ -1004,7 +1256,6 @@ export default function App() {
               {session?.user ? (
                 <>
                   <span style={styles.accountPill}>{session.user.user_metadata?.name || session.user.email}</span>
-                  <button onClick={() => setActivePage("profile")} style={styles.authButton}>Profile</button>
                   <button onClick={signOut} style={styles.authButton}>Log Out</button>
                 </>
               ) : (
@@ -1043,7 +1294,7 @@ export default function App() {
                   Launch App
                 </button>
                 <div style={styles.moreWrap}>
-                  <button onClick={() => setMoreMenuOpen((open) => !open)} style={styles.secondaryButton}>
+                  <button className="mobile-menu-button" onClick={() => setMoreMenuOpen((open) => !open)} style={styles.secondaryButton}>
                     More
                   </button>
                   {moreMenuOpen ? (
@@ -1088,6 +1339,20 @@ export default function App() {
             )}
           </div>
         </header>
+        <DashboardFrame
+          activePage={activePage}
+          brokerConnection={brokerConnection}
+          discipline={discipline}
+          engine={engine}
+          journalEntries={journalEntries}
+          layoutPrefs={layoutPrefs}
+          profile={profile}
+          setActivePage={setActivePage}
+          setLayoutPrefs={setLayoutPrefs}
+          setStreamerMode={setStreamerMode}
+          streamerMode={streamerMode}
+          watchlist={watchlist}
+        >
         {!streamerMode ? <div style={styles.alphaBanner}>Trade Pilot Alpha — educational tool. Not financial advice.</div> : null}
         {!streamerMode && !session?.user ? (
           <div style={styles.guestPrompt}>
@@ -1155,6 +1420,7 @@ export default function App() {
             setPrice={setPrice}
             setBreakoutLevel={setBreakoutLevel}
             setLevelBias={setLevelBias}
+            setLayoutPrefs={setLayoutPrefs}
             setPullbackSupport={setPullbackSupport}
             setRecentHigh={setRecentHigh}
             setResistance={setResistance}
@@ -1169,6 +1435,8 @@ export default function App() {
         {activePage === "connections" ? (
           <ConnectionsPage
             activePosition={activePosition}
+            activateManualMode={activateManualMode}
+            activateTradingViewMode={activateTradingViewMode}
             brokerConnection={brokerConnection}
             dataSource={dataSource}
             discipline={discipline}
@@ -1178,7 +1446,9 @@ export default function App() {
             profile={profile}
             quote={quote}
             connectTradovateReadOnly={connectTradovateReadOnly}
+            saveConnectionSettings={savePersonalWorkspace}
             startDemoBroker={startDemoBroker}
+            updateProfile={updateProfile}
           />
         ) : null}
         {activePage === "account" ? (
@@ -1220,6 +1490,7 @@ export default function App() {
         ) : null}
         {!streamerMode ? <AlphaSignup /> : null}
         <AppFooter />
+        </DashboardFrame>
       </div>
 
       {settingsOpen ? (
@@ -1297,13 +1568,219 @@ function DisclaimerModal({ onAccept }) {
   );
 }
 
+function DashboardFrame({
+  activePage,
+  brokerConnection,
+  children,
+  discipline,
+  engine,
+  journalEntries,
+  layoutPrefs,
+  profile,
+  setActivePage,
+  setLayoutPrefs,
+  setStreamerMode,
+  streamerMode,
+  watchlist,
+}) {
+  const useDashboardChrome = !streamerMode && activePage !== "home";
+
+  if (!useDashboardChrome) {
+    return <main style={styles.standaloneMain}>{children}</main>;
+  }
+
+  return (
+    <div className="desktop-dashboard">
+      <DesktopSidebar activePage={activePage} setActivePage={setActivePage} setStreamerMode={setStreamerMode} />
+      <main style={styles.dashboardMain}>{children}</main>
+      <RightInsightsPanel
+        brokerConnection={brokerConnection}
+        discipline={discipline}
+        engine={engine}
+        journalEntries={journalEntries}
+        layoutPrefs={layoutPrefs}
+        profile={profile}
+        setLayoutPrefs={setLayoutPrefs}
+        watchlist={watchlist}
+      />
+    </div>
+  );
+}
+
+function DesktopSidebar({ activePage, setActivePage, setStreamerMode }) {
+  const items = ["Home", "Dashboard", "Journal", "Account", "Connections", "Settings"];
+
+  return (
+    <aside className="left-sidebar" style={styles.leftSidebar}>
+      <div style={styles.sidebarBrand}>Trade Pilot</div>
+      <nav style={styles.sidebarNav}>
+        {items.map((item) => {
+          const page = item.toLowerCase();
+          return (
+            <button
+              key={item}
+              onClick={() => setActivePage(page)}
+              style={{ ...styles.sidebarButton, background: activePage === page ? "#1d4ed8" : "transparent" }}
+            >
+              {item}
+            </button>
+          );
+        })}
+      </nav>
+      <button onClick={() => setStreamerMode(true)} style={styles.sidebarStreamerButton}>Streamer Mode</button>
+    </aside>
+  );
+}
+
+function RightInsightsPanel({ brokerConnection, discipline, engine, journalEntries, layoutPrefs, profile, setLayoutPrefs, watchlist }) {
+  const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
+  const fundedWarnings = buildFundedRuleWarnings({ brokerConnection, discipline, profile });
+  const analytics = getJournalAnalytics(journalEntries, discipline);
+  const modeOptions = ["Simple", "Pro", "Streamer", "Prop Firm", "Journal Focus"];
+  const cardToggles = [
+    ["coach", "Trade Coach"],
+    ["tradePlan", "Trade Plan"],
+    ["chart", "Chart"],
+    ["risk", "Risk Guard"],
+    ["propFirmRules", "Prop Firm Rules"],
+    ["journal", "Journal"],
+    ["watchlist", "Watchlist"],
+    ["alerts", "Alerts"],
+    ["performanceStats", "Performance Stats"],
+  ];
+
+  return (
+    <aside className="right-panel" style={styles.rightPanel}>
+      <section style={styles.insightCard}>
+        <p style={styles.cardLabel}>Customize Dashboard</p>
+        <SelectField
+          label="Layout"
+          value={layoutPrefs.mode || "Pro"}
+          options={modeOptions}
+          onChange={(value) => setLayoutPrefs((current) => ({ ...current, mode: value }))}
+        />
+        <div style={styles.toggleList}>
+          {cardToggles.map(([key, label]) => (
+            <label key={key} style={styles.compactSwitchRow}>
+              <input
+                type="checkbox"
+                checked={layoutPrefs[key] !== false}
+                onChange={(event) => setLayoutPrefs((current) => ({ ...current, [key]: event.target.checked }))}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </section>
+
+      {layoutPrefs.watchlist !== false ? (
+        <section style={styles.insightCard}>
+          <p style={styles.cardLabel}>Watchlist</p>
+          {(watchlist?.length ? watchlist : [{ symbol: profile.mainMarket, notes: "Primary market" }]).slice(0, 5).map((item) => (
+            <PlanItem key={item.id || item.symbol} title={item.symbol} text={item.notes || "Watching"} />
+          ))}
+        </section>
+      ) : null}
+
+      {layoutPrefs.alerts !== false ? (
+        <section style={styles.insightCard}>
+          <p style={styles.cardLabel}>Alerts</p>
+          <PlanItem title="Connection" text={brokerConnection.connectionStatus || getConnectionStatusLabel(brokerConnection)} />
+          <PlanItem title="Coach" text={engine.coachMessage} />
+        </section>
+      ) : null}
+
+      {layoutPrefs.propFirmRules !== false ? (
+        <section style={styles.insightCard}>
+          <p style={styles.cardLabel}>Prop Firm Rules</p>
+          <Metric label="Daily Loss Left" value={`$${fundedMetrics.dailyRiskRemaining.toFixed(2)}`} />
+          <Metric label="Drawdown Left" value={`$${fundedMetrics.drawdownRemaining.toFixed(2)}`} />
+          <div style={styles.warningStack}>
+            {(fundedWarnings.length ? fundedWarnings : ["Inside guardrails."]).map((warning) => (
+              <div key={warning} style={warning.includes("Inside") ? styles.coachPrompt : styles.warningBox}>{warning}</div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {layoutPrefs.performanceStats !== false ? (
+        <section style={styles.insightCard}>
+          <p style={styles.cardLabel}>Performance Stats</p>
+          <Metric label="Win Rate" value={`${analytics.winRate}%`} />
+          <Metric label="Total Trades" value={String(analytics.totalTrades)} />
+          <Metric label="Profit Factor" value={analytics.profitFactor.toFixed(2)} />
+        </section>
+      ) : null}
+
+      {layoutPrefs.journal !== false ? (
+        <section style={styles.insightCard}>
+          <p style={styles.cardLabel}>Journal Notes</p>
+          <p style={styles.muted}>{journalEntries?.[0]?.note || "No note yet."}</p>
+        </section>
+      ) : null}
+    </aside>
+  );
+}
+
+function CustomizeDashboardPanel({ layoutPrefs, setLayoutPrefs }) {
+  const modeOptions = ["Simple", "Pro", "Streamer", "Prop Firm", "Journal Focus"];
+  const cardToggles = [
+    ["coach", "Trade Coach"],
+    ["tradePlan", "Trade Plan"],
+    ["chart", "Chart"],
+    ["risk", "Risk Guard"],
+    ["propFirmRules", "Prop Firm Rules"],
+    ["journal", "Journal"],
+    ["watchlist", "Watchlist"],
+    ["alerts", "Alerts"],
+    ["performanceStats", "Performance Stats"],
+  ];
+
+  return (
+    <section style={styles.card}>
+      <p style={styles.cardLabel}>Customize Dashboard</p>
+      <h2 style={styles.sectionTitle}>Layout and Cards</h2>
+      <SelectField
+        label="Layout Mode"
+        value={layoutPrefs.mode || "Pro"}
+        options={modeOptions}
+        onChange={(value) => setLayoutPrefs((current) => ({ ...current, mode: value }))}
+      />
+      <div style={{ ...styles.formGrid, marginTop: "16px" }}>
+        {cardToggles.map(([key, label]) => (
+          <label key={key} style={styles.switchRow}>
+            <input
+              type="checkbox"
+              checked={layoutPrefs[key] !== false}
+              onChange={(event) => setLayoutPrefs((current) => ({ ...current, [key]: event.target.checked }))}
+            />
+            {label}
+          </label>
+        ))}
+      </div>
+      <p style={{ ...styles.muted, marginTop: "12px" }}>Preferences save locally and sync to Supabase when signed in.</p>
+    </section>
+  );
+}
+
+function PageTitle({ title, subtitle }) {
+  return (
+    <section style={styles.pageTitle}>
+      <p style={styles.breadcrumb}>Trade Pilot / {title}</p>
+      <h2 style={styles.pageTitleText}>{title}</h2>
+      <p style={styles.pageSubtitle}>{subtitle}</p>
+    </section>
+  );
+}
+
 function HomePage({ onJoinAlpha, onLaunch }) {
   return (
     <main style={styles.homePage}>
+      <PageTitle title="Home" subtitle="Welcome to Trade Pilot Alpha" />
       <section style={styles.homeHero}>
         <div>
           <p style={styles.cardLabel}>Trade Pilot Alpha</p>
-          <h2 style={styles.homeTitle}>Plan trades. Manage risk. Avoid emotional entries.</h2>
+          <h2 className="home-title" style={styles.homeTitle}>Plan trades. Manage risk. Avoid emotional entries.</h2>
           <p style={styles.homeSubtitle}>Trade Pilot is a trading execution assistant for futures traders.</p>
           <div style={styles.heroActions}>
             <button onClick={onLaunch} style={styles.primaryHeroButton}>Launch App</button>
@@ -1312,7 +1789,7 @@ function HomePage({ onJoinAlpha, onLaunch }) {
         </div>
       </section>
 
-      <section style={styles.productCardGrid}>
+      <section className="home-feature-grid" style={styles.productCardGrid}>
         <FeatureCard title="Risk Guard" text="Stay aware of size, loss limits, and overtrading." />
         <FeatureCard title="Trade Coach" text="Get plain-language prompts before and during a trade." />
         <FeatureCard title="Prop Firm Rules" text="Track drawdown pressure and daily risk rules." />
@@ -1413,6 +1890,9 @@ function InstallPage({ canInstall, onInstall }) {
 function AccountPage({ authMessage, isConfigured, layoutPrefs, onAuthOpen, session, setLayoutPrefs, signOut, syncStatus }) {
   return (
     <main style={styles.mainGrid}>
+      <div style={styles.fullWidthSection}>
+        <PageTitle title="Account" subtitle="Manage subscription, security, and account settings." />
+      </div>
       <section style={styles.card}>
         <p style={styles.cardLabel}>Personal Dashboard</p>
         <h2 style={styles.sectionTitle}>{session?.user ? "Your Trade Pilot Workspace" : "Save Your Workspace"}</h2>
@@ -1469,7 +1949,7 @@ function AccountPage({ authMessage, isConfigured, layoutPrefs, onAuthOpen, sessi
         <h2 style={styles.sectionTitle}>Show / Hide Dashboard Cards</h2>
         <p style={{ ...styles.muted, marginBottom: "14px" }}>Reordering is reserved for later; these visibility preferences save to your database when signed in.</p>
         <div style={styles.formGrid}>
-          {Object.keys(defaultLayout).map((key) => (
+          {Object.keys(defaultLayout).filter((key) => key !== "mode").map((key) => (
             <label key={key} style={styles.switchRow}>
               <input
                 type="checkbox"
@@ -1488,7 +1968,7 @@ function AccountPage({ authMessage, isConfigured, layoutPrefs, onAuthOpen, sessi
 function AuthModal({ authMessage, initialMode, isConfigured, onClose, onSignedIn, setAuthMessage, setProfile }) {
   const [mode, setMode] = useState(initialMode || "login");
   const [form, setForm] = useState({
-    accountType: "personal",
+    accountType: "Personal Trading Account",
     confirmPassword: "",
     email: "",
     name: "",
@@ -1579,7 +2059,7 @@ function AuthModal({ authMessage, initialMode, isConfigured, onClose, onSignedIn
         {mode === "signup" ? <Field label="Confirm Password" type="password" value={form.confirmPassword} onChange={(value) => setForm((current) => ({ ...current, confirmPassword: value }))} /> : null}
         {mode === "signup" ? <SelectField label="Trader Type" value={form.traderType} options={["beginner", "intermediate", "advanced"]} onChange={(value) => setForm((current) => ({ ...current, traderType: value }))} /> : null}
         {mode === "signup" ? <SelectField label="Preferred Market" value={form.preferredMarket} options={["MNQ", "NQ", "ES", "MES", "crypto", "options"]} onChange={(value) => setForm((current) => ({ ...current, preferredMarket: value }))} /> : null}
-        {mode === "signup" ? <SelectField label="Account Type" value={form.accountType} options={["personal", "funded", "both"]} onChange={(value) => setForm((current) => ({ ...current, accountType: value }))} /> : null}
+        {mode === "signup" ? <SelectField label="Account Type" value={form.accountType} options={accountTypeOptions} onChange={(value) => setForm((current) => ({ ...current, accountType: value }))} /> : null}
         {mode === "login" ? (
           <label style={styles.switchRow}>
             <input
@@ -1599,6 +2079,69 @@ function AuthModal({ authMessage, initialMode, isConfigured, onClose, onSignedIn
       </section>
     </div>
   );
+}
+
+function getEffectiveLayout(layoutPrefs = {}) {
+  const mode = layoutPrefs.mode || "Pro";
+  const modeDefaults = {
+    Simple: {
+      alerts: false,
+      chart: false,
+      coach: true,
+      journal: false,
+      performanceStats: false,
+      propFirmRules: false,
+      risk: true,
+      tradePlan: true,
+      watchlist: false,
+    },
+    Pro: {
+      alerts: true,
+      chart: true,
+      coach: true,
+      journal: true,
+      performanceStats: true,
+      propFirmRules: true,
+      risk: true,
+      tradePlan: true,
+      watchlist: true,
+    },
+    Streamer: {
+      alerts: false,
+      chart: true,
+      coach: true,
+      journal: false,
+      performanceStats: false,
+      propFirmRules: false,
+      risk: true,
+      tradePlan: true,
+      watchlist: false,
+    },
+    "Prop Firm": {
+      alerts: true,
+      chart: true,
+      coach: true,
+      journal: true,
+      performanceStats: true,
+      propFirmRules: true,
+      risk: true,
+      tradePlan: true,
+      watchlist: true,
+    },
+    "Journal Focus": {
+      alerts: true,
+      chart: false,
+      coach: true,
+      journal: true,
+      performanceStats: true,
+      propFirmRules: false,
+      risk: true,
+      tradePlan: true,
+      watchlist: false,
+    },
+  };
+
+  return { ...defaultLayout, ...(modeDefaults[mode] || modeDefaults.Pro), ...layoutPrefs };
 }
 
 function Dashboard({
@@ -1637,6 +2180,7 @@ function Dashboard({
   setPrice,
   setBreakoutLevel,
   setLevelBias,
+  setLayoutPrefs,
   setPullbackSupport,
   setRecentHigh,
   setResistance,
@@ -1649,8 +2193,10 @@ function Dashboard({
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [journalNote, setJournalNote] = useState("");
+  const [customizeOpen, setCustomizeOpen] = useState(false);
   const [setupDirection, setSetupDirection] = useState("Long");
   const [setupType, setSetupType] = useState("Pullback");
+  const effectiveLayout = getEffectiveLayout(layoutPrefs);
   const rangePad = Math.max(20, price * 0.01);
   const rangeMin = Math.max(0, price - rangePad);
   const rangeMax = price + rangePad;
@@ -1677,14 +2223,39 @@ function Dashboard({
   };
   const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
   const rewardRisk = getRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
-  const simpleBias = engine.bias.includes("LONG") ? "LONG" : engine.bias.includes("SHORT") ? "SHORT" : "WAIT";
-  const simpleAction = simpleBias === "LONG" ? "Look Long" : simpleBias === "SHORT" ? "Look Short" : "No trade";
-  const setupName = `${setupType} ${setupDirection}`;
-  const hasPlan = Boolean(plannedTrade || activePosition);
   const chartData = useMemo(
     () => buildChartData({ price, entry, stop: engine.smartStop, support, resistance, trim1: engine.trim1, trim2: engine.trim2, runner: engine.runner }),
     [engine.runner, engine.smartStop, engine.trim1, engine.trim2, entry, price, resistance, support],
   );
+  const zoneDetection = useMemo(
+    () => detectKeyLevelsFromCandles(chartDataToCandles(chartData), { entry, price, resistance, support }),
+    [chartData, entry, price, resistance, support],
+  );
+  const tradeGrade = getTradeGrade({
+    contracts: visualPlan.contracts ?? contracts,
+    dailyPnl: discipline.dailyPnl,
+    entry: visualPlan.entry,
+    maxContracts: profile.maxContracts,
+    maxDailyLoss: profile.maxDailyLoss,
+    price,
+    rewardRisk,
+    stop: visualPlan.stop,
+    support,
+    resistance,
+  });
+  const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
+  const fundedWarnings = buildFundedRuleWarnings({
+    brokerConnection: {
+      ...brokerConnection,
+      position: brokerConnection.position || { contracts: visualPlan.contracts ?? contracts },
+    },
+    discipline,
+    profile,
+  });
+  const simpleBias = engine.bias.includes("LONG") ? "LONG" : engine.bias.includes("SHORT") ? "SHORT" : "WAIT";
+  const simpleAction = simpleBias === "LONG" ? "Look Long" : simpleBias === "SHORT" ? "Look Short" : "No trade";
+  const setupName = `${setupType} ${setupDirection}`;
+  const hasPlan = Boolean(plannedTrade || activePosition);
   const liveCoach = getLiveCoachMessage({ activePosition, discipline, engine, price, profile, visualPlan });
   const riskStatus = engine.disciplineWarnings.some((warning) => warning.includes("Stop") || warning.includes("loss limit reached") || warning.includes("exceeded"))
     ? "Stop Trading"
@@ -1719,6 +2290,7 @@ function Dashboard({
           riskStatus={riskStatus}
           visualPlan={visualPlan}
           coachMessage={liveCoach}
+          tradeGrade={tradeGrade}
         />
         <TradeChartPanel
           chartData={chartData}
@@ -1737,20 +2309,55 @@ function Dashboard({
 
   return (
     <>
-      <section style={styles.alphaTopGrid}>
-        {layoutPrefs.coach ? <div style={styles.coachCard}>
+      <PageTitle title="Dashboard" subtitle="Plan trades, manage risk, and review your setup." />
+      <section style={styles.dashboardToolbar}>
+        <button onClick={() => setCustomizeOpen((open) => !open)} style={styles.settingsButton}>Customize Dashboard</button>
+        <span style={styles.muted}>Layout: {layoutPrefs.mode || "Pro"}</span>
+      </section>
+      {customizeOpen ? (
+        <CustomizeDashboardPanel layoutPrefs={layoutPrefs} setLayoutPrefs={setLayoutPrefs} />
+      ) : null}
+      <section className="dashboard-grid" style={styles.dashboardGrid}>
+        {effectiveLayout.coach ? <div style={styles.coachCard}>
           <p style={styles.cardLabel}>Trade Coach</p>
           <div style={styles.coachGrid}>
             <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={simpleBias === "WAIT" ? "warn" : "good"} />
             <Metric label="Market" value={profile.mainMarket} />
             <Metric label="Action" value={levelCoach.action === "WAIT" ? simpleAction : levelCoach.action} tone={simpleBias === "WAIT" ? "warn" : "good"} />
+            <Metric label="Grade" value={`${tradeGrade.letter} ${tradeGrade.score}/100`} tone={tradeGrade.score >= 75 ? "good" : tradeGrade.score >= 55 ? "warn" : "bad"} />
           </div>
           <p style={styles.coachMessage}>{levelCoach.message}</p>
+          <p style={styles.muted}>{tradeGrade.reason}</p>
         </div> : null}
+        <ManualLiveWorkflow
+          accountSize={profile.accountSize}
+          contracts={contracts}
+          dataSource={dataSource}
+          dailyPnl={discipline.dailyPnl}
+          entry={entry}
+          market={profile.mainMarket}
+          price={price}
+          resistance={resistance}
+          runner={engine.runner}
+          setAutoPrice={setAutoPrice}
+          setContracts={setContracts}
+          setDataSource={setDataSource}
+          setEntry={setEntry}
+          setPrice={setPrice}
+          setResistance={setResistance}
+          setRiskPoints={setRiskPoints}
+          setSupport={setSupport}
+          stop={engine.smartStop}
+          support={support}
+          trim1={engine.trim1}
+          trim2={engine.trim2}
+          updateDiscipline={updateDiscipline}
+          updateProfile={updateProfile}
+        />
       </section>
 
       <section style={styles.alphaMiddleGrid}>
-        <section style={styles.tradePlanHero}>
+        {effectiveLayout.tradePlan ? <section style={styles.tradePlanHero}>
           <p style={styles.cardLabel}>Trade Plan</p>
           <h2 style={styles.tradePlanTitle}>{hasPlan ? `${setupName} Plan` : "No valid trade yet"}</h2>
           {hasPlan ? (
@@ -1763,14 +2370,14 @@ function Dashboard({
                 <Metric label="Runner" tooltip={tooltipText.runner} value={(visualPlan.runner ?? visualPlan.target).toFixed(2)} tone="good" />
                 <Metric label="Risk" value={`$${rewardRisk.risk.toFixed(2)}`} tone={rewardRisk.risk > profile.maxRiskPerTrade ? "bad" : "neutral"} />
                 <Metric label="Reward/Risk" value={`${rewardRisk.ratio.toFixed(1)}R`} />
-                <Metric label="Trade Score" tooltip={tooltipText.tradeScore} value={`${engine.score}/100`} />
+                <Metric label="Trade Grade" tooltip={tooltipText.tradeScore} value={`${tradeGrade.letter} ${tradeGrade.score}/100`} />
               </div>
               {missedEntry ? <div style={styles.missedEntry}>{missedEntry}</div> : null}
             </>
           ) : (
             <p style={styles.emptyPlan}>No valid trade yet. Wait for price to reach support, resistance, breakout, or retest.</p>
           )}
-        </section>
+        </section> : null}
 
         <section style={styles.quickEntryCard}>
           <p style={styles.cardLabel}>Quick Entry</p>
@@ -1790,8 +2397,20 @@ function Dashboard({
         </section>
       </section>
 
+      {effectiveLayout.chart ? <TradeChartPanel
+        chartData={chartData}
+        currentPrice={price}
+        entry={entry}
+        runner={engine.runner}
+        stop={engine.smartStop}
+        support={support}
+        resistance={resistance}
+        trim1={engine.trim1}
+        trim2={engine.trim2}
+      /> : null}
+
       <section style={styles.alphaMiddleGrid}>
-        {layoutPrefs.risk ? <section style={styles.rulesCard}>
+        {effectiveLayout.risk ? <section style={styles.rulesCard}>
           <div>
             <p style={styles.cardLabel}>Risk Control</p>
             <h2 style={styles.sectionTitle}>Stay inside your limits</h2>
@@ -1801,10 +2420,17 @@ function Dashboard({
             <Metric label="Max Daily Loss" value={`$${profile.maxDailyLoss.toFixed(2)}`} />
             <Metric label="Current P/L" value={`$${discipline.dailyPnl.toFixed(2)}`} tone={discipline.dailyPnl >= 0 ? "good" : "bad"} />
             <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : riskStatus === "Warning" ? "warn" : "bad"} />
+            <Metric label="Daily Risk Left" value={`$${fundedMetrics.dailyRiskRemaining.toFixed(2)}`} tone={fundedMetrics.dailyRiskRemaining > 100 ? "good" : "warn"} />
+            <Metric label="Drawdown Left" value={`$${fundedMetrics.drawdownRemaining.toFixed(2)}`} tone={fundedMetrics.drawdownRemaining > 500 ? "good" : "warn"} />
+          </div>
+          <div style={styles.warningStack}>
+            {(fundedWarnings.length ? fundedWarnings : ["Inside funded-account guardrails."]).map((warning) => (
+              <div key={warning} style={warning.includes("Inside") ? styles.coachPrompt : styles.warningBox}>{warning}</div>
+            ))}
           </div>
         </section> : null}
 
-        <section style={styles.card}>
+        {effectiveLayout.journal ? <section style={styles.card}>
           <p style={styles.cardLabel}>Journal</p>
           <h2 style={styles.sectionTitle}>Quick note</h2>
           <form onSubmit={saveDashboardNote}>
@@ -1819,7 +2445,12 @@ function Dashboard({
           {journalEntries?.[0] ? (
             <p style={{ ...styles.muted, marginTop: "12px" }}>Last note: {journalEntries[0].note}</p>
           ) : null}
-        </section>
+        </section> : null}
+      </section>
+
+      <section style={styles.alphaMiddleGrid}>
+        {effectiveLayout.alerts ? <AutoZonePanel zoneDetection={zoneDetection} /> : null}
+        {effectiveLayout.propFirmRules ? <FundedManualPanel profile={profile} updateProfile={updateProfile} /> : null}
       </section>
 
       <button onClick={() => setAdvancedOpen((value) => !value)} style={styles.advancedToggle}>
@@ -1839,18 +2470,6 @@ function Dashboard({
           <strong>{marketSpec.tickSize}</strong>
         </div>
       </section>
-
-      {layoutPrefs.chart ? <TradeChartPanel
-        chartData={chartData}
-        currentPrice={price}
-        entry={entry}
-        runner={engine.runner}
-        stop={engine.smartStop}
-        support={support}
-        resistance={resistance}
-        trim1={engine.trim1}
-        trim2={engine.trim2}
-      /> : null}
 
       <ProductUpgradePanel
         brokerConnection={brokerConnection}
@@ -2016,7 +2635,7 @@ function Dashboard({
                 onChange={(event) => {
                   const checked = event.target.checked;
                   setAutoPrice(checked);
-                  if (checked && dataSource === "Manual") setDataSource("Market Data API");
+                  if (checked && dataSource === "Manual Mode") setDataSource("Market Data API");
                 }}
               />
               Auto Price: {autoPrice ? "ON" : "OFF"}
@@ -2031,7 +2650,7 @@ function Dashboard({
           </div>
 
           <div style={styles.dataStatus}>
-            <span>Source: {autoPrice ? dataSource : "Manual"}</span>
+            <span>Source: {autoPrice ? dataSource : "Manual Mode"}</span>
             <span>Last updated: {lastUpdated}</span>
           </div>
           {priceStatus ? <div style={styles.priceWarning}>{priceStatus}</div> : null}
@@ -2042,8 +2661,10 @@ function Dashboard({
               </span>
               <span>{brokerConnection.platform}</span>
               {!streamerMode ? <span>{brokerConnection.accountId || "No account linked"}</span> : null}
+              {!streamerMode ? <span>{brokerConnection.accountType || "Read-only"}</span> : null}
               {!streamerMode ? <span>Balance: ${Number(brokerConnection.accountBalance || 0).toFixed(2)}</span> : null}
               <span>Open P/L: ${Number(brokerConnection.openPnl || 0).toFixed(2)}</span>
+              <span>Daily P/L: ${Number(brokerConnection.dailyPnl ?? discipline.dailyPnl ?? 0).toFixed(2)}</span>
               <span>Realized P/L: ${Number(brokerConnection.realizedPnl || 0).toFixed(2)}</span>
             </div>
           ) : null}
@@ -2126,6 +2747,110 @@ function Dashboard({
       </main>
       </div>
     </>
+  );
+}
+
+function ManualLiveWorkflow({
+  accountSize,
+  contracts,
+  dataSource,
+  dailyPnl,
+  entry,
+  market,
+  price,
+  resistance,
+  runner,
+  setAutoPrice,
+  setContracts,
+  setDataSource,
+  setEntry,
+  setPrice,
+  setResistance,
+  setRiskPoints,
+  setSupport,
+  stop,
+  support,
+  trim1,
+  trim2,
+  updateDiscipline,
+  updateProfile,
+}) {
+  const updateStop = (value) => setRiskPoints(Math.max(0.25, Math.abs(Number(entry) - Number(value))));
+  const updateTargetPoints = (key, value) => updateProfile(key, Math.max(0.25, Math.abs(Number(value) - Number(entry))));
+
+  return (
+    <section style={styles.card}>
+      <p style={styles.cardLabel}>Non-API Live Workflow</p>
+      <h2 style={styles.sectionTitle}>Manual / TradingView</h2>
+      <div style={styles.sourceGrid}>
+        {["Manual Mode", "TradingView Webhook", "CSV Import", "Tradovate Prop/Funded Read-Only"].map((option) => (
+          <button
+            key={option}
+            onClick={() => {
+              setDataSource(option);
+              setAutoPrice(option === "TradingView Webhook");
+            }}
+            style={{ ...styles.sourceButton, borderColor: dataSource === option ? "#38bdf8" : "#334155" }}
+            type="button"
+          >
+            <strong>{option}</strong>
+            <span>{option.includes("Tradovate") ? "Connect from Connections" : option === "TradingView Webhook" ? "Receive chart alerts" : "Works now"}</span>
+          </button>
+        ))}
+      </div>
+      <div style={{ ...styles.formGrid, marginTop: "16px" }}>
+        <SelectField label="Market" value={market} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
+        <Field label="Current Price" type="number" value={price} onChange={setPrice} />
+        <Field label="Support" type="number" value={support} onChange={setSupport} />
+        <Field label="Resistance" type="number" value={resistance} onChange={setResistance} />
+        <Field label="Entry" type="number" value={entry} onChange={setEntry} />
+        <Field label="Stop" type="number" value={stop} onChange={updateStop} />
+        <Field label="Trim 1" type="number" value={trim1} onChange={(value) => updateTargetPoints("trim1Points", value)} />
+        <Field label="Trim 2" type="number" value={trim2} onChange={(value) => updateTargetPoints("trim2Points", value)} />
+        <Field label="Runner" type="number" value={runner} onChange={(value) => updateTargetPoints("runnerPoints", value)} />
+        <Field label="Contracts" type="number" value={contracts} onChange={setContracts} />
+        <Field label="Account Size" type="number" value={accountSize} onChange={(value) => updateProfile("accountSize", value)} />
+        <Field label="Daily P/L" type="number" value={dailyPnl} onChange={(value) => updateDiscipline("dailyPnl", value)} />
+      </div>
+      <p style={{ ...styles.muted, marginTop: "12px" }}>TradingView can post to /api/webhook/tradingview. Tradovate prop/live stays read-only and falls back to manual if API access is unavailable.</p>
+    </section>
+  );
+}
+
+function AutoZonePanel({ zoneDetection }) {
+  return (
+    <section style={styles.card}>
+      <p style={styles.cardLabel}>Auto Zone Detector</p>
+      <h2 style={styles.sectionTitle}>Support / Resistance</h2>
+      <div style={styles.metricGrid}>
+        <Metric label="Support Zone" value={zoneDetection.supportZone || "Manual"} tone="good" />
+        <Metric label="Resistance Zone" value={zoneDetection.resistanceZone || "Manual"} tone="warn" />
+        <Metric label="Middle Zone" value={zoneDetection.middleZone || "Wait"} />
+        <Metric label="Session High" value={formatOptionalPrice(zoneDetection.sessionHigh)} />
+        <Metric label="Session Low" value={formatOptionalPrice(zoneDetection.sessionLow)} />
+        <Metric label="Open Range" value={zoneDetection.openRange || "Pending"} />
+      </div>
+      <p style={{ ...styles.muted, marginTop: "12px" }}>{zoneDetection.message}</p>
+    </section>
+  );
+}
+
+function FundedManualPanel({ profile, updateProfile }) {
+  return (
+    <section style={styles.card}>
+      <p style={styles.cardLabel}>Funded Account Mode</p>
+      <h2 style={styles.sectionTitle}>Manual Rule Setup</h2>
+      <div style={styles.formGrid}>
+        <SelectField label="Prop Firm" value={profile.fundedProvider} options={fundedProviders} onChange={(value) => updateProfile("fundedProvider", value)} />
+        <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
+        <Field label="Daily Loss Limit" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
+        <Field label="Trailing Drawdown" type="number" value={profile.trailingDrawdown} onChange={(value) => updateProfile("trailingDrawdown", value)} />
+        <Field label="Profit Target" type="number" value={profile.profitGoal} onChange={(value) => updateProfile("profitGoal", value)} />
+        <Field label="Max Contracts" type="number" value={profile.maxContracts} onChange={(value) => updateProfile("maxContracts", value)} />
+        <Field label="Consistency Rule %" type="number" value={profile.consistencyRuleTarget} onChange={(value) => updateProfile("consistencyRuleTarget", value)} />
+        <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} />
+      </div>
+    </section>
   );
 }
 
@@ -2338,15 +3063,143 @@ function analyzeKeyLevels({ breakoutLevel, currentPrice, direction, marketBias, 
   return { action, marketState, message, plan };
 }
 
-function detectKeyLevelsFromCandles(candles = []) {
-  // Future candle shape: { open, high, low, close, timestamp }
-  // Later this can detect swing highs/lows, consolidation ranges, breakout zones, and pullback zones.
+function chartDataToCandles(chartData = []) {
+  return chartData.map((point, index, list) => {
+    const close = Number(point.close || 0);
+    const previous = Number(list[index - 1]?.close ?? close);
+    const range = Math.max(1, Math.abs(close - previous) * 1.6);
+    return {
+      close,
+      high: close + range * 0.5,
+      low: close - range * 0.5,
+      open: previous,
+      timestamp: point.label,
+    };
+  });
+}
+
+function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
+  const clean = candles
+    .map((candle) => ({
+      close: Number(candle.close),
+      high: Number(candle.high ?? candle.close),
+      low: Number(candle.low ?? candle.close),
+      open: Number(candle.open ?? candle.close),
+      timestamp: candle.timestamp,
+    }))
+    .filter((candle) => [candle.close, candle.high, candle.low, candle.open].every(Number.isFinite));
+
+  if (!clean.length) {
+    return {
+      message: "Connect TradingView webhook or enter levels manually.",
+      middleZone: "",
+      openRange: "",
+      resistanceZone: formatOptionalPrice(fallback.resistance),
+      sessionHigh: fallback.resistance,
+      sessionLow: fallback.support,
+      supportZone: formatOptionalPrice(fallback.support),
+    };
+  }
+
+  const highs = clean.map((candle) => candle.high);
+  const lows = clean.map((candle) => candle.low);
+  const sessionHigh = Math.max(...highs);
+  const sessionLow = Math.min(...lows);
+  const priorHigh = Math.max(...highs.slice(0, -1));
+  const priorLow = Math.min(...lows.slice(0, -1));
+  const openRangeCandles = clean.slice(0, Math.min(6, clean.length));
+  const openRangeHigh = Math.max(...openRangeCandles.map((candle) => candle.high));
+  const openRangeLow = Math.min(...openRangeCandles.map((candle) => candle.low));
+  const swingHighs = [];
+  const swingLows = [];
+
+  for (let index = 1; index < clean.length - 1; index += 1) {
+    if (clean[index].high >= clean[index - 1].high && clean[index].high >= clean[index + 1].high) swingHighs.push(clean[index].high);
+    if (clean[index].low <= clean[index - 1].low && clean[index].low <= clean[index + 1].low) swingLows.push(clean[index].low);
+  }
+
+  const supportLevel = averageNearest([fallback.support, priorLow, openRangeLow, ...swingLows].filter(Number.isFinite), fallback.price || clean.at(-1).close, "below");
+  const resistanceLevel = averageNearest([fallback.resistance, priorHigh, openRangeHigh, ...swingHighs].filter(Number.isFinite), fallback.price || clean.at(-1).close, "above");
+  const zonePad = Math.max(1, (sessionHigh - sessionLow) * 0.015);
+  const middleLow = Number((supportLevel + (resistanceLevel - supportLevel) * 0.38).toFixed(2));
+  const middleHigh = Number((supportLevel + (resistanceLevel - supportLevel) * 0.62).toFixed(2));
+
   return {
-    breakoutLevel: null,
-    pullbackSupport: null,
-    recentHigh: null,
-    source: candles.length ? "candle-data-placeholder" : "manual",
+    breakoutLevel: resistanceLevel,
+    message: "Zones are estimated from recent swing highs/lows, repeated rejection areas, prior levels, session range, and opening range.",
+    middleZone: `${middleLow.toFixed(2)} - ${middleHigh.toFixed(2)}`,
+    openRange: `${openRangeLow.toFixed(2)} - ${openRangeHigh.toFixed(2)}`,
+    openRangeHigh,
+    openRangeLow,
+    priorHigh,
+    priorLow,
+    pullbackSupport: supportLevel,
+    recentHigh: resistanceLevel,
+    resistanceZone: `${(resistanceLevel - zonePad).toFixed(2)} - ${(resistanceLevel + zonePad).toFixed(2)}`,
+    sessionHigh,
+    sessionLow,
+    source: "mock/manual candles",
+    supportZone: `${(supportLevel - zonePad).toFixed(2)} - ${(supportLevel + zonePad).toFixed(2)}`,
   };
+}
+
+function averageNearest(levels, price, side) {
+  const filtered = levels.filter((level) => side === "below" ? level <= price : level >= price);
+  const candidates = (filtered.length ? filtered : levels)
+    .sort((a, b) => Math.abs(a - price) - Math.abs(b - price))
+    .slice(0, 3);
+  return Number((candidates.reduce((sum, level) => sum + level, 0) / Math.max(1, candidates.length)).toFixed(2));
+}
+
+function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss, price, rewardRisk, resistance, stop, support }) {
+  const range = Math.max(1, Math.abs(resistance - support));
+  const nearSupport = Math.abs(entry - support) <= range * 0.2;
+  const nearResistance = Math.abs(entry - resistance) <= range * 0.2;
+  const middleEntry = entry > support + range * 0.35 && entry < resistance - range * 0.35;
+  const stopOutsideStructure = stop < support || stop > resistance;
+  let score = 100;
+  const reasons = [];
+
+  if (!nearSupport && !nearResistance) {
+    score -= 18;
+    reasons.push("entry was too far from support/resistance");
+  }
+  if (rewardRisk.ratio < 1.5) {
+    score -= 18;
+    reasons.push("risk/reward is thin");
+  }
+  if (!stopOutsideStructure) {
+    score -= 14;
+    reasons.push("stop is inside the range");
+  }
+  if (Number(contracts) > Number(maxContracts || 1)) {
+    score -= 18;
+    reasons.push("contract size is above your funded limit");
+  }
+  if (middleEntry) {
+    score -= 16;
+    reasons.push("entry is in the middle/no-trade zone");
+  }
+  if (Number(dailyPnl) <= -Math.abs(Number(maxDailyLoss || 0)) * 0.8) {
+    score -= 18;
+    reasons.push("daily loss protection is close");
+  }
+  if (Math.abs(price - entry) > range * 0.35) {
+    score -= 8;
+    reasons.push("current price is stretched from entry");
+  }
+
+  const boundedScore = Math.max(0, Math.min(100, Math.round(score)));
+  const letter = boundedScore >= 85 ? "A" : boundedScore >= 70 ? "B" : boundedScore >= 55 ? "C" : "D";
+  const reason = reasons.length
+    ? `${letter} grade: ${reasons[0]}.`
+    : `${letter} grade: clean location, controlled risk, and plan is defined.`;
+
+  return { letter, reason, score: boundedScore };
+}
+
+function formatOptionalPrice(value) {
+  return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "Pending";
 }
 
 function getMissedEntryMessage({ currentPrice, plan }) {
@@ -2502,7 +3355,7 @@ function getLiveCoachMessage({ activePosition, discipline, engine, price, profil
 function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support, resistance, trim1, trim2 }) {
   const safeChartData = chartData?.length ? chartData : buildChartData({ price: currentPrice, entry, stop, support, resistance, trim1, trim2, runner });
   return (
-    <section style={styles.chartPanel}>
+    <section className="chart-panel" style={styles.chartPanel}>
       <div style={styles.sectionHeader}>
         <div>
           <p style={styles.cardLabel}>Chart View</p>
@@ -2510,7 +3363,7 @@ function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support
         </div>
         <strong style={styles.chartPrice}>{Number(currentPrice).toFixed(2)}</strong>
       </div>
-      <div style={styles.chartWrap}>
+      <div className="tradepilot-chart-wrap" style={styles.chartWrap}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={safeChartData} margin={{ top: 12, right: 22, bottom: 8, left: 0 }}>
             <CartesianGrid stroke="#1f2937" strokeDasharray="4 4" />
@@ -2529,12 +3382,12 @@ function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support
           </LineChart>
         </ResponsiveContainer>
       </div>
-      <p style={styles.chartNote}>Demo chart shown until live data is connected.</p>
+      <p style={styles.chartNote}>Demo chart shown until TradingView or broker data is connected.</p>
     </section>
   );
 }
 
-function LivestreamDashboard({ activePosition, brokerConnection, coachMessage, discipline, engine, price, profile, riskStatus, visualPlan }) {
+function LivestreamDashboard({ activePosition, brokerConnection, coachMessage, discipline, engine, price, profile, riskStatus, tradeGrade, visualPlan }) {
   const contracts = activePosition?.contracts ?? visualPlan.contracts ?? profile.defaultContracts;
   const positionLabel = activePosition ? activePosition.direction.toUpperCase() : "Flat";
   const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
@@ -2551,6 +3404,7 @@ function LivestreamDashboard({ activePosition, brokerConnection, coachMessage, d
         <Metric label="Position" value={positionLabel} />
         <Metric label="Contracts" value={String(contracts)} />
         <Metric label="Entry" value={Number(visualPlan.entry || 0).toFixed(2)} />
+        <Metric label="Trade Score" value={`${tradeGrade.letter} ${tradeGrade.score}/100`} tone={tradeGrade.score >= 75 ? "good" : "warn"} />
         <Metric label="Open P/L" value={`$${engine.openPnl.toFixed(2)}`} tone={engine.openPnl >= 0 ? "good" : "bad"} />
         <Metric label="Daily P/L" value={`$${fundedMetrics.dailyPnl.toFixed(2)}`} />
         <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : "warn"} />
@@ -2686,10 +3540,21 @@ function getConnectionStatusLabel(connection) {
   if (connection?.connectionStatus) return connection.connectionStatus;
   if (!connection?.connected) return "Not Connected";
   if (connection.platform === "Demo Broker") return "Demo Connected";
+  if (connection.platform === "Tradovate Prop/Funded Read-Only") return "Prop/Funded Read-Only Connected";
   if (connection.platform === "Tradovate Live Read-Only") return "Live Read-Only Connected";
   if (connection.platform === "Tradovate Demo Read-Only") return "Demo Connected";
   if (connection.platform === "TradingView Webhook") return "TradingView Connected";
   return `${connection.platform} Connected`;
+}
+
+function getConnectionStateMessage({ brokerConnection, dataSource, profile }) {
+  const platform = brokerConnection?.platform || profile.fundedPlatform;
+  if (platform === "Demo Broker" || dataSource === "Demo Broker") return "Demo Broker Connected - simulated data.";
+  if (platform === "Manual Mode" || dataSource === "Manual Mode") return "Manual Mode Active - enter price and levels yourself.";
+  if (platform === "TradingView Webhook" || dataSource === "TradingView Webhook") return "Waiting for webhook data.";
+  if (platform?.includes("Tradovate") || profile.fundedPlatform === "Tradovate") return "Tradovate read-only coming soon unless API access is configured.";
+  if (profile.accountType === "Funded/prop account") return "Funded account rules active. Broker data may still be manual unless API is connected.";
+  return "Not connected. Choose a data source.";
 }
 
 function buildBrokerSafetyWarnings({ activePosition, brokerConnection, discipline, engine, profile }) {
@@ -2714,8 +3579,9 @@ function getFundedAccountMetrics({ brokerConnection, discipline, profile }) {
   const trailingDrawdown = Number(profile.trailingDrawdown || 0);
   const drawdownFloor = Math.max(startingBalance - trailingDrawdown, accountBalance - trailingDrawdown);
   const drawdownRemaining = Math.max(0, accountBalance - drawdownFloor);
-  const dailyPnl = Number(discipline.dailyPnl || 0);
+  const dailyPnl = Number(brokerConnection.dailyPnl ?? discipline.dailyPnl ?? 0);
   const dailyLossLimit = Number(profile.maxDailyLoss || 0);
+  const dailyRiskRemaining = Math.max(0, dailyLossLimit + dailyPnl);
   const profitGoal = Number(profile.profitGoal || 0);
   const consistencyCap = profitGoal > 0 ? profitGoal * (Number(profile.consistencyRuleTarget || 30) / 100) : 0;
 
@@ -2724,6 +3590,7 @@ function getFundedAccountMetrics({ brokerConnection, discipline, profile }) {
     consistencyCap,
     dailyLossLimit,
     dailyPnl,
+    dailyRiskRemaining,
     drawdownFloor,
     drawdownRemaining,
     profitGoal,
@@ -2747,6 +3614,8 @@ function buildFundedRuleWarnings({ brokerConnection, discipline, profile }) {
 }
 
 function ConnectionsPage({
+  activateManualMode,
+  activateTradingViewMode,
   activePosition,
   brokerConnection,
   connectTradovateReadOnly,
@@ -2757,10 +3626,16 @@ function ConnectionsPage({
   price,
   profile,
   quote,
+  saveConnectionSettings,
   startDemoBroker,
+  updateProfile,
 }) {
   const [tradovateStatus, setTradovateStatus] = useState(null);
+  const [tradovateAccountType, setTradovateAccountType] = useState("prop");
+  const [saveStatus, setSaveStatus] = useState("");
   const statusLabel = getConnectionStatusLabel(brokerConnection);
+  const connectionMessage = getConnectionStateMessage({ brokerConnection, dataSource, profile });
+  const isFunded = isFundedAccountType(profile.accountType);
   const position = brokerConnection.position || activePosition;
   const safetyWarnings = buildBrokerSafetyWarnings({ activePosition, brokerConnection, discipline, engine, profile });
   const fundedWarnings = buildFundedRuleWarnings({ brokerConnection, discipline, profile });
@@ -2781,7 +3656,38 @@ function ConnectionsPage({
 
   return (
     <main style={styles.mainGrid}>
+      <div style={styles.fullWidthSection}>
+        <PageTitle title="Connections" subtitle="Connect data sources or use manual mode." />
+      </div>
       <section style={styles.card}>
+        <p style={styles.cardLabel}>Setup</p>
+        <h2 style={styles.sectionTitle}>Choose a Connection Path</h2>
+        <div style={styles.formGrid}>
+          <SelectField label="Account Type" value={profile.accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
+          <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
+          {isFunded ? <SelectField label="Prop Firm" value={profile.fundedProvider} options={fundedProviders} onChange={(value) => updateProfile("fundedProvider", value)} /> : null}
+          {isFunded ? <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} /> : null}
+        </div>
+        <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
+          <button onClick={activateManualMode} style={styles.dismissButton}>Use Manual Mode</button>
+          <button onClick={startDemoBroker} style={styles.settingsButton}>Connect Demo Broker</button>
+          <button onClick={activateTradingViewMode} style={styles.dismissButton}>Use TradingView Webhook</button>
+          <button onClick={() => connectTradovateReadOnly("demo")} style={styles.secondaryButton}>Try Tradovate Read-Only</button>
+        </div>
+        <div style={{ ...styles.coachPrompt, marginTop: "16px" }}>{connectionMessage}</div>
+        <button
+          onClick={async () => {
+            await saveConnectionSettings?.();
+            setSaveStatus("Connection settings saved.");
+          }}
+          style={{ ...styles.settingsButton, marginTop: "16px" }}
+        >
+          Save Connection Settings
+        </button>
+        {saveStatus ? <p style={{ ...styles.muted, marginTop: "10px" }}>{saveStatus}</p> : null}
+      </section>
+
+      {isFunded ? <section style={styles.card}>
         <p style={styles.cardLabel}>Funded Account</p>
         <h2 style={styles.sectionTitle}>Platform-First Setup</h2>
         <div style={styles.connectionGrid}>
@@ -2792,23 +3698,41 @@ function ConnectionsPage({
           <Metric label="Drawdown Remaining" value={`$${fundedMetrics.drawdownRemaining.toFixed(2)}`} tone={fundedMetrics.drawdownRemaining > 500 ? "good" : "warn"} />
           <Metric label="Profit Goal" value={`$${fundedMetrics.profitGoal.toFixed(2)}`} />
         </div>
-        <p style={{ ...styles.muted, marginTop: "14px" }}>Trade Pilot is a funded-account execution and risk assistant. It is not a broker or signal service.</p>
-      </section>
+        <p style={{ ...styles.muted, marginTop: "14px" }}>Funded account rules can be tracked manually. Broker connection is optional.</p>
+      </section> : null}
 
       <section style={styles.card}>
         <p style={styles.cardLabel}>Connection Modes</p>
         <h2 style={styles.sectionTitle}>Read-Only Platform Paths</h2>
         <div style={styles.sourceGrid}>
           <SourceOption title="Manual Mode" text="Manually enter P/L, drawdown, and account stats." active={profile.fundedPlatform === "Manual Mode"} />
+          <SourceOption title="Demo Broker Mode" text="Starts simulated MNQ price, position, account balance, and P/L immediately." active={brokerConnection.platform === "Demo Broker"} />
+          <SourceOption title="TradingView Webhook" text="Waits for alert payloads with symbol, price, support, resistance, and bias." active={dataSource === "TradingView Webhook"} />
           <SourceOption title="CSV Import" text="Upload trade reports from supported platforms as a fallback." active={profile.fundedPlatform === "CSV Import"} />
-          <SourceOption title="Tradovate Read-Only" text="Use Tradovate API access when enabled by the account/platform." active={profile.fundedPlatform === "Tradovate"} />
-          <SourceOption title="Rithmic Read-Only" text="Prepared for a Rithmic API or third-party bridge integration." active={profile.fundedPlatform === "Rithmic"} />
-          <SourceOption title="TopstepX Read-Only" text="Prepared for TopstepX API read-only account data." active={profile.fundedPlatform === "TopstepX"} />
-          <SourceOption title="NinjaTrader/CQG Later" text="Reserved for future read-only platform support." active={profile.fundedPlatform === "NinjaTrader/CQG"} />
+          <SourceOption title="Tradovate Read-Only Coming Soon" text="Direct connection requires API access. Use Manual Mode or TradingView Webhook for now." active={profile.fundedPlatform === "Tradovate"} />
+          <SourceOption title="Rithmic Coming Soon" text="Prepared for future read-only platform support." active={profile.fundedPlatform === "Rithmic"} />
         </div>
       </section>
 
-      <section style={styles.safetyCard}>
+      {isFunded ? <section style={styles.card}>
+        <p style={styles.cardLabel}>Prop Firm Settings</p>
+        <h2 style={styles.sectionTitle}>Funded Risk Rules</h2>
+        <div style={styles.formGrid}>
+          <SelectField label="Prop Firm" value={profile.fundedProvider} options={fundedProviders} onChange={(value) => updateProfile("fundedProvider", value)} />
+          <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
+          <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
+          <Field label="Trailing Drawdown" type="number" value={profile.trailingDrawdown} onChange={(value) => updateProfile("trailingDrawdown", value)} />
+          <Field label="Daily Loss Limit" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
+          <Field label="Profit Target" type="number" value={profile.profitGoal} onChange={(value) => updateProfile("profitGoal", value)} />
+          <Field label="Max Contracts" type="number" value={profile.maxContracts} onChange={(value) => updateProfile("maxContracts", value)} />
+          <Field label="Consistency Rule %" type="number" value={profile.consistencyRuleTarget} onChange={(value) => updateProfile("consistencyRuleTarget", value)} />
+          <SelectField label="Platform Used" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
+          <SelectField label="Payout Protection Mode" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} />
+        </div>
+        <p style={{ ...styles.muted, marginTop: "12px" }}>Funded account rules can be tracked manually. Broker connection is optional.</p>
+      </section> : null}
+
+      {isFunded ? <section style={styles.safetyCard}>
         <p style={styles.cardLabel}>Prop Firm Rule Monitor</p>
         <h2 style={styles.sectionTitle}>Protect the Payout</h2>
         <div style={styles.warningStack}>
@@ -2816,24 +3740,28 @@ function ConnectionsPage({
             <div key={warning} style={warning.includes("Inside") ? styles.coachPrompt : styles.warningBox}>{warning}</div>
           ))}
         </div>
-      </section>
+      </section> : null}
 
       <section style={styles.card}>
         <p style={styles.cardLabel}>Connection Status</p>
         <h2 style={styles.sectionTitle}>{statusLabel}</h2>
+        <div style={{ ...styles.coachPrompt, marginBottom: "14px" }}>{connectionMessage}</div>
         {brokerConnection.error ? <div style={styles.priceWarning}>{brokerConnection.error}</div> : null}
         <div style={styles.connectionGrid}>
           <Metric label="Market" value={profile.mainMarket} />
+          <Metric label="Account Type" value={brokerConnection.accountType || profile.accountType || "Not connected"} />
+          <Metric label="Account Name" value={brokerConnection.accountName || "Hidden until connected"} />
           <Metric label="Current Price" value={Number(price).toFixed(2)} />
           <Metric label="Bid" value={Number(quote.bid || 0).toFixed(2)} />
           <Metric label="Ask" value={Number(quote.ask || 0).toFixed(2)} />
           <Metric label="Position" value={position ? position.direction.toUpperCase() : "Flat"} />
-          <Metric label="Entry" value={position ? Number(position.entry).toFixed(2) : "None"} />
-          <Metric label="Contracts" value={String(position?.contracts ?? 0)} />
+          <Metric label="Entry" value={position ? Number(position.entry || position.averagePrice || 0).toFixed(2) : "None"} />
+          <Metric label="Contracts" value={String(position?.contracts ?? position?.quantity ?? 0)} />
           <Metric label="Open P/L" value={`$${Number(brokerConnection.openPnl ?? engine.openPnl ?? 0).toFixed(2)}`} tone={Number(brokerConnection.openPnl ?? 0) >= 0 ? "good" : "bad"} />
           <Metric label="Realized P/L" value={`$${Number(brokerConnection.realizedPnl || 0).toFixed(2)}`} />
+          <Metric label="Daily P/L" value={`$${Number(brokerConnection.dailyPnl ?? discipline.dailyPnl ?? 0).toFixed(2)}`} />
           <Metric label="Account Balance" value={`$${Number(brokerConnection.accountBalance || profile.accountSize).toFixed(2)}`} />
-          <Metric label="Data Source" value={dataSource} />
+          <Metric label="Data Source" value={brokerConnection.source || dataSource} />
           <Metric label="Last Updated" value={lastUpdated} />
         </div>
       </section>
@@ -2855,24 +3783,34 @@ function ConnectionsPage({
         <p style={styles.cardLabel}>Connection Options</p>
         <h2 style={styles.sectionTitle}>Read-Only Sources</h2>
         <div style={styles.sourceGrid}>
-          <SourceOption title="Manual Mode" text="Use dashboard inputs, sliders, and Fast Mode without external broker data." active={dataSource === "Manual"} />
+          <SourceOption title="Manual Mode" text="Use dashboard inputs, sliders, and Fast Mode without external broker data." active={dataSource === "Manual Mode"} />
           <SourceOption title="Demo / Simulated Broker" text="Connects to the local demo stream for safe testing." active={brokerConnection.platform === "Demo Broker"} />
           <SourceOption title="Tradovate Demo Read-Only" text="Uses demo.tradovateapi.com/v1 and server-side credentials only." active={dataSource === tradovateModes.demo} />
+          <SourceOption title="Tradovate Prop/Funded Read-Only" text="Uses live.tradovateapi.com/v1 for prop accounts. No trading actions are implemented." active={dataSource === tradovateModes.prop} />
           <SourceOption title="Tradovate Live Read-Only" text="Uses live.tradovateapi.com/v1 with order placement disabled." active={dataSource === tradovateModes.live} />
-          <SourceOption title="TradingView Webhook Later" text="Accepts symbol, price, signal type, support, resistance, and timestamp." />
+          <SourceOption title="TradingView Webhook" text="Accepts symbol, price, signal type, support, resistance, and timestamp." />
           <SourceOption title="CSV Import" text="Reserved for trade-history review and coaching analytics." />
         </div>
       </section>
 
       <section style={styles.card}>
         <p style={styles.cardLabel}>Phase 2</p>
-        <h2 style={styles.sectionTitle}>Tradovate Read-Only Prep</h2>
-        <p style={styles.muted}>Use your dedicated Tradovate API password. Broker credentials, API keys, and token status stay on the backend only.</p>
+        <h2 style={styles.sectionTitle}>Tradovate Read-Only</h2>
+        <p style={styles.muted}>Use your dedicated Tradovate API password. Broker credentials, API keys, accessToken, and mdAccessToken stay on the backend only.</p>
+        <div style={{ ...styles.segmentGroup, marginTop: "14px" }}>
+          {[
+            ["demo", "Demo"],
+            ["prop", "Funded / Prop"],
+            ["live", "Personal Live"],
+          ].map(([mode, label]) => (
+            <button key={mode} onClick={() => setTradovateAccountType(mode)} style={{ ...styles.segmentButton, background: tradovateAccountType === mode ? "#2563eb" : "#111827" }}>{label}</button>
+          ))}
+        </div>
         <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
-          <button onClick={() => connectTradovateReadOnly("demo")} style={styles.settingsButton}>Connect Demo Read-Only</button>
-          <button onClick={() => connectTradovateReadOnly("live")} style={styles.dismissButton}>Connect Live Read-Only</button>
+          <button onClick={() => connectTradovateReadOnly(tradovateAccountType)} style={styles.settingsButton}>Connect Selected Read-Only</button>
           <button onClick={checkTradovateReadOnly} style={styles.secondaryButton}>Check API Plan</button>
         </div>
+        <p style={{ ...styles.muted, marginTop: "12px" }}>If Tradovate API access is unavailable, use TradingView Webhook + Manual Mode. Trade Pilot will not block the dashboard.</p>
         {tradovateStatus ? (
           <div style={{ ...styles.warningStack, marginTop: "16px" }}>
             <PlanItem title="Reads" text={(tradovateStatus.reads || tradovateStatus.capabilities || []).join(", ")} />
@@ -2905,7 +3843,7 @@ function ConnectionsPage({
 }
 
 function DataSourcePage({ applyAlert }) {
-  const [webhookText, setWebhookText] = useState('{"symbol":"MNQ","price":27462,"direction":"long","support":27420,"resistance":27450,"signalType":"breakout"}');
+  const [webhookText, setWebhookText] = useState('{"symbol":"MNQ","price":27500.25,"timeframe":"5m","support":27460,"resistance":27550,"bias":"bullish","timestamp":"2026-04-28T14:30:00.000Z"}');
   const [brokerText, setBrokerText] = useState(JSON.stringify(brokerSamplePayload, null, 2));
   const [brokerStatus, setBrokerStatus] = useState(null);
   const [message, setMessage] = useState("Broker trading is disabled. Trade Pilot only reads data and coaches execution.");
@@ -2917,10 +3855,11 @@ function DataSourcePage({ applyAlert }) {
         symbol: parsed.symbol,
         price: Number(parsed.price),
         direction: parsed.direction,
+        bias: parsed.bias,
         support: Number(parsed.support),
         resistance: Number(parsed.resistance),
         timestamp: parsed.timestamp,
-        signalType: parsed.signalType,
+        signalType: parsed.signalType || parsed.bias,
       });
     } catch {
       setMessage("Webhook preview must be valid JSON.");
@@ -2951,9 +3890,9 @@ function DataSourcePage({ applyAlert }) {
         <h2 style={styles.sectionTitle}>Read-Only Modes</h2>
         <div style={styles.sourceGrid}>
           <SourceOption title="Manual Mode" text="Use sliders and Fast Mode buttons during live execution." active />
-          <SourceOption title="TradingView Alerts" text="Webhook alerts can send symbol, price, direction, support, resistance, and signal type." />
+          <SourceOption title="TradingView Webhook" text="Webhook alerts can send symbol, price, timeframe, support, resistance, bias, and timestamp." />
           <SourceOption title="Market Data API" text="Uses the local read-only market server at 127.0.0.1:8787 for streaming prices." />
-          <SourceOption title="Broker Connection" text="Reads position, fill, account, and quote snapshots from a local platform bridge." />
+          <SourceOption title="Tradovate Prop/Funded Read-Only" text="Reads live prop account data when API access is enabled. No order placement." />
           <SourceOption title="CSV Upload" text="Planned manual trade-history import for review and coaching analytics." />
         </div>
       </section>
@@ -3071,6 +4010,9 @@ function JournalPage({ activePosition, addJournalEntry, engine, discipline, jour
 
   return (
     <main style={styles.mainGrid}>
+      <div style={styles.fullWidthSection}>
+        <PageTitle title="Journal" subtitle="Track trades, notes, and execution habits." />
+      </div>
       <section style={styles.card}>
         <p style={styles.cardLabel}>Journal</p>
         <h2 style={styles.sectionTitle}>Today&apos;s Execution Snapshot</h2>
@@ -3109,16 +4051,24 @@ function JournalPage({ activePosition, addJournalEntry, engine, discipline, jour
 
 function ProfilePage({ profile, updateProfile }) {
   return (
-    <section style={styles.card}>
-      <p style={styles.cardLabel}>Profile</p>
-      <h2 style={styles.sectionTitle}>Trader Settings</h2>
-      <p style={{ ...styles.muted, marginBottom: "18px" }}>Saved locally on this device, and synced to your personal dashboard when signed in.</p>
-      <ProfileFields profile={profile} updateProfile={updateProfile} />
-    </section>
+    <main style={styles.mainGrid}>
+      <div style={styles.fullWidthSection}>
+        <PageTitle title="Profile" subtitle="Save your trading preferences." />
+      </div>
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Profile</p>
+        <h2 style={styles.sectionTitle}>Trader Settings</h2>
+        <p style={{ ...styles.muted, marginBottom: "18px" }}>Saved locally on this device, and synced to your personal dashboard when signed in.</p>
+        <ProfileFields profile={profile} updateProfile={updateProfile} />
+      </section>
+    </main>
   );
 }
 
 function ProfileFields({ profile, updateProfile }) {
+  const accountType = normalizeAccountType(profile.accountType);
+  const isFunded = isFundedAccountType(accountType);
+
   return (
     <>
       <div style={styles.formGrid}>
@@ -3126,16 +4076,10 @@ function ProfileFields({ profile, updateProfile }) {
         <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
         <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
         <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
-        <SelectField label="Account Type" value={profile.accountType} options={["personal", "funded", "both", "prop"]} onChange={(value) => updateProfile("accountType", value)} />
-        <SelectField label="Funded Provider" value={profile.fundedProvider} options={fundedProviders} onChange={(value) => updateProfile("fundedProvider", value)} />
+        <SelectField label="Account Type" value={accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
         <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
-        <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} />
         <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
         <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
-        <Field label="Trailing Drawdown" type="number" value={profile.trailingDrawdown} onChange={(value) => updateProfile("trailingDrawdown", value)} />
-        <Field label="Profit Goal" type="number" value={profile.profitGoal} onChange={(value) => updateProfile("profitGoal", value)} />
-        <Field label="Consistency Rule Target %" type="number" value={profile.consistencyRuleTarget} onChange={(value) => updateProfile("consistencyRuleTarget", value)} />
-        <Field label="Max Daily Loss" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
         <Field label="Max Risk Per Trade" type="number" value={profile.maxRiskPerTrade} onChange={(value) => updateProfile("maxRiskPerTrade", value)} />
         <Field label="Max Trades Per Day" type="number" value={profile.maxTradesPerDay} onChange={(value) => updateProfile("maxTradesPerDay", value)} />
         <Field label="Max Contracts" type="number" value={profile.maxContracts} onChange={(value) => updateProfile("maxContracts", value)} />
@@ -3145,6 +4089,21 @@ function ProfileFields({ profile, updateProfile }) {
         <Field label="Trim 2 Points" type="number" value={profile.trim2Points} onChange={(value) => updateProfile("trim2Points", value)} />
         <Field label="Runner Points" type="number" value={profile.runnerPoints} onChange={(value) => updateProfile("runnerPoints", value)} />
       </div>
+      {isFunded ? (
+        <section style={styles.subPanel}>
+          <p style={styles.cardLabel}>Prop Firm Rules</p>
+          <h2 style={styles.sectionTitle}>Funded Account</h2>
+          <div style={styles.formGrid}>
+            <SelectField label="Funded Provider" value={profile.fundedProvider} options={fundedProviders} onChange={(value) => updateProfile("fundedProvider", value)} />
+            <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} />
+            <Field label="Trailing Drawdown" type="number" value={profile.trailingDrawdown} onChange={(value) => updateProfile("trailingDrawdown", value)} />
+            <Field label="Profit Goal" type="number" value={profile.profitGoal} onChange={(value) => updateProfile("profitGoal", value)} />
+            <Field label="Consistency Rule Target %" type="number" value={profile.consistencyRuleTarget} onChange={(value) => updateProfile("consistencyRuleTarget", value)} />
+            <Field label="Max Daily Loss" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
+            <Field label="Max Contracts" type="number" value={profile.maxContracts} onChange={(value) => updateProfile("maxContracts", value)} />
+          </div>
+        </section>
+      ) : null}
       <label style={styles.switchRow}>
         <input type="checkbox" checked={profile.voiceAlerts} onChange={(event) => updateProfile("voiceAlerts", event.target.checked)} />
         Voice alerts on/off
@@ -3165,6 +4124,9 @@ function HelpPage() {
 
   return (
     <main style={styles.mainGrid}>
+      <div style={styles.fullWidthSection}>
+        <PageTitle title="Help" subtitle="Learn the trading concepts behind Trade Pilot." />
+      </div>
       {topics.map(([title, text]) => (
         <section key={title} style={styles.card}>
           <p style={styles.cardLabel}>Education</p>
@@ -3188,6 +4150,9 @@ function SupportPage({ messages, onSubmit }) {
 
   return (
     <main style={styles.mainGrid}>
+      <div style={styles.fullWidthSection}>
+        <PageTitle title="Support" subtitle="Contact support or send feedback." />
+      </div>
       <section style={styles.card}>
         <p style={styles.cardLabel}>Support</p>
         <h2 style={styles.sectionTitle}>Contact Trade Pilot</h2>
@@ -3214,12 +4179,79 @@ function SupportPage({ messages, onSubmit }) {
 }
 
 function SettingsPage({ applyAlert, profile, updateProfile }) {
+  const [settingsTab, setSettingsTab] = useState("General");
+  const accountType = normalizeAccountType(profile.accountType);
+  const isFunded = isFundedAccountType(accountType);
+  const tabs = ["General", "Risk Guardrails", "Funded Account", "Trade Defaults", "Alerts"];
+
   return (
     <main style={styles.mainGrid}>
+      <div style={styles.fullWidthSection}>
+        <PageTitle title="Settings" subtitle="Customize Trade Pilot." />
+      </div>
       <section style={styles.card}>
         <p style={styles.cardLabel}>Settings</p>
-        <h2 style={styles.sectionTitle}>Safety Guardrails</h2>
-        <ProfileFields profile={profile} updateProfile={updateProfile} />
+        <h2 style={styles.sectionTitle}>Customize Trade Pilot</h2>
+        <div style={styles.segmentGroup}>
+          {tabs.map((tab) => (
+            <button key={tab} onClick={() => setSettingsTab(tab)} style={{ ...styles.segmentButton, background: settingsTab === tab ? "#2563eb" : "#111827" }}>{tab}</button>
+          ))}
+        </div>
+        {settingsTab === "General" ? (
+          <div style={styles.formGrid}>
+            <Field label="Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
+            <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
+            <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
+            <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
+            <SelectField label="Account Type" value={accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
+            <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
+            <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
+            <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
+          </div>
+        ) : null}
+        {settingsTab === "Risk Guardrails" ? (
+          <div style={styles.formGrid}>
+            <Field label="Max Risk Per Trade" type="number" value={profile.maxRiskPerTrade} onChange={(value) => updateProfile("maxRiskPerTrade", value)} />
+            <Field label="Max Trades Per Day" type="number" value={profile.maxTradesPerDay} onChange={(value) => updateProfile("maxTradesPerDay", value)} />
+            <Field label="Max Contracts" type="number" value={profile.maxContracts} onChange={(value) => updateProfile("maxContracts", value)} />
+            {isFunded ? <Field label="Max Daily Loss" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} /> : null}
+          </div>
+        ) : null}
+        {settingsTab === "Funded Account" ? (
+          isFunded ? (
+            <>
+              <p style={styles.cardLabel}>Prop Firm Rules</p>
+              <div style={styles.formGrid}>
+                <SelectField label="Funded Provider" value={profile.fundedProvider} options={fundedProviders} onChange={(value) => updateProfile("fundedProvider", value)} />
+                <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} />
+                <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
+                <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
+                <Field label="Trailing Drawdown" type="number" value={profile.trailingDrawdown} onChange={(value) => updateProfile("trailingDrawdown", value)} />
+                <Field label="Profit Goal" type="number" value={profile.profitGoal} onChange={(value) => updateProfile("profitGoal", value)} />
+                <Field label="Consistency Rule Target %" type="number" value={profile.consistencyRuleTarget} onChange={(value) => updateProfile("consistencyRuleTarget", value)} />
+                <Field label="Max Daily Loss" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
+                <Field label="Max Contracts" type="number" value={profile.maxContracts} onChange={(value) => updateProfile("maxContracts", value)} />
+              </div>
+            </>
+          ) : (
+            <p style={styles.muted}>Switch Account Type to Funded / Prop Firm Account to track prop firm rules.</p>
+          )
+        ) : null}
+        {settingsTab === "Trade Defaults" ? (
+          <div style={styles.formGrid}>
+            <Field label="Default Contracts" type="number" value={profile.defaultContracts} onChange={(value) => updateProfile("defaultContracts", value)} />
+            <Field label="Default Risk Points" type="number" value={profile.defaultRiskPoints} onChange={(value) => updateProfile("defaultRiskPoints", value)} />
+            <Field label="Trim 1 Points" type="number" value={profile.trim1Points} onChange={(value) => updateProfile("trim1Points", value)} />
+            <Field label="Trim 2 Points" type="number" value={profile.trim2Points} onChange={(value) => updateProfile("trim2Points", value)} />
+            <Field label="Runner Points" type="number" value={profile.runnerPoints} onChange={(value) => updateProfile("runnerPoints", value)} />
+          </div>
+        ) : null}
+        {settingsTab === "Alerts" ? (
+          <label style={styles.switchRow}>
+            <input type="checkbox" checked={profile.voiceAlerts} onChange={(event) => updateProfile("voiceAlerts", event.target.checked)} />
+            Voice alerts on/off
+          </label>
+        ) : null}
       </section>
       <DataSourcePage applyAlert={applyAlert} />
       <section style={styles.card}>
@@ -3365,7 +4397,7 @@ function SettingsModal({ profile, updateProfile, onClose }) {
         <div style={styles.formGrid}>
           <Field label="Trader Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
           <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
-          <SelectField label="Account Type" value={profile.accountType} options={["personal", "funded", "both", "prop"]} onChange={(value) => updateProfile("accountType", value)} />
+          <SelectField label="Account Type" value={profile.accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
           <SelectField label="Main Market" value={profile.mainMarket} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
           <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
           <Field label="Max Daily Loss" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
@@ -3467,12 +4499,110 @@ const styles = {
     background: "radial-gradient(circle at top left, #172554 0, #050505 34%, #09090b 100%)",
     color: "#f8fafc",
     fontFamily: "Inter, Arial, sans-serif",
-    padding: "max(18px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left))",
+    padding: 0,
+    width: "100%",
   },
   shell: {
-    margin: "0 auto",
-    maxWidth: "1600px",
+    boxSizing: "border-box",
+    margin: 0,
+    maxWidth: "none",
+    padding: "24px 32px",
     width: "100%",
+  },
+  standaloneMain: {
+    width: "100%",
+  },
+  desktopDashboard: {
+    alignItems: "start",
+    display: "grid",
+    gap: "20px",
+    gridTemplateColumns: "240px minmax(0, 1fr) 320px",
+    width: "100%",
+  },
+  dashboardMain: {
+    minWidth: 0,
+    width: "100%",
+  },
+  leftSidebar: {
+    background: "rgba(2, 6, 23, .82)",
+    border: "1px solid #1e293b",
+    borderRadius: "16px",
+    display: "grid",
+    gap: "16px",
+    padding: "16px",
+    position: "sticky",
+    top: "20px",
+  },
+  sidebarBrand: {
+    color: "#f8fafc",
+    fontSize: "22px",
+    fontWeight: 950,
+    lineHeight: 1,
+    padding: "8px 8px 4px",
+  },
+  sidebarNav: {
+    display: "grid",
+    gap: "6px",
+  },
+  sidebarButton: {
+    border: "1px solid transparent",
+    borderRadius: "10px",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontWeight: 900,
+    padding: "12px",
+    textAlign: "left",
+  },
+  sidebarStreamerButton: {
+    background: "#0e7490",
+    border: "1px solid #38bdf8",
+    borderRadius: "12px",
+    color: "#ecfeff",
+    cursor: "pointer",
+    fontWeight: 950,
+    padding: "12px",
+  },
+  rightPanel: {
+    display: "grid",
+    gap: "14px",
+    minWidth: 0,
+    position: "sticky",
+    top: "20px",
+  },
+  insightCard: {
+    background: "rgba(15, 23, 42, .78)",
+    border: "1px solid rgba(148, 163, 184, .22)",
+    borderRadius: "14px",
+    display: "grid",
+    gap: "10px",
+    padding: "16px",
+  },
+  dashboardToolbar: {
+    alignItems: "center",
+    display: "flex",
+    gap: "12px",
+    justifyContent: "space-between",
+    marginBottom: "16px",
+    flexWrap: "wrap",
+  },
+  subPanel: {
+    background: "rgba(2, 6, 23, .42)",
+    border: "1px solid rgba(148, 163, 184, .18)",
+    borderRadius: "14px",
+    marginTop: "16px",
+    padding: "16px",
+  },
+  toggleList: {
+    display: "grid",
+    gap: "8px",
+  },
+  compactSwitchRow: {
+    alignItems: "center",
+    color: "#e5e7eb",
+    display: "flex",
+    fontSize: "13px",
+    fontWeight: 800,
+    gap: "8px",
   },
   header: {
     alignItems: "center",
@@ -3482,12 +4612,20 @@ const styles = {
     marginBottom: "22px",
     flexWrap: "wrap",
   },
+  headerMeta: {
+    color: "#cbd5e1",
+    display: "flex",
+    flexWrap: "wrap",
+    fontSize: "12px",
+    fontWeight: 900,
+    gap: "8px",
+    marginTop: "10px",
+  },
   topActions: {
     display: "flex",
     gap: "10px",
     flexWrap: "wrap",
     justifyContent: "flex-end",
-    maxWidth: "860px",
     position: "relative",
   },
   authActions: {
@@ -3666,24 +4804,55 @@ const styles = {
     display: "grid",
     gap: "16px",
   },
+  pageTitle: {
+    background: "rgba(15, 23, 42, .78)",
+    border: "1px solid rgba(51, 65, 85, .9)",
+    borderRadius: "16px",
+    marginBottom: "16px",
+    padding: "20px",
+    textAlign: "left",
+  },
+  breadcrumb: {
+    color: "#7dd3fc",
+    fontSize: "12px",
+    fontWeight: 900,
+    letterSpacing: "0.08em",
+    margin: "0 0 8px",
+    textTransform: "uppercase",
+  },
+  pageTitleText: {
+    color: "#f8fafc",
+    fontSize: "30px",
+    lineHeight: 1.1,
+    margin: 0,
+  },
+  pageSubtitle: {
+    color: "#a1a1aa",
+    fontSize: "15px",
+    margin: "8px 0 0",
+  },
+  fullWidthSection: {
+    gridColumn: "1 / -1",
+  },
   homePage: {
     display: "grid",
     gap: "24px",
   },
   homeHero: {
-    alignItems: "center",
+    alignItems: "start",
     background: "linear-gradient(135deg, rgba(15, 23, 42, .96), rgba(8, 47, 73, .78))",
     border: "1px solid rgba(56, 189, 248, .35)",
     borderRadius: "22px",
     display: "grid",
-    minHeight: "420px",
-    padding: "clamp(28px, 7vw, 72px)",
+    minHeight: "320px",
+    padding: "48px",
+    textAlign: "left",
   },
   homeTitle: {
     fontSize: "clamp(42px, 7vw, 82px)",
     lineHeight: 1,
     margin: "0 0 18px",
-    maxWidth: "900px",
+    maxWidth: "none",
   },
   homeSubtitle: {
     color: "#cbd5e1",
@@ -3721,7 +4890,7 @@ const styles = {
   productCardGrid: {
     display: "grid",
     gap: "16px",
-    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
   },
   softFeatureCard: {
     background: "rgba(15, 23, 42, .76)",
@@ -3836,14 +5005,22 @@ const styles = {
   alphaTopGrid: {
     display: "grid",
     gap: "22px",
-    gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
     marginBottom: "22px",
   },
   alphaMiddleGrid: {
     display: "grid",
     gap: "22px",
-    gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 380px), 1fr))",
     marginBottom: "22px",
+  },
+  dashboardGrid: {
+    display: "grid",
+    gap: "24px",
+    gridTemplateColumns: "minmax(420px, 0.95fr) minmax(520px, 1.35fr)",
+    alignItems: "start",
+    marginBottom: "24px",
+    width: "100%",
   },
   rulesCard: {
     background: "rgba(15, 23, 42, .76)",
@@ -3942,10 +5119,12 @@ const styles = {
     border: "1px solid #334155",
     borderRadius: "18px",
     marginBottom: "22px",
+    minHeight: "480px",
     padding: "22px",
+    width: "100%",
   },
   chartWrap: {
-    height: "clamp(280px, 32vw, 420px)",
+    height: "480px",
     minWidth: 0,
   },
   chartNote: {
@@ -4056,6 +5235,17 @@ const styles = {
     gap: "10px",
     gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
   },
+  sourceButton: {
+    background: "rgba(15, 23, 42, .9)",
+    border: "1px solid #334155",
+    borderRadius: "12px",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    display: "grid",
+    gap: "5px",
+    padding: "14px",
+    textAlign: "left",
+  },
   quickButton: {
     border: "1px solid rgba(255,255,255,.16)",
     borderRadius: "14px",
@@ -4097,7 +5287,7 @@ const styles = {
   productUpgradeGrid: {
     display: "grid",
     gap: "18px",
-    gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
     marginBottom: "22px",
   },
   equityCurve: {
@@ -4283,7 +5473,7 @@ const styles = {
   },
   mainGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
     gap: "22px",
   },
   sectionHeader: {

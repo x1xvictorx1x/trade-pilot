@@ -3,7 +3,10 @@ import { normalizeSymbol } from "../market-config.mjs";
 const emptySnapshot = {
   accountId: "",
   accountBalance: 0,
+  accountName: "",
+  accountType: "",
   connected: false,
+  dailyPnl: 0,
   fills: [],
   openPnl: 0,
   platform: "Not connected",
@@ -128,12 +131,16 @@ export function createBrokerBridge() {
         : snapshot.workingOrders;
       const openPnl = finiteNumber(payload.openPnl ?? payload.unrealizedPnl ?? position?.openPnl, snapshot.openPnl);
       const realizedPnl = finiteNumber(payload.realizedPnl, snapshot.realizedPnl);
+      const dailyPnl = finiteNumber(payload.dailyPnl ?? payload.dailyPnL ?? payload.todayPnl ?? payload.todayPnL, openPnl + realizedPnl);
       const accountBalance = finiteNumber(payload.accountBalance ?? payload.balance, snapshot.accountBalance);
 
       snapshot = {
         accountId: payload.accountId || snapshot.accountId,
         accountBalance,
+        accountName: payload.accountName || snapshot.accountName,
+        accountType: payload.accountType || snapshot.accountType,
         connected: true,
+        dailyPnl,
         fills,
         openPnl,
         platform: payload.platform || snapshot.platform || "Broker Bridge",

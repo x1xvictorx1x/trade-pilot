@@ -14,12 +14,13 @@ const renewWindowMs = 15 * 60 * 1000;
 
 function getMode(mode) {
   const envMode = String(process.env.TRADOVATE_ENV || "demo").toLowerCase();
+  if (mode === "prop" || mode === "funded" || envMode === "prop" || envMode === "funded") return "prop";
   if (mode === "live" || envMode === "live") return "live";
   return "demo";
 }
 
 function getConfig(mode) {
-  const envPrefix = mode === "live" ? "TRADOVATE_LIVE" : "TRADOVATE";
+  const envPrefix = mode === "prop" ? "TRADOVATE_PROP" : mode === "live" ? "TRADOVATE_LIVE" : "TRADOVATE";
   return {
     appId: process.env[`${envPrefix}_APP_ID`] || process.env.TRADOVATE_APP_ID || "TradePilot",
     appVersion: process.env[`${envPrefix}_APP_VERSION`] || process.env.TRADOVATE_APP_VERSION || "0.1.0",
@@ -45,7 +46,8 @@ function ensureConfigured(config) {
 
 async function tradovateFetch(mode, path, options = {}) {
   const token = await authenticateTradovate(mode);
-  const response = await fetch(`${endpoints[mode].apiBase}${path}`, {
+  const endpointMode = mode === "prop" ? "live" : mode;
+  const response = await fetch(`${endpoints[endpointMode].apiBase}${path}`, {
     ...options,
     headers: {
       Authorization: `Bearer ${token.accessToken}`,
@@ -70,8 +72,9 @@ export async function authenticateTradovate(modeInput = "demo") {
 
   const config = getConfig(mode);
   ensureConfigured(config);
+  const endpointMode = mode === "prop" ? "live" : mode;
 
-  const response = await fetch(`${endpoints[mode].apiBase}/auth/accesstokenrequest`, {
+  const response = await fetch(`${endpoints[endpointMode].apiBase}/auth/accesstokenrequest`, {
     body: JSON.stringify(config),
     headers: { "Content-Type": "application/json" },
     method: "POST",
@@ -88,7 +91,8 @@ export async function authenticateTradovate(modeInput = "demo") {
   const token = {
     accessToken: data.accessToken,
     mdAccessToken: data.mdAccessToken || data.accessToken,
-    endpoint: endpoints[mode],
+    accountType: mode === "prop" ? "funded/prop" : mode === "live" ? "personal live" : "demo",
+    endpoint: endpoints[mode === "prop" ? "live" : mode],
     expiresAt: Number.isFinite(expirationDate) ? expirationDate : Date.now() + (Number.isFinite(ttl) ? ttl : 20 * 60 * 1000),
     hasLive: Boolean(data.hasLive),
     hasMarketData: Boolean(data.hasMarketData),
@@ -105,7 +109,8 @@ export async function renewTradovateAccessToken(modeInput = "demo", cachedToken)
   const cached = cachedToken || tokenCache.get(mode);
   if (!cached?.accessToken) return authenticateTradovate(mode);
 
-  const response = await fetch(`${endpoints[mode].apiBase}/auth/renewaccesstoken`, {
+  const endpointMode = mode === "prop" ? "live" : mode;
+  const response = await fetch(`${endpoints[endpointMode].apiBase}/auth/renewaccesstoken`, {
     body: JSON.stringify({ accessToken: cached.accessToken }),
     headers: {
       Authorization: `Bearer ${cached.accessToken}`,
@@ -169,7 +174,7 @@ export async function getTradovateMarketPrice(mode = "demo", symbol = "MNQ") {
       : "Market-data websocket endpoint is configured, but no quote was returned before timeout.",
     quote,
     symbol: normalized,
-    websocket: endpoints[getMode(mode)].mdSocket,
+    websocket: endpoints[getMode(mode) === "prop" ? "live" : getMode(mode)].mdSocket,
   };
 }
 
