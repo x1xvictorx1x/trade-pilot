@@ -104,7 +104,8 @@ const marketSpecs = {
 const dataSources = ["Manual", "Demo Broker", "Tradovate Demo Read-Only", "Tradovate Live Read-Only", "TradingView Alerts", "Market Data API", "Broker Connection"];
 const fundedProviders = ["Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other prop/funded account"];
 const fundedPlatforms = ["Tradovate", "Rithmic", "TopstepX", "NinjaTrader/CQG", "CSV Import", "Manual Mode"];
-const navigationTabs = ["Dashboard", "Account", "Connections", "Install", "Journal", "Profile", "Help", "Support", "Settings"];
+const navigationTabs = ["Home", "Dashboard", "Journal", "Account", "Profile"];
+const authRedirectUrl = "https://tradepilottool.com";
 const marketServerUrl = "http://127.0.0.1:8787";
 const brokerSamplePayload = {
   platform: "Demo Broker",
@@ -271,7 +272,7 @@ export default function App() {
   const [discipline, setDiscipline] = useState(() => loadDiscipline());
   const [activePosition, setActivePosition] = useState(() => loadActivePosition());
   const [plannedTrade, setPlannedTrade] = useState(() => loadActivePosition());
-  const [activePage, setActivePage] = useState("dashboard");
+  const [activePage, setActivePage] = useState("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [disclaimerAccepted, setDisclaimerAccepted] = useState(() => localStorage.getItem(disclaimerStorageKey) === "true");
   const [onboardingComplete, setOnboardingComplete] = useState(() => localStorage.getItem(onboardingStorageKey) === "true");
@@ -971,13 +972,13 @@ export default function App() {
       <div style={styles.shell}>
         <header style={styles.header}>
           <div>
-            <p style={styles.eyebrow}>AI Trading Execution Assistant</p>
+            <p style={styles.eyebrow}>Trade Pilot Alpha</p>
             <h1 style={styles.title}>Trade Pilot</h1>
             <p style={styles.subtitle}>
               Plan trades. Manage risk. Avoid emotional entries.
             </p>
             <p style={styles.positioningText}>
-              Trading execution assistant, not a signal service.
+              Trade Pilot is an execution assistant for futures traders.
             </p>
           </div>
 
@@ -1016,16 +1017,14 @@ export default function App() {
             ))}
           </div>
         </header>
-        <div style={styles.alphaBanner}>Trade Pilot Alpha — educational execution assistant. Not financial advice.</div>
-        <div style={styles.riskBanner}>Read-only mode: Trade Pilot reads Tradovate/account data and does not place, cancel, or modify trades.</div>
-        <div style={styles.riskBanner}>Trading involves risk. Trade responsibly.</div>
+        <div style={styles.alphaBanner}>Alpha release: Trade Pilot helps you plan trades and manage risk. Not financial advice.</div>
         {!session?.user ? (
           <div style={styles.guestPrompt}>
             <span>Create a free account to save your trading workspace.</span>
             <button onClick={() => setAuthModal("signup")} style={styles.authButton}>Sign Up</button>
           </div>
         ) : null}
-        {!installBannerDismissed ? (
+        {activePage !== "home" && !installBannerDismissed ? (
           <InstallBanner
             canInstall={Boolean(installPrompt)}
             onDismiss={() => setInstallBannerDismissed(true)}
@@ -1033,7 +1032,7 @@ export default function App() {
             onInstructions={() => setActivePage("install")}
           />
         ) : null}
-        {!onboardingComplete ? (
+        {session?.user && !onboardingComplete ? (
           <OnboardingCard
             onDone={() => {
               localStorage.setItem(onboardingStorageKey, "true");
@@ -1042,9 +1041,16 @@ export default function App() {
           />
         ) : null}
 
+        {activePage === "home" ? (
+          <HomePage
+            onJoinAlpha={() => setAuthModal("signup")}
+            onLaunch={() => setActivePage("dashboard")}
+          />
+        ) : null}
         {activePage === "dashboard" ? (
           <Dashboard
             activePosition={activePosition}
+            addJournalEntry={addJournalEntry}
             applyQuickSetup={applyQuickSetup}
             autoPrice={autoPrice}
             brokerConnection={brokerConnection}
@@ -1055,6 +1061,7 @@ export default function App() {
             engine={engine}
             entry={entry}
             fastMessage={fastMessage}
+            journalEntries={journalEntries}
             layoutPrefs={layoutPrefs}
             lastUpdated={lastUpdated}
             price={price}
@@ -1219,16 +1226,50 @@ function DisclaimerModal({ onAccept }) {
   );
 }
 
+function HomePage({ onJoinAlpha, onLaunch }) {
+  return (
+    <main style={styles.homePage}>
+      <section style={styles.homeHero}>
+        <div>
+          <p style={styles.cardLabel}>Trade Pilot Alpha</p>
+          <h2 style={styles.homeTitle}>Plan trades. Manage risk. Avoid emotional entries.</h2>
+          <p style={styles.homeSubtitle}>Trade Pilot is an execution assistant for futures traders.</p>
+          <div style={styles.heroActions}>
+            <button onClick={onLaunch} style={styles.primaryHeroButton}>Launch App</button>
+            <button onClick={onJoinAlpha} style={styles.secondaryHeroButton}>Join Alpha</button>
+          </div>
+        </div>
+      </section>
+
+      <section style={styles.productCardGrid}>
+        <FeatureCard title="Risk Guard" text="Stay aware of size, loss limits, and overtrading." />
+        <FeatureCard title="Trade Coach" text="Get plain-language prompts before and during a trade." />
+        <FeatureCard title="Prop Firm Rules" text="Track drawdown pressure and daily risk rules." />
+        <FeatureCard title="Journal & Stats" text="Save notes and review your execution habits." />
+      </section>
+    </main>
+  );
+}
+
+function FeatureCard({ title, text }) {
+  return (
+    <section style={styles.softFeatureCard}>
+      <h3 style={styles.featureTitle}>{title}</h3>
+      <p style={styles.muted}>{text}</p>
+    </section>
+  );
+}
+
 function OnboardingCard({ onDone }) {
   return (
     <section style={styles.onboardingCard}>
       <div>
-        <p style={styles.cardLabel}>Start Here</p>
-        <h2 style={styles.sectionTitle}>Build a trade plan in 3 steps</h2>
+        <p style={styles.cardLabel}>First Login</p>
+        <h2 style={styles.sectionTitle}>Set up your workspace</h2>
       </div>
       <div style={styles.onboardingSteps}>
         <span>1. Choose your market</span>
-        <span>2. Mark support and resistance</span>
+        <span>2. Set your risk</span>
         <span>3. Generate your trade plan</span>
       </div>
       <button onClick={onDone} style={styles.settingsButton}>Got it</button>
@@ -1346,6 +1387,13 @@ function AccountPage({ authMessage, isConfigured, layoutPrefs, onAuthOpen, sessi
         <PlanItem title="Payments" text="Not enabled yet." />
       </section>
       <section style={styles.card}>
+        <p style={styles.cardLabel}>Security</p>
+        <h2 style={styles.sectionTitle}>Release Checklist</h2>
+        <PlanItem title="Email confirmation" text="Keep enabled in Supabase Auth settings." />
+        <PlanItem title="Leaked password protection" text="Enable in Supabase Auth password security." />
+        <PlanItem title="Auth redirect" text="Use https://tradepilottool.com for confirmation and reset links." />
+      </section>
+      <section style={styles.card}>
         <p style={styles.cardLabel}>Layout Customization</p>
         <h2 style={styles.sectionTitle}>Show / Hide Dashboard Cards</h2>
         <p style={{ ...styles.muted, marginBottom: "14px" }}>Reordering is reserved for later; these visibility preferences save to your database when signed in.</p>
@@ -1398,6 +1446,7 @@ function AuthModal({ authMessage, initialMode, isConfigured, onClose, onSignedIn
           email: form.email,
           password: form.password,
           options: {
+            emailRedirectTo: authRedirectUrl,
             data: {
               accountType: form.accountType,
               name: form.name,
@@ -1418,7 +1467,7 @@ function AuthModal({ authMessage, initialMode, isConfigured, onClose, onSignedIn
         setMessage("Check your email to verify your Trade Pilot account.");
         setAuthMessage("Check your email to verify your Trade Pilot account.");
       } else if (mode === "reset") {
-        const { error } = await supabase.auth.resetPasswordForEmail(form.email);
+        const { error } = await supabase.auth.resetPasswordForEmail(form.email, { redirectTo: authRedirectUrl });
         if (error) throw error;
         setMessage("Password reset email sent.");
         setAuthMessage("Password reset email sent.");
@@ -1483,6 +1532,7 @@ function AuthModal({ authMessage, initialMode, isConfigured, onClose, onSignedIn
 
 function Dashboard({
   activePosition,
+  addJournalEntry,
   applyQuickSetup,
   autoPrice,
   brokerConnection,
@@ -1493,6 +1543,7 @@ function Dashboard({
   engine,
   entry,
   fastMessage,
+  journalEntries,
   layoutPrefs,
   lastUpdated,
   price,
@@ -1526,6 +1577,7 @@ function Dashboard({
   updateProfile,
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [journalNote, setJournalNote] = useState("");
   const [setupDirection, setSetupDirection] = useState("Long");
   const [setupType, setSetupType] = useState("Pullback");
   const rangePad = Math.max(20, price * 0.01);
@@ -1576,6 +1628,13 @@ function Dashboard({
     else applyQuickSetup(setupName);
   };
 
+  const saveDashboardNote = (event) => {
+    event.preventDefault();
+    if (!journalNote.trim()) return;
+    addJournalEntry(journalNote.trim());
+    setJournalNote("");
+  };
+
   return (
     <>
       {streamerMode ? (
@@ -1592,68 +1651,17 @@ function Dashboard({
         />
       ) : null}
 
-      <section style={styles.marketTopBar}>
-        <SelectField label="Market" value={profile.mainMarket} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
-        <div style={styles.marketTopMetric}>
-          <span>{marketSpec.displayName}</span>
-          <strong>${marketSpec.pointValue}/point</strong>
-        </div>
-        <div style={styles.marketTopMetric}>
-          <span>Tick Size</span>
-          <strong>{marketSpec.tickSize}</strong>
-        </div>
-      </section>
-
-      {layoutPrefs.chart ? <TradeChartPanel
-        chartData={chartData}
-        currentPrice={price}
-        entry={entry}
-        runner={engine.runner}
-        stop={engine.smartStop}
-        support={support}
-        resistance={resistance}
-        trim1={engine.trim1}
-        trim2={engine.trim2}
-      /> : null}
-
       <section style={styles.alphaTopGrid}>
-        {layoutPrefs.score ? <div style={styles.scoreCard}>
-          <p style={styles.cardLabel}>
-            <span style={styles.labelWithHelp}>
-              Trade Score
-              <HelpTip text={tooltipText.tradeScore} />
-            </span>
-          </p>
-          <h2 style={styles.scoreText}>{engine.score}/100</h2>
-          <div style={{ ...styles.confidencePill, background: engine.confidenceColor }}>{engine.confidence}</div>
-          <div style={styles.scoreTrack}>
-            <div style={{ ...styles.scoreFill, width: `${engine.score}%`, background: engine.confidenceColor }} />
-          </div>
-        </div> : null}
-
         {layoutPrefs.coach ? <div style={styles.coachCard}>
           <p style={styles.cardLabel}>Trade Coach</p>
           <div style={styles.coachGrid}>
             <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={simpleBias === "WAIT" ? "warn" : "good"} />
-            <Metric label="Market State" value={levelCoach.marketState} />
+            <Metric label="Market" value={profile.mainMarket} />
             <Metric label="Action" value={levelCoach.action === "WAIT" ? simpleAction : levelCoach.action} tone={simpleBias === "WAIT" ? "warn" : "good"} />
           </div>
           <p style={styles.coachMessage}>{levelCoach.message}</p>
         </div> : null}
       </section>
-
-      {layoutPrefs.risk ? <section style={styles.rulesCard}>
-        <div>
-          <p style={styles.cardLabel}>Today&apos;s Trading Rules</p>
-          <h2 style={styles.sectionTitle}>Stay inside your limits</h2>
-        </div>
-        <div style={styles.rulesGrid}>
-          <Metric label="Max Trades" value={String(profile.maxTradesPerDay)} />
-          <Metric label="Max Daily Loss" value={`$${profile.maxDailyLoss.toFixed(2)}`} />
-          <Metric label="Current P/L" value={`$${discipline.dailyPnl.toFixed(2)}`} tone={discipline.dailyPnl >= 0 ? "good" : "bad"} />
-          <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : riskStatus === "Warning" ? "warn" : "bad"} />
-        </div>
-      </section> : null}
 
       <section style={styles.alphaMiddleGrid}>
         <section style={styles.tradePlanHero}>
@@ -1696,11 +1704,67 @@ function Dashboard({
         </section>
       </section>
 
+      <section style={styles.alphaMiddleGrid}>
+        {layoutPrefs.risk ? <section style={styles.rulesCard}>
+          <div>
+            <p style={styles.cardLabel}>Risk Control</p>
+            <h2 style={styles.sectionTitle}>Stay inside your limits</h2>
+          </div>
+          <div style={styles.rulesGrid}>
+            <Metric label="Max Trades" value={String(profile.maxTradesPerDay)} />
+            <Metric label="Max Daily Loss" value={`$${profile.maxDailyLoss.toFixed(2)}`} />
+            <Metric label="Current P/L" value={`$${discipline.dailyPnl.toFixed(2)}`} tone={discipline.dailyPnl >= 0 ? "good" : "bad"} />
+            <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : riskStatus === "Warning" ? "warn" : "bad"} />
+          </div>
+        </section> : null}
+
+        <section style={styles.card}>
+          <p style={styles.cardLabel}>Journal</p>
+          <h2 style={styles.sectionTitle}>Quick note</h2>
+          <form onSubmit={saveDashboardNote}>
+            <textarea
+              style={styles.textArea}
+              value={journalNote}
+              onChange={(event) => setJournalNote(event.target.value)}
+              placeholder="What did you see? What will you do next?"
+            />
+            <button style={styles.settingsButton}>Save Note</button>
+          </form>
+          {journalEntries?.[0] ? (
+            <p style={{ ...styles.muted, marginTop: "12px" }}>Last note: {journalEntries[0].note}</p>
+          ) : null}
+        </section>
+      </section>
+
       <button onClick={() => setAdvancedOpen((value) => !value)} style={styles.advancedToggle}>
-        Advanced Tools {advancedOpen ? "▲" : "▼"}
+        Advanced Tools {advancedOpen ? "Hide" : "Show"}
       </button>
 
       <div style={{ display: advancedOpen ? "block" : "none" }}>
+
+      <section style={styles.marketTopBar}>
+        <SelectField label="Market" value={profile.mainMarket} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
+        <div style={styles.marketTopMetric}>
+          <span>{marketSpec.displayName}</span>
+          <strong>${marketSpec.pointValue}/point</strong>
+        </div>
+        <div style={styles.marketTopMetric}>
+          <span>Tick Size</span>
+          <strong>{marketSpec.tickSize}</strong>
+        </div>
+      </section>
+
+      {layoutPrefs.chart ? <TradeChartPanel
+        chartData={chartData}
+        currentPrice={price}
+        entry={entry}
+        runner={engine.runner}
+        stop={engine.smartStop}
+        support={support}
+        resistance={resistance}
+        trim1={engine.trim1}
+        trim2={engine.trim2}
+      /> : null}
 
       <section style={styles.heroGrid}>
         <div style={styles.biasCard}>
@@ -3067,7 +3131,11 @@ function AlphaSignup() {
 function AppFooter() {
   return (
     <footer style={styles.footer}>
-      Trading futures involves substantial risk. Trade Pilot is for education and trade planning only.
+      <span>Not financial advice.</span>
+      <span>Trading involves risk.</span>
+      <a href="mailto:support@tradepilottool.com" style={styles.footerLink}>support@tradepilottool.com</a>
+      <span>Privacy Policy placeholder</span>
+      <span>Terms placeholder</span>
     </footer>
   );
 }
@@ -3357,6 +3425,73 @@ const styles = {
     display: "grid",
     gap: "16px",
   },
+  homePage: {
+    display: "grid",
+    gap: "24px",
+  },
+  homeHero: {
+    alignItems: "center",
+    background: "linear-gradient(135deg, rgba(15, 23, 42, .96), rgba(8, 47, 73, .78))",
+    border: "1px solid rgba(56, 189, 248, .35)",
+    borderRadius: "22px",
+    display: "grid",
+    minHeight: "420px",
+    padding: "clamp(28px, 7vw, 72px)",
+  },
+  homeTitle: {
+    fontSize: "clamp(42px, 7vw, 82px)",
+    lineHeight: 1,
+    margin: "0 0 18px",
+    maxWidth: "900px",
+  },
+  homeSubtitle: {
+    color: "#cbd5e1",
+    fontSize: "clamp(18px, 2vw, 24px)",
+    lineHeight: 1.45,
+    margin: "0 0 28px",
+  },
+  heroActions: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "12px",
+  },
+  primaryHeroButton: {
+    background: "#f8fafc",
+    border: "none",
+    borderRadius: "14px",
+    color: "#020617",
+    cursor: "pointer",
+    fontSize: "18px",
+    fontWeight: 950,
+    minHeight: "58px",
+    padding: "16px 24px",
+  },
+  secondaryHeroButton: {
+    background: "rgba(14, 165, 233, .14)",
+    border: "1px solid #38bdf8",
+    borderRadius: "14px",
+    color: "#e0f2fe",
+    cursor: "pointer",
+    fontSize: "18px",
+    fontWeight: 950,
+    minHeight: "58px",
+    padding: "16px 24px",
+  },
+  productCardGrid: {
+    display: "grid",
+    gap: "16px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+  },
+  softFeatureCard: {
+    background: "rgba(15, 23, 42, .76)",
+    border: "1px solid rgba(148, 163, 184, .25)",
+    borderRadius: "18px",
+    padding: "22px",
+  },
+  featureTitle: {
+    fontSize: "20px",
+    margin: "0 0 10px",
+  },
   installHero: {
     alignItems: "center",
     background: "linear-gradient(135deg, rgba(15, 23, 42, .98), rgba(2, 6, 23, .96))",
@@ -3469,9 +3604,9 @@ const styles = {
     marginBottom: "16px",
   },
   rulesCard: {
-    background: "rgba(15, 23, 42, .88)",
-    border: "1px solid #334155",
-    borderRadius: "16px",
+    background: "rgba(15, 23, 42, .76)",
+    border: "1px solid rgba(148, 163, 184, .24)",
+    borderRadius: "18px",
     display: "grid",
     gap: "16px",
     gridTemplateColumns: "minmax(220px, .45fr) 1fr",
@@ -3484,10 +3619,10 @@ const styles = {
     gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
   },
   tradePlanHero: {
-    background: "linear-gradient(135deg, rgba(15, 23, 42, .98), rgba(2, 6, 23, .96))",
-    border: "1px solid #334155",
+    background: "rgba(15, 23, 42, .82)",
+    border: "1px solid rgba(148, 163, 184, .24)",
     borderRadius: "18px",
-    boxShadow: "0 22px 60px rgba(0,0,0,.42)",
+    boxShadow: "0 16px 38px rgba(0,0,0,.24)",
     padding: "26px",
   },
   tradePlanTitle: {
@@ -3554,11 +3689,11 @@ const styles = {
     width: "100%",
   },
   card: {
-    background: "rgba(24, 24, 27, .92)",
-    border: "1px solid #27272a",
-    borderRadius: "16px",
-    boxShadow: "0 18px 45px rgba(0,0,0,.35)",
-    padding: "22px",
+    background: "rgba(24, 24, 27, .76)",
+    border: "1px solid rgba(148, 163, 184, .2)",
+    borderRadius: "18px",
+    boxShadow: "0 14px 34px rgba(0,0,0,.22)",
+    padding: "24px",
   },
   chartPanel: {
     background: "rgba(2, 6, 23, .94)",
@@ -3624,9 +3759,9 @@ const styles = {
   },
   quickEntryCard: {
     alignItems: "center",
-    background: "rgba(15, 23, 42, .94)",
-    border: "1px solid #334155",
-    borderRadius: "16px",
+    background: "rgba(15, 23, 42, .76)",
+    border: "1px solid rgba(148, 163, 184, .24)",
+    borderRadius: "18px",
     display: "grid",
     gap: "16px",
     gridTemplateColumns: "minmax(240px, .7fr) 1.3fr",
@@ -3780,10 +3915,10 @@ const styles = {
     padding: "24px",
   },
   coachCard: {
-    background: "rgba(8, 47, 73, .78)",
-    border: "1px solid #0e7490",
-    borderRadius: "16px",
-    padding: "24px",
+    background: "rgba(8, 47, 73, .72)",
+    border: "1px solid rgba(34, 211, 238, .38)",
+    borderRadius: "18px",
+    padding: "28px",
   },
   safetyCard: {
     background: "rgba(69, 10, 10, .72)",
@@ -4136,11 +4271,19 @@ const styles = {
     margin: 0,
   },
   footer: {
+    alignItems: "center",
     color: "#a1a1aa",
+    display: "flex",
+    flexWrap: "wrap",
     fontSize: "12px",
     fontWeight: 800,
+    gap: "12px",
+    justifyContent: "center",
     padding: "22px 0 8px",
     textAlign: "center",
+  },
+  footerLink: {
+    color: "#7dd3fc",
   },
   planItem: {
     borderBottom: "1px solid #27272a",
@@ -4222,3 +4365,5 @@ const styles = {
     padding: "10px 14px",
   },
 };
+
+
