@@ -105,6 +105,7 @@ const dataSources = ["Manual", "Demo Broker", "Tradovate Demo Read-Only", "Trado
 const fundedProviders = ["Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other prop/funded account"];
 const fundedPlatforms = ["Tradovate", "Rithmic", "TopstepX", "NinjaTrader/CQG", "CSV Import", "Manual Mode"];
 const navigationTabs = ["Home", "Dashboard", "Journal", "Account", "Profile"];
+const moreTabs = ["Connections", "Install", "Help", "Support", "Settings"];
 const authRedirectUrl = "https://tradepilottool.com";
 const marketServerUrl = "http://127.0.0.1:8787";
 const brokerSamplePayload = {
@@ -274,6 +275,7 @@ export default function App() {
   const [plannedTrade, setPlannedTrade] = useState(() => loadActivePosition());
   const [activePage, setActivePage] = useState("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [disclaimerAccepted, setDisclaimerAccepted] = useState(() => localStorage.getItem(disclaimerStorageKey) === "true");
   const [onboardingComplete, setOnboardingComplete] = useState(() => localStorage.getItem(onboardingStorageKey) === "true");
   const [fastMessage, setFastMessage] = useState("Ready for manual execution.");
@@ -969,11 +971,26 @@ export default function App() {
 
   return (
     <div style={styles.page}>
+      <style>{`
+        .mobile-launch-button { display: none !important; }
+        .mobile-menu-item { display: none !important; }
+        @media (max-width: 760px) {
+          .desktop-nav-item { display: none !important; }
+          .mobile-menu-item { display: block !important; }
+          .mobile-launch-button { display: inline-flex !important; align-items: center; }
+          .tradepilot-title { font-size: 34px !important; }
+          .tradepilot-header { align-items: flex-start !important; }
+          .tradepilot-top-actions { width: 100%; justify-content: space-between !important; }
+          .tradepilot-more-menu { left: 16px !important; right: 16px !important; top: calc(100% + 8px) !important; }
+          .tradepilot-feedback { align-items: center; display: flex; font-size: 0 !important; height: 38px; justify-content: center; padding: 0 !important; width: 38px; }
+          .tradepilot-feedback::after { content: "?"; font-size: 16px; }
+        }
+      `}</style>
       <div style={styles.shell}>
-        <header style={styles.header}>
+        <header className="tradepilot-header" style={styles.header}>
           <div>
             <p style={styles.eyebrow}>Trade Pilot Alpha</p>
-            <h1 style={styles.title}>Trade Pilot</h1>
+            <h1 className="tradepilot-title" style={styles.title}>Trade Pilot</h1>
             <p style={styles.subtitle}>
               Plan trades. Manage risk. Avoid emotional entries.
             </p>
@@ -982,7 +999,7 @@ export default function App() {
             </p>
           </div>
 
-          <div style={styles.topActions}>
+          <div className="tradepilot-top-actions" style={styles.topActions}>
             <div style={styles.authActions}>
               {session?.user ? (
                 <>
@@ -998,33 +1015,87 @@ export default function App() {
                 </>
               )}
             </div>
-            <label style={styles.streamerToggle}>
-              <input
-                type="checkbox"
-                checked={streamerMode}
-                onChange={(event) => setStreamerMode(event.target.checked)}
-              />
-              Streamer Mode
-            </label>
-            {navigationTabs.map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActivePage(tab.toLowerCase())}
-                style={{ ...styles.secondaryButton, background: activePage === tab.toLowerCase() ? "#2563eb" : "#27272a" }}
-              >
-                {tab}
-              </button>
-            ))}
+            {streamerMode ? (
+              <button onClick={() => setStreamerMode(false)} style={styles.secondaryButton}>Exit Streamer</button>
+            ) : (
+              <>
+                {navigationTabs.map((tab) => (
+                  <button
+                    className="desktop-nav-item"
+                    key={tab}
+                    onClick={() => {
+                      setActivePage(tab.toLowerCase());
+                      setMoreMenuOpen(false);
+                    }}
+                    style={{ ...styles.secondaryButton, background: activePage === tab.toLowerCase() ? "#2563eb" : "#27272a" }}
+                  >
+                    {tab}
+                  </button>
+                ))}
+                <button
+                  className="mobile-launch-button"
+                  onClick={() => {
+                    setActivePage("dashboard");
+                    setMoreMenuOpen(false);
+                  }}
+                  style={styles.secondaryButton}
+                >
+                  Launch App
+                </button>
+                <div style={styles.moreWrap}>
+                  <button onClick={() => setMoreMenuOpen((open) => !open)} style={styles.secondaryButton}>
+                    More
+                  </button>
+                  {moreMenuOpen ? (
+                    <div className="tradepilot-more-menu" style={styles.moreMenu}>
+                      {navigationTabs.map((tab) => (
+                        <button
+                          className="mobile-menu-item"
+                          key={`mobile-${tab}`}
+                          onClick={() => {
+                            setActivePage(tab.toLowerCase());
+                            setMoreMenuOpen(false);
+                          }}
+                          style={styles.moreMenuItem}
+                        >
+                          {tab}
+                        </button>
+                      ))}
+                      {moreTabs.map((tab) => (
+                        <button
+                          key={tab}
+                          onClick={() => {
+                            setActivePage(tab.toLowerCase());
+                            setMoreMenuOpen(false);
+                          }}
+                          style={styles.moreMenuItem}
+                        >
+                          {tab}
+                        </button>
+                      ))}
+                      <label style={styles.moreToggle}>
+                        <input
+                          type="checkbox"
+                          checked={streamerMode}
+                          onChange={(event) => setStreamerMode(event.target.checked)}
+                        />
+                        Streamer Mode
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
+              </>
+            )}
           </div>
         </header>
-        <div style={styles.alphaBanner}>Alpha release: Trade Pilot helps you plan trades and manage risk. Not financial advice.</div>
-        {!session?.user ? (
+        {!streamerMode ? <div style={styles.alphaBanner}>Trade Pilot Alpha — educational tool. Not financial advice.</div> : null}
+        {!streamerMode && !session?.user ? (
           <div style={styles.guestPrompt}>
             <span>Create a free account to save your trading workspace.</span>
             <button onClick={() => setAuthModal("signup")} style={styles.authButton}>Sign Up</button>
           </div>
         ) : null}
-        {activePage !== "home" && !installBannerDismissed ? (
+        {!streamerMode && activePage !== "home" && !installBannerDismissed ? (
           <InstallBanner
             canInstall={Boolean(installPrompt)}
             onDismiss={() => setInstallBannerDismissed(true)}
@@ -1147,7 +1218,7 @@ export default function App() {
             updateProfile={updateProfile}
           />
         ) : null}
-        <AlphaSignup />
+        {!streamerMode ? <AlphaSignup /> : null}
         <AppFooter />
       </div>
 
@@ -1155,7 +1226,7 @@ export default function App() {
         <SettingsModal profile={profile} updateProfile={updateProfile} onClose={() => setSettingsOpen(false)} />
       ) : null}
 
-      <a href="mailto:support@tradepilot.app?subject=Trade%20Pilot%20Alpha%20Feedback" style={styles.feedbackButton}>Send Feedback</a>
+      {!streamerMode ? <a className="tradepilot-feedback" href="mailto:support@tradepilot.app?subject=Trade%20Pilot%20Alpha%20Feedback" style={styles.feedbackButton}>Feedback</a> : null}
 
       {feedbackOpen ? (
         <FeedbackModal
@@ -1233,7 +1304,7 @@ function HomePage({ onJoinAlpha, onLaunch }) {
         <div>
           <p style={styles.cardLabel}>Trade Pilot Alpha</p>
           <h2 style={styles.homeTitle}>Plan trades. Manage risk. Avoid emotional entries.</h2>
-          <p style={styles.homeSubtitle}>Trade Pilot is an execution assistant for futures traders.</p>
+          <p style={styles.homeSubtitle}>Trade Pilot is a trading execution assistant for futures traders.</p>
           <div style={styles.heroActions}>
             <button onClick={onLaunch} style={styles.primaryHeroButton}>Launch App</button>
             <button onClick={onJoinAlpha} style={styles.secondaryHeroButton}>Join Alpha</button>
@@ -1635,9 +1706,9 @@ function Dashboard({
     setJournalNote("");
   };
 
-  return (
-    <>
-      {streamerMode ? (
+  if (streamerMode) {
+    return (
+      <>
         <LivestreamDashboard
           activePosition={activePosition}
           brokerConnection={brokerConnection}
@@ -1649,8 +1720,23 @@ function Dashboard({
           visualPlan={visualPlan}
           coachMessage={liveCoach}
         />
-      ) : null}
+        <TradeChartPanel
+          chartData={chartData}
+          currentPrice={price}
+          entry={entry}
+          runner={engine.runner}
+          stop={engine.smartStop}
+          support={support}
+          resistance={resistance}
+          trim1={engine.trim1}
+          trim2={engine.trim2}
+        />
+      </>
+    );
+  }
 
+  return (
+    <>
       <section style={styles.alphaTopGrid}>
         {layoutPrefs.coach ? <div style={styles.coachCard}>
           <p style={styles.cardLabel}>Trade Coach</p>
@@ -1765,6 +1851,13 @@ function Dashboard({
         trim1={engine.trim1}
         trim2={engine.trim2}
       /> : null}
+
+      <ProductUpgradePanel
+        brokerConnection={brokerConnection}
+        discipline={discipline}
+        journalEntries={journalEntries}
+        profile={profile}
+      />
 
       <section style={styles.heroGrid}>
         <div style={styles.biasCard}>
@@ -2407,6 +2500,7 @@ function getLiveCoachMessage({ activePosition, discipline, engine, price, profil
 }
 
 function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support, resistance, trim1, trim2 }) {
+  const safeChartData = chartData?.length ? chartData : buildChartData({ price: currentPrice, entry, stop, support, resistance, trim1, trim2, runner });
   return (
     <section style={styles.chartPanel}>
       <div style={styles.sectionHeader}>
@@ -2418,7 +2512,7 @@ function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support
       </div>
       <div style={styles.chartWrap}>
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={chartData} margin={{ top: 12, right: 22, bottom: 8, left: 0 }}>
+          <LineChart data={safeChartData} margin={{ top: 12, right: 22, bottom: 8, left: 0 }}>
             <CartesianGrid stroke="#1f2937" strokeDasharray="4 4" />
             <XAxis dataKey="label" hide />
             <YAxis domain={["dataMin - 12", "dataMax + 12"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={64} />
@@ -2435,34 +2529,141 @@ function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support
           </LineChart>
         </ResponsiveContainer>
       </div>
+      <p style={styles.chartNote}>Demo chart shown until live data is connected.</p>
     </section>
   );
 }
 
 function LivestreamDashboard({ activePosition, brokerConnection, coachMessage, discipline, engine, price, profile, riskStatus, visualPlan }) {
-  const positionLabel = activePosition ? `${activePosition.direction.toUpperCase()} ${activePosition.contracts}` : "No Position";
+  const contracts = activePosition?.contracts ?? visualPlan.contracts ?? profile.defaultContracts;
+  const positionLabel = activePosition ? activePosition.direction.toUpperCase() : "Flat";
   const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
 
   return (
     <section style={styles.livestreamPanel}>
-      <div>
+      <div style={styles.liveHero}>
         <p style={styles.cardLabel}>Livestream Dashboard</p>
-        <h2 style={styles.livePrice}>{profile.mainMarket} {Number(price).toFixed(2)}</h2>
-        <p style={styles.liveSubline}>{positionLabel} | Entry {Number(visualPlan.entry || 0).toFixed(2)}</p>
+        <p style={styles.liveMarket}>{profile.mainMarket}</p>
+        <h2 style={styles.livePrice}>{Number(price).toFixed(2)}</h2>
+        <p style={styles.liveSubline}>{coachMessage}</p>
       </div>
       <div style={styles.liveMetricGrid}>
-        <Metric label="Trade Score" value={`${engine.score}/100`} />
+        <Metric label="Position" value={positionLabel} />
+        <Metric label="Contracts" value={String(contracts)} />
+        <Metric label="Entry" value={Number(visualPlan.entry || 0).toFixed(2)} />
         <Metric label="Open P/L" value={`$${engine.openPnl.toFixed(2)}`} tone={engine.openPnl >= 0 ? "good" : "bad"} />
         <Metric label="Daily P/L" value={`$${fundedMetrics.dailyPnl.toFixed(2)}`} />
-        <Metric label="Drawdown Left" value={`$${fundedMetrics.drawdownRemaining.toFixed(2)}`} />
         <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : "warn"} />
-        <Metric label="Stop" value={Number(visualPlan.stop || engine.smartStop).toFixed(2)} />
-        <Metric label="Trim 1" value={Number(visualPlan.trim1 || engine.trim1).toFixed(2)} />
-        <Metric label="Runner" value={Number(visualPlan.runner || engine.runner).toFixed(2)} />
       </div>
-      <div style={styles.liveCoach}>{coachMessage}</div>
     </section>
   );
+}
+
+function ProductUpgradePanel({ brokerConnection, discipline, journalEntries, profile }) {
+  const analytics = getJournalAnalytics(journalEntries, discipline);
+  const equityPoints = getEquityCurvePoints(journalEntries, discipline);
+
+  return (
+    <section style={styles.productUpgradeGrid}>
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Prop Firm Rule Engine</p>
+        <h2 style={styles.sectionTitle}>{profile.fundedProvider}</h2>
+        <div style={styles.metricGrid}>
+          <Metric label="Account Size" value={`$${Number(profile.accountSize || profile.startingBalance).toLocaleString()}`} />
+          <Metric label="Trailing Drawdown" value={`$${Number(profile.trailingDrawdown || 0).toLocaleString()}`} />
+          <Metric label="Daily Loss Limit" value={`$${Number(profile.maxDailyLoss || 0).toLocaleString()}`} />
+          <Metric label="Profit Target" value={`$${Number(profile.profitGoal || 0).toLocaleString()}`} />
+          <Metric label="Max Contracts" value={String(profile.maxContracts)} />
+          <Metric label="Consistency Rule" value={`${profile.consistencyRuleTarget}%`} />
+          <Metric label="Phase" value={profile.accountPhase} />
+        </div>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Equity Curve</p>
+        <h2 style={styles.sectionTitle}>Performance Snapshot</h2>
+        <div style={styles.equityCurve}>
+          {equityPoints.map((point, index) => (
+            <span key={`${point}-${index}`} style={{ ...styles.equityBar, height: `${Math.max(8, Math.min(100, Math.abs(point)))}%`, background: point >= 0 ? "#22c55e" : "#ef4444" }} />
+          ))}
+        </div>
+        <div style={styles.metricGrid}>
+          <Metric label="Win Rate" value={`${analytics.winRate}%`} />
+          <Metric label="Total Trades" value={String(analytics.totalTrades)} />
+          <Metric label="Avg Win" value={`$${analytics.averageWin.toFixed(2)}`} />
+          <Metric label="Avg Loss" value={`$${analytics.averageLoss.toFixed(2)}`} />
+          <Metric label="Profit Factor" value={analytics.profitFactor.toFixed(2)} />
+          <Metric label="Max Drawdown" value={`$${analytics.maxDrawdown.toFixed(2)}`} />
+          <Metric label="Best Day" value={`$${analytics.bestDay.toFixed(2)}`} />
+          <Metric label="Worst Day" value={`$${analytics.worstDay.toFixed(2)}`} />
+        </div>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Journal Analytics</p>
+        <h2 style={styles.sectionTitle}>Execution Review</h2>
+        <PlanItem title="Trade Entry" text="Track entry, exit, direction, setup type, result, notes, and execution grade." />
+        <PlanItem title="Screenshots" text="Screenshot upload is planned for a later release." />
+        <PlanItem title="Current Grade" text={analytics.totalTrades ? `${analytics.winRate}% win rate from saved notes.` : "Start saving trades to build your stats."} />
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Tradovate Read-Only</p>
+        <h2 style={styles.sectionTitle}>Broker Planning</h2>
+        <div style={styles.metricGrid}>
+          <Metric label="Connection" value={brokerConnection.connectionStatus || "Not Connected"} />
+          <Metric label="Current Price" value={brokerConnection.quote?.price ? brokerConnection.quote.price.toFixed(2) : "Ready"} />
+          <Metric label="Position" value={brokerConnection.position ? brokerConnection.position.direction : "Read-only"} />
+          <Metric label="Open P/L" value={`$${Number(brokerConnection.openPnl || 0).toFixed(2)}`} />
+          <Metric label="Realized P/L" value={`$${Number(brokerConnection.realizedPnl || 0).toFixed(2)}`} />
+          <Metric label="Account Balance" value={`$${Number(brokerConnection.accountBalance || profile.accountSize || 0).toFixed(2)}`} />
+        </div>
+        <p style={{ ...styles.muted, marginTop: "12px" }}>Read-only only. Trade Pilot does not place, cancel, or modify trades.</p>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Supabase Security</p>
+        <h2 style={styles.sectionTitle}>Admin Checklist</h2>
+        <PlanItem title="Leaked Password Protection" text="Enable in Supabase Auth security settings." />
+        <PlanItem title="Email Confirmations" text="Keep confirmations on for alpha accounts." />
+        <PlanItem title="Site URL" text="https://tradepilottool.com" />
+        <PlanItem title="Redirect URL" text="https://tradepilottool.com" />
+      </section>
+    </section>
+  );
+}
+
+function getJournalAnalytics(journalEntries = [], discipline = {}) {
+  const results = journalEntries
+    .map((entry) => Number(entry.result ?? entry.pnl ?? entry.dailyPnl ?? 0))
+    .filter((value) => Number.isFinite(value));
+  const wins = results.filter((value) => value > 0);
+  const losses = results.filter((value) => value < 0);
+  const grossWin = wins.reduce((sum, value) => sum + value, 0);
+  const grossLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+  const running = results.reduce((state, value) => {
+    const equity = state.equity + value;
+    const peak = Math.max(state.peak, equity);
+    return { equity, maxDrawdown: Math.max(state.maxDrawdown, peak - equity), peak };
+  }, { equity: 0, maxDrawdown: 0, peak: 0 });
+
+  return {
+    averageLoss: losses.length ? grossLoss / losses.length : Math.abs(Number(discipline.dailyPnl || 0)) || 0,
+    averageWin: wins.length ? grossWin / wins.length : Math.max(0, Number(discipline.dailyPnl || 0)),
+    bestDay: results.length ? Math.max(...results) : Math.max(0, Number(discipline.dailyPnl || 0)),
+    maxDrawdown: running.maxDrawdown,
+    profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? grossWin : 0,
+    totalTrades: journalEntries.length || Number(discipline.tradesTaken || 0),
+    winRate: results.length ? Math.round((wins.length / results.length) * 100) : 0,
+    worstDay: results.length ? Math.min(...results) : Math.min(0, Number(discipline.dailyPnl || 0)),
+  };
+}
+
+function getEquityCurvePoints(journalEntries = [], discipline = {}) {
+  const points = journalEntries.slice(0, 12).reverse().map((entry) => Number(entry.result ?? entry.pnl ?? entry.dailyPnl ?? 0));
+  if (points.length) return points;
+  const daily = Number(discipline.dailyPnl || 0);
+  return [-12, 18, 10, -8, 22, 30, daily || 16];
 }
 
 function getSmartStop({ direction, entry, resistance, riskPoints, support }) {
@@ -3266,11 +3467,12 @@ const styles = {
     background: "radial-gradient(circle at top left, #172554 0, #050505 34%, #09090b 100%)",
     color: "#f8fafc",
     fontFamily: "Inter, Arial, sans-serif",
-    padding: "max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left))",
+    padding: "max(18px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left))",
   },
   shell: {
     margin: "0 auto",
-    maxWidth: "1240px",
+    maxWidth: "1600px",
+    width: "100%",
   },
   header: {
     alignItems: "center",
@@ -3285,7 +3487,8 @@ const styles = {
     gap: "10px",
     flexWrap: "wrap",
     justifyContent: "flex-end",
-    maxWidth: "720px",
+    maxWidth: "860px",
+    position: "relative",
   },
   authActions: {
     alignItems: "center",
@@ -3328,6 +3531,44 @@ const styles = {
     fontWeight: 900,
     gap: "8px",
     padding: "10px 12px",
+  },
+  moreWrap: {
+    position: "relative",
+  },
+  moreMenu: {
+    background: "rgba(2, 6, 23, .98)",
+    border: "1px solid #334155",
+    borderRadius: "14px",
+    boxShadow: "0 22px 60px rgba(0,0,0,.36)",
+    display: "grid",
+    gap: "6px",
+    minWidth: "210px",
+    padding: "10px",
+    position: "absolute",
+    right: 0,
+    top: "calc(100% + 8px)",
+    zIndex: 30,
+  },
+  moreMenuItem: {
+    background: "transparent",
+    border: "none",
+    borderRadius: "10px",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontWeight: 900,
+    padding: "10px 12px",
+    textAlign: "left",
+  },
+  moreToggle: {
+    alignItems: "center",
+    borderTop: "1px solid #1e293b",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    display: "flex",
+    fontWeight: 900,
+    gap: "8px",
+    marginTop: "4px",
+    padding: "12px",
   },
   riskBanner: {
     background: "rgba(120, 53, 15, .35)",
@@ -3563,14 +3804,15 @@ const styles = {
     background: "#0ea5e9",
     border: "1px solid #38bdf8",
     borderRadius: "999px",
-    bottom: "22px",
-    boxShadow: "0 18px 40px rgba(0,0,0,.35)",
+    bottom: "14px",
+    boxShadow: "0 10px 24px rgba(0,0,0,.28)",
     color: "#00111f",
     cursor: "pointer",
+    fontSize: "12px",
     fontWeight: 900,
-    padding: "12px 16px",
+    padding: "8px 11px",
     position: "fixed",
-    right: "22px",
+    right: "14px",
     zIndex: 15,
   },
   link: {
@@ -3593,15 +3835,15 @@ const styles = {
   },
   alphaTopGrid: {
     display: "grid",
-    gap: "16px",
-    gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-    marginBottom: "16px",
+    gap: "22px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+    marginBottom: "22px",
   },
   alphaMiddleGrid: {
     display: "grid",
-    gap: "16px",
-    gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-    marginBottom: "16px",
+    gap: "22px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))",
+    marginBottom: "22px",
   },
   rulesCard: {
     background: "rgba(15, 23, 42, .76)",
@@ -3698,30 +3940,50 @@ const styles = {
   chartPanel: {
     background: "rgba(2, 6, 23, .94)",
     border: "1px solid #334155",
-    borderRadius: "16px",
-    marginBottom: "16px",
-    padding: "18px",
+    borderRadius: "18px",
+    marginBottom: "22px",
+    padding: "22px",
   },
   chartWrap: {
-    height: "320px",
+    height: "clamp(280px, 32vw, 420px)",
     minWidth: 0,
+  },
+  chartNote: {
+    color: "#94a3b8",
+    fontSize: "13px",
+    fontWeight: 800,
+    margin: "12px 0 0",
   },
   chartPrice: {
     color: "#facc15",
     fontSize: "28px",
   },
   livestreamPanel: {
-    background: "linear-gradient(135deg, rgba(2,6,23,.98), rgba(12,74,110,.9))",
+    background: "linear-gradient(135deg, rgba(2,6,23,.98), rgba(8,47,73,.92))",
     border: "1px solid #38bdf8",
-    borderRadius: "16px",
+    borderRadius: "22px",
     display: "grid",
-    gap: "18px",
-    marginBottom: "16px",
-    padding: "24px",
+    gap: "24px",
+    marginBottom: "22px",
+    minHeight: "360px",
+    padding: "clamp(26px, 5vw, 56px)",
+    placeItems: "center",
+    textAlign: "center",
+  },
+  liveHero: {
+    display: "grid",
+    gap: "8px",
+    justifyItems: "center",
+  },
+  liveMarket: {
+    color: "#bae6fd",
+    fontSize: "28px",
+    fontWeight: 950,
+    margin: 0,
   },
   livePrice: {
     color: "#f8fafc",
-    fontSize: "54px",
+    fontSize: "clamp(76px, 11vw, 160px)",
     lineHeight: 1,
     margin: 0,
   },
@@ -3734,7 +3996,8 @@ const styles = {
   liveMetricGrid: {
     display: "grid",
     gap: "12px",
-    gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    width: "100%",
   },
   liveCoach: {
     background: "#020617",
@@ -3830,6 +4093,28 @@ const styles = {
     gap: "16px",
     gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
     marginBottom: "16px",
+  },
+  productUpgradeGrid: {
+    display: "grid",
+    gap: "18px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+    marginBottom: "22px",
+  },
+  equityCurve: {
+    alignItems: "end",
+    background: "#020617",
+    border: "1px solid #1e293b",
+    borderRadius: "14px",
+    display: "flex",
+    gap: "8px",
+    height: "180px",
+    margin: "16px 0",
+    padding: "14px",
+  },
+  equityBar: {
+    borderRadius: "999px 999px 0 0",
+    flex: 1,
+    minWidth: "10px",
   },
   ladder: {
     background: "linear-gradient(180deg, rgba(15,23,42,.9), rgba(2,6,23,.95))",
@@ -3998,8 +4283,8 @@ const styles = {
   },
   mainGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))",
-    gap: "16px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+    gap: "22px",
   },
   sectionHeader: {
     alignItems: "center",
