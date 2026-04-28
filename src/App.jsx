@@ -9,6 +9,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { isSupabaseConfigured, supabase } from "./supabaseClient";
 
 const profileStorageKey = "tradePilotProfile";
 const disciplineStorageKey = "tradePilotDiscipline";
@@ -19,12 +20,23 @@ const supportStorageKey = "tradePilotSupportMessages";
 const onboardingStorageKey = "tradePilotOnboardingComplete";
 const streamerModeStorageKey = "tradePilotStreamerMode";
 const subscriberStorageKey = "tradePilotSubscribers";
+const journalStorageKey = "tradePilotJournal";
+const layoutStorageKey = "tradePilotLayout";
+const watchlistStorageKey = "tradePilotWatchlist";
 
 const defaultProfile = {
   traderName: "",
   accountSize: 50000,
-  accountType: "prop",
+  accountType: "personal",
+  accountPhase: "evaluation",
+  consistencyRuleTarget: 30,
+  fundedPlatform: "Tradovate",
+  fundedProvider: "Apex",
+  profitGoal: 3000,
+  startingBalance: 50000,
+  trailingDrawdown: 2500,
   mainMarket: "MNQ",
+  traderExperienceLevel: "intermediate",
   traderStyle: "scalper",
   maxDailyLoss: 500,
   maxTradesPerDay: 5,
@@ -90,7 +102,9 @@ const marketSpecs = {
   QQQ: { displayName: "QQQ ETF", pointValue: 1, tickSize: 0.01 },
 };
 const dataSources = ["Manual", "Demo Broker", "Tradovate Demo Read-Only", "Tradovate Live Read-Only", "TradingView Alerts", "Market Data API", "Broker Connection"];
-const navigationTabs = ["Dashboard", "Connections", "Install", "Journal", "Profile", "Help", "Support", "Settings"];
+const fundedProviders = ["Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other prop/funded account"];
+const fundedPlatforms = ["Tradovate", "Rithmic", "TopstepX", "NinjaTrader/CQG", "CSV Import", "Manual Mode"];
+const navigationTabs = ["Dashboard", "Account", "Connections", "Install", "Journal", "Profile", "Help", "Support", "Settings"];
 const marketServerUrl = "http://127.0.0.1:8787";
 const brokerSamplePayload = {
   platform: "Demo Broker",
@@ -198,6 +212,60 @@ function loadList(key) {
   }
 }
 
+const defaultLayout = {
+  chart: true,
+  coach: true,
+  connections: true,
+  fastMode: true,
+  journal: true,
+  risk: true,
+  score: true,
+};
+
+function profileToDatabase(profile, user, streamerMode) {
+  return {
+    account_size: profile.accountSize,
+    account_type: profile.accountType,
+    default_contracts: profile.defaultContracts,
+    default_risk_points: profile.defaultRiskPoints,
+    email: user.email,
+    id: user.id,
+    max_daily_loss: profile.maxDailyLoss,
+    max_trades_per_day: profile.maxTradesPerDay,
+    name: profile.traderName,
+    preferred_market: profile.mainMarket,
+    runner_points: profile.runnerPoints,
+    streamer_mode: streamerMode,
+    trader_experience_level: profile.traderExperienceLevel || "intermediate",
+    trader_style: profile.traderStyle,
+    trim1_points: profile.trim1Points,
+    trim2_points: profile.trim2Points,
+    updated_at: new Date().toISOString(),
+    voice_alerts: profile.voiceAlerts,
+  };
+}
+
+function profileFromDatabase(row, fallback) {
+  if (!row) return fallback;
+  return {
+    ...fallback,
+    accountSize: Number(row.account_size ?? fallback.accountSize),
+    accountType: row.account_type || fallback.accountType,
+    defaultContracts: Number(row.default_contracts ?? fallback.defaultContracts),
+    defaultRiskPoints: Number(row.default_risk_points ?? fallback.defaultRiskPoints),
+    mainMarket: row.preferred_market || fallback.mainMarket,
+    maxDailyLoss: Number(row.max_daily_loss ?? fallback.maxDailyLoss),
+    maxTradesPerDay: Number(row.max_trades_per_day ?? fallback.maxTradesPerDay),
+    runnerPoints: Number(row.runner_points ?? fallback.runnerPoints),
+    traderExperienceLevel: row.trader_experience_level || fallback.traderExperienceLevel || "intermediate",
+    traderName: row.name || fallback.traderName,
+    traderStyle: row.trader_style || fallback.traderStyle,
+    trim1Points: Number(row.trim1_points ?? fallback.trim1Points),
+    trim2Points: Number(row.trim2_points ?? fallback.trim2Points),
+    voiceAlerts: row.voice_alerts ?? fallback.voiceAlerts,
+  };
+}
+
 export default function App() {
   const [profile, setProfile] = useState(() => loadProfile());
   const [discipline, setDiscipline] = useState(() => loadDiscipline());
@@ -214,6 +282,20 @@ export default function App() {
   const [feedbackItems, setFeedbackItems] = useState(() => loadList(feedbackStorageKey));
   const [supportMessages, setSupportMessages] = useState(() => loadList(supportStorageKey));
   const [streamerMode, setStreamerMode] = useState(() => localStorage.getItem(streamerModeStorageKey) === "true");
+  const [journalEntries, setJournalEntries] = useState(() => loadList(journalStorageKey));
+  const [layoutPrefs, setLayoutPrefs] = useState(() => {
+    try {
+      const saved = localStorage.getItem(layoutStorageKey);
+      return saved ? { ...defaultLayout, ...JSON.parse(saved) } : defaultLayout;
+    } catch {
+      return defaultLayout;
+    }
+  });
+  const [watchlist, setWatchlist] = useState(() => loadList(watchlistStorageKey));
+  const [session, setSession] = useState(null);
+  const [authModal, setAuthModal] = useState(null);
+  const [authMessage, setAuthMessage] = useState("");
+  const [syncStatus, setSyncStatus] = useState("Local workspace");
   const [autoPrice, setAutoPrice] = useState(true);
   const [dataSource, setDataSource] = useState("Market Data API");
   const [lastUpdated, setLastUpdated] = useState("Manual price");
@@ -226,6 +308,7 @@ export default function App() {
     accountId: "",
     accountBalance: 0,
     connected: false,
+    connectionStatus: "Not Connected",
     fills: [],
     openPnl: 0,
     platform: "Not connected",
@@ -278,6 +361,83 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(streamerModeStorageKey, String(streamerMode));
   }, [streamerMode]);
+
+  useEffect(() => {
+    localStorage.setItem(journalStorageKey, JSON.stringify(journalEntries));
+  }, [journalEntries]);
+
+  useEffect(() => {
+    localStorage.setItem(layoutStorageKey, JSON.stringify(layoutPrefs));
+  }, [layoutPrefs]);
+
+  useEffect(() => {
+    localStorage.setItem(watchlistStorageKey, JSON.stringify(watchlist));
+  }, [watchlist]);
+
+  useEffect(() => {
+    if (!supabase) return undefined;
+
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setAuthMessage(nextSession ? "Personal dashboard connected." : "Signed out. Local mode is still available.");
+      if (nextSession?.user) {
+        setAuthModal(null);
+        setActivePage("dashboard");
+      }
+    });
+
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session?.user || !supabase) return;
+
+    let cancelled = false;
+    const loadWorkspace = async () => {
+      setSyncStatus("Loading personal dashboard...");
+
+      const [{ data: profileRow }, { data: settingsRow }, { data: activePlan }, { data: journalRows }, { data: watchRows }] = await Promise.all([
+        supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle(),
+        supabase.from("trade_settings").select("*").eq("user_id", session.user.id).maybeSingle(),
+        supabase.from("trade_plans").select("*").eq("user_id", session.user.id).eq("status", "active").order("updated_at", { ascending: false }).limit(1).maybeSingle(),
+        supabase.from("trade_journal").select("*").eq("user_id", session.user.id).order("created_at", { ascending: false }).limit(50),
+        supabase.from("watchlist").select("*").eq("user_id", session.user.id).order("created_at", { ascending: false }),
+      ]);
+
+      if (cancelled) return;
+
+      if (profileRow) {
+        setProfile((current) => profileFromDatabase(profileRow, current));
+        setStreamerMode(Boolean(profileRow.streamer_mode));
+      }
+
+      if (settingsRow) {
+        setProfile((current) => ({ ...current, ...(settingsRow.risk_settings || {}), mainMarket: settingsRow.selected_market || current.mainMarket }));
+        if (Number.isFinite(Number(settingsRow.support))) setSupport(Number(settingsRow.support));
+        if (Number.isFinite(Number(settingsRow.resistance))) setResistance(Number(settingsRow.resistance));
+        setLayoutPrefs({ ...defaultLayout, ...(settingsRow.preferred_layout || {}) });
+      }
+
+      if (activePlan?.plan) {
+        setPlannedTrade(activePlan.plan);
+        setActivePosition(activePlan.plan.status === "active" ? activePlan.plan : null);
+      }
+
+      if (journalRows?.length) setJournalEntries(journalRows.map((row) => ({ id: row.id, ...(row.entry || {}), stamp: row.created_at })));
+      if (watchRows?.length) setWatchlist(watchRows.map((row) => ({ id: row.id, notes: row.notes, symbol: row.symbol })));
+      setSyncStatus("Personal dashboard synced");
+      setActivePage("dashboard");
+    };
+
+    loadWorkspace().catch((error) => setSyncStatus(error.message || "Unable to load personal dashboard"));
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.user?.id]);
 
   useEffect(() => {
     setContracts(profile.defaultContracts);
@@ -484,6 +644,83 @@ export default function App() {
     setDiscipline((current) => ({ ...current, [key]: value }));
   };
 
+  const savePersonalWorkspace = async () => {
+    if (!session?.user || !supabase) return;
+
+    const riskSettings = {
+      defaultContracts: profile.defaultContracts,
+      defaultRiskPoints: profile.defaultRiskPoints,
+      maxDailyLoss: profile.maxDailyLoss,
+      maxRiskPerTrade: profile.maxRiskPerTrade,
+      maxTradesPerDay: profile.maxTradesPerDay,
+      accountSize: profile.accountSize,
+      accountType: profile.accountType,
+      accountPhase: profile.accountPhase,
+      consistencyRuleTarget: profile.consistencyRuleTarget,
+      fundedPlatform: profile.fundedPlatform,
+      fundedProvider: profile.fundedProvider,
+      profitGoal: profile.profitGoal,
+      startingBalance: profile.startingBalance,
+      trailingDrawdown: profile.trailingDrawdown,
+      traderStyle: profile.traderStyle,
+      trim1Points: profile.trim1Points,
+      trim2Points: profile.trim2Points,
+      runnerPoints: profile.runnerPoints,
+      voiceAlerts: profile.voiceAlerts,
+      streamerMode,
+    };
+
+    await Promise.all([
+      supabase.from("profiles").upsert(profileToDatabase(profile, session.user, streamerMode)),
+      supabase.from("trade_settings").upsert({
+        coach_preferences: { voiceAlerts: profile.voiceAlerts },
+        preferred_layout: layoutPrefs,
+        risk_settings: riskSettings,
+        selected_market: profile.mainMarket,
+        support,
+        resistance,
+        updated_at: new Date().toISOString(),
+        user_id: session.user.id,
+      }, { onConflict: "user_id" }),
+      plannedTrade
+        ? supabase.from("trade_plans").upsert({
+            id: plannedTrade.remoteId,
+            plan: plannedTrade,
+            status: "active",
+            updated_at: new Date().toISOString(),
+            user_id: session.user.id,
+          })
+        : Promise.resolve(),
+      brokerConnection.platform !== "Not connected"
+        ? supabase.from("broker_connections").upsert({
+            account_type: profile.accountType,
+            metadata: {
+              dataSource,
+              lastUpdated: brokerConnection.updatedAt,
+              readOnly: true,
+              streamerSafe: true,
+            },
+            mode: "read-only",
+            platform: brokerConnection.platform || profile.fundedPlatform,
+            provider: profile.fundedProvider,
+            status: brokerConnection.connectionStatus || "not_connected",
+            updated_at: new Date().toISOString(),
+            user_id: session.user.id,
+          }, { onConflict: "user_id,platform" })
+        : Promise.resolve(),
+    ]);
+
+    setSyncStatus("Personal dashboard saved");
+  };
+
+  useEffect(() => {
+    if (!session?.user || !supabase) return undefined;
+    const timer = setTimeout(() => {
+      savePersonalWorkspace().catch((error) => setSyncStatus(error.message || "Save failed"));
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [layoutPrefs, plannedTrade, profile, resistance, session?.user?.id, streamerMode, support]);
+
   const startFastTrade = (nextDirection) => {
     const nextEntry = price;
     const stop = getSmartStop({ direction: nextDirection, entry: nextEntry, resistance, riskPoints, support }).smartStop;
@@ -657,23 +894,75 @@ export default function App() {
   };
 
   const connectTradovateReadOnly = async (mode) => {
+    const platform = mode === "live" ? "Tradovate Live Read-Only" : "Tradovate Demo Read-Only";
+    setBrokerConnection((current) => ({
+      ...current,
+      connected: false,
+      connectionStatus: "Connecting",
+      error: "",
+      platform,
+    }));
+    setPriceStatus("");
+
     try {
-      const response = await fetch(`${marketServerUrl}/api/tradovate/auth?mode=${mode}`);
+      const response = await fetch(`${marketServerUrl}/api/tradovate/auth`, {
+        body: JSON.stringify({ mode }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Tradovate read-only connection failed.");
 
-      const snapshotResponse = await fetch(`${marketServerUrl}/api/tradovate/market-price?mode=${mode}&symbol=${profile.mainMarket}`);
+      const snapshotResponse = await fetch(`${marketServerUrl}/api/tradovate/quote?mode=${mode}&symbol=${profile.mainMarket}`);
       const snapshot = await snapshotResponse.json();
       if (!snapshotResponse.ok) throw new Error(snapshot.error || "Tradovate market data unavailable.");
 
-      setBrokerConnection(snapshot.snapshot || snapshot);
+      setBrokerConnection({
+        ...(snapshot.snapshot || snapshot),
+        connectionStatus: mode === "live" ? "Live Read-Only Connected" : "Demo Connected",
+        error: "",
+      });
       setDataSource(mode === "live" ? tradovateModes.live : tradovateModes.demo);
       setAutoPrice(true);
       setFastMessage(`${mode === "live" ? "Live" : "Demo"} Tradovate read-only connected. Trading actions remain disabled.`);
       setActivePage("dashboard");
     } catch (error) {
-      setPriceStatus(error.message || "Tradovate read-only connection is not configured.");
+      const message = error.message || "Tradovate read-only connection is not configured.";
+      setBrokerConnection((current) => ({
+        ...current,
+        connected: false,
+        connectionStatus: "Error",
+        error: message,
+        platform,
+      }));
+      setPriceStatus(message);
       setActivePage("connections");
+    }
+  };
+
+  const signOut = async () => {
+    if (supabase) await supabase.auth.signOut();
+    setSession(null);
+    setActivePage("dashboard");
+    setSyncStatus("Local workspace");
+  };
+
+  const addJournalEntry = async (entryText) => {
+    const entry = {
+      action: engine.suggestedAction,
+      dailyPnl: discipline.dailyPnl,
+      market: profile.mainMarket,
+      note: entryText,
+      plan: plannedTrade,
+      price,
+      score: engine.score,
+      stamp: new Date().toISOString(),
+    };
+    setJournalEntries((current) => [entry, ...current]);
+
+    if (session?.user && supabase) {
+      await supabase.from("trade_journal").insert({ entry, user_id: session.user.id });
+      setSyncStatus("Journal saved");
     }
   };
 
@@ -693,6 +982,21 @@ export default function App() {
           </div>
 
           <div style={styles.topActions}>
+            <div style={styles.authActions}>
+              {session?.user ? (
+                <>
+                  <span style={styles.accountPill}>{session.user.user_metadata?.name || session.user.email}</span>
+                  <button onClick={() => setActivePage("profile")} style={styles.authButton}>Profile</button>
+                  <button onClick={signOut} style={styles.authButton}>Log Out</button>
+                </>
+              ) : (
+                <>
+                  <span style={styles.accountPill}>Guest Mode</span>
+                  <button onClick={() => setAuthModal("signup")} style={styles.authButton}>Sign Up</button>
+                  <button onClick={() => setAuthModal("login")} style={styles.authButton}>Log In</button>
+                </>
+              )}
+            </div>
             <label style={styles.streamerToggle}>
               <input
                 type="checkbox"
@@ -713,7 +1017,14 @@ export default function App() {
           </div>
         </header>
         <div style={styles.alphaBanner}>Trade Pilot Alpha — educational execution assistant. Not financial advice.</div>
-        <div style={styles.riskBanner}>⚠ Trading involves risk. Trade responsibly.</div>
+        <div style={styles.riskBanner}>Read-only mode: Trade Pilot reads Tradovate/account data and does not place, cancel, or modify trades.</div>
+        <div style={styles.riskBanner}>Trading involves risk. Trade responsibly.</div>
+        {!session?.user ? (
+          <div style={styles.guestPrompt}>
+            <span>Create a free account to save your trading workspace.</span>
+            <button onClick={() => setAuthModal("signup")} style={styles.authButton}>Sign Up</button>
+          </div>
+        ) : null}
         {!installBannerDismissed ? (
           <InstallBanner
             canInstall={Boolean(installPrompt)}
@@ -744,6 +1055,7 @@ export default function App() {
             engine={engine}
             entry={entry}
             fastMessage={fastMessage}
+            layoutPrefs={layoutPrefs}
             lastUpdated={lastUpdated}
             price={price}
             priceStatus={priceStatus}
@@ -791,8 +1103,28 @@ export default function App() {
             startDemoBroker={startDemoBroker}
           />
         ) : null}
+        {activePage === "account" ? (
+          <AccountPage
+            authMessage={authMessage}
+            isConfigured={isSupabaseConfigured}
+            layoutPrefs={layoutPrefs}
+            session={session}
+            setLayoutPrefs={setLayoutPrefs}
+            onAuthOpen={setAuthModal}
+            signOut={signOut}
+            syncStatus={syncStatus}
+          />
+        ) : null}
         {activePage === "install" ? <InstallPage canInstall={Boolean(installPrompt)} onInstall={installApp} /> : null}
-        {activePage === "journal" ? <JournalPage activePosition={activePosition} engine={engine} discipline={discipline} /> : null}
+        {activePage === "journal" ? (
+          <JournalPage
+            activePosition={activePosition}
+            addJournalEntry={addJournalEntry}
+            discipline={discipline}
+            engine={engine}
+            journalEntries={journalEntries}
+          />
+        ) : null}
         {activePage === "profile" ? <ProfilePage profile={profile} updateProfile={updateProfile} /> : null}
         {activePage === "help" ? <HelpPage /> : null}
         {activePage === "support" ? (
@@ -825,6 +1157,21 @@ export default function App() {
             setFeedbackItems((current) => [{ ...item, stamp: new Date().toLocaleString() }, ...current]);
             setFeedbackOpen(false);
           }}
+        />
+      ) : null}
+
+      {authModal ? (
+        <AuthModal
+          authMessage={authMessage}
+          initialMode={authModal}
+          isConfigured={isSupabaseConfigured}
+          onClose={() => setAuthModal(null)}
+          onSignedIn={() => {
+            setAuthModal(null);
+            setActivePage("dashboard");
+          }}
+          setAuthMessage={setAuthMessage}
+          setProfile={setProfile}
         />
       ) : null}
 
@@ -951,6 +1298,189 @@ function InstallPage({ canInstall, onInstall }) {
   );
 }
 
+function AccountPage({ authMessage, isConfigured, layoutPrefs, onAuthOpen, session, setLayoutPrefs, signOut, syncStatus }) {
+  return (
+    <main style={styles.mainGrid}>
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Personal Dashboard</p>
+        <h2 style={styles.sectionTitle}>{session?.user ? "Your Trade Pilot Workspace" : "Save Your Workspace"}</h2>
+        <p style={styles.muted}>
+          Use Trade Pilot without logging in, or create an account to save settings, layouts, trade plans, journal entries, watchlists, and coach preferences.
+        </p>
+        <div style={{ ...styles.metricGrid, marginTop: "16px" }}>
+          <Metric label="Auth" value={isConfigured ? "Supabase Ready" : "Supabase Not Configured"} tone={isConfigured ? "good" : "warn"} />
+          <Metric label="Session" value={session?.user ? "Signed In" : "Local Mode"} />
+          <Metric label="Sync" value={syncStatus} />
+        </div>
+      </section>
+
+      {session?.user ? (
+        <section style={styles.card}>
+          <p style={styles.cardLabel}>Account</p>
+          <h2 style={styles.sectionTitle}>{session.user.email}</h2>
+          <PlanItem title="Saved Data" text="Profile, trade settings, active plans, journal entries, watchlist, and layout preferences sync to Supabase." />
+          <PlanItem title="Broker Privacy" text="Broker data is private to this user. Broker passwords and API secrets stay server-side." />
+          <button onClick={signOut} style={{ ...styles.dismissButton, marginTop: "16px" }}>Sign Out</button>
+          {authMessage ? <p style={{ ...styles.muted, marginTop: "12px" }}>{authMessage}</p> : null}
+        </section>
+      ) : (
+        <section style={styles.card}>
+          <p style={styles.cardLabel}>Account Access</p>
+          <h2 style={styles.sectionTitle}>Start in Guest Mode, Save When Ready</h2>
+          <p style={styles.muted}>
+            Guest mode saves to this browser only. Create a free account to sync your Trade Pilot workspace, settings, plans, and journal through Supabase.
+          </p>
+          <div style={styles.inlineActions}>
+            <button onClick={() => onAuthOpen("signup")} style={styles.settingsButton}>Sign Up</button>
+            <button onClick={() => onAuthOpen("login")} style={styles.dismissButton}>Log In</button>
+          </div>
+          {authMessage ? <p style={{ ...styles.muted, marginTop: "12px" }}>{authMessage}</p> : null}
+        </section>
+      )}
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Free vs Pro Planning</p>
+        <h2 style={styles.sectionTitle}>Pre-Release Access</h2>
+        <PlanItem title="Free" text="Manual trade plan, saved profile, and basic journal." />
+        <PlanItem title="Pro Later" text="Live broker data, advanced chart, AI trade coach, analytics, TradingView webhook, and custom layouts." />
+        <PlanItem title="Payments" text="Not enabled yet." />
+      </section>
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Layout Customization</p>
+        <h2 style={styles.sectionTitle}>Show / Hide Dashboard Cards</h2>
+        <p style={{ ...styles.muted, marginBottom: "14px" }}>Reordering is reserved for later; these visibility preferences save to your database when signed in.</p>
+        <div style={styles.formGrid}>
+          {Object.keys(defaultLayout).map((key) => (
+            <label key={key} style={styles.switchRow}>
+              <input
+                type="checkbox"
+                checked={layoutPrefs[key]}
+                onChange={(event) => setLayoutPrefs((current) => ({ ...current, [key]: event.target.checked }))}
+              />
+              {key}
+            </label>
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function AuthModal({ authMessage, initialMode, isConfigured, onClose, onSignedIn, setAuthMessage, setProfile }) {
+  const [mode, setMode] = useState(initialMode || "login");
+  const [form, setForm] = useState({
+    accountType: "personal",
+    confirmPassword: "",
+    email: "",
+    name: "",
+    password: "",
+    preferredMarket: "MNQ",
+    rememberMe: true,
+    traderType: "intermediate",
+  });
+  const [message, setMessage] = useState(authMessage || "");
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!isConfigured || !supabase) {
+      setMessage("Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable accounts.");
+      return;
+    }
+
+    try {
+      if (mode === "signup") {
+        if (form.password !== form.confirmPassword) {
+          setMessage("Passwords do not match.");
+          return;
+        }
+
+        const { error } = await supabase.auth.signUp({
+          email: form.email,
+          password: form.password,
+          options: {
+            data: {
+              accountType: form.accountType,
+              name: form.name,
+              preferredMarket: form.preferredMarket,
+              traderType: form.traderType,
+            },
+          },
+        });
+        if (error) throw error;
+        const savedMarket = form.preferredMarket === "crypto" ? "BTC" : form.preferredMarket === "options" ? "SPY" : form.preferredMarket;
+        setProfile((current) => ({
+          ...current,
+          accountType: form.accountType,
+          mainMarket: savedMarket,
+          traderExperienceLevel: form.traderType,
+          traderName: form.name,
+        }));
+        setMessage("Check your email to verify your Trade Pilot account.");
+        setAuthMessage("Check your email to verify your Trade Pilot account.");
+      } else if (mode === "reset") {
+        const { error } = await supabase.auth.resetPasswordForEmail(form.email);
+        if (error) throw error;
+        setMessage("Password reset email sent.");
+        setAuthMessage("Password reset email sent.");
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
+        if (error) throw error;
+        localStorage.setItem("tradePilotRememberLogin", String(form.rememberMe));
+        setAuthMessage("Signed in. Loading your dashboard.");
+        onSignedIn();
+      }
+    } catch (error) {
+      setMessage(error.message || "Authentication failed.");
+    }
+  };
+
+  return (
+    <div style={{ ...styles.modalBackdrop, zIndex: 45 }}>
+      <section style={styles.modal}>
+        <div style={styles.modalHeader}>
+          <div>
+            <p style={styles.cardLabel}>Account Access</p>
+            <h2 style={styles.sectionTitle}>{mode === "signup" ? "Create Account" : mode === "reset" ? "Reset Password" : "Log In"}</h2>
+          </div>
+          <button onClick={onClose} style={styles.dismissButton}>Close</button>
+        </div>
+        <p style={styles.muted}>
+          Supabase keeps each trader's workspace private. Broker credentials stay out of the frontend.
+        </p>
+      <div style={styles.segmentGroup}>
+        <button onClick={() => setMode("login")} style={{ ...styles.segmentButton, background: mode === "login" ? "#2563eb" : "#27272a" }}>Login</button>
+        <button onClick={() => setMode("signup")} style={{ ...styles.segmentButton, background: mode === "signup" ? "#2563eb" : "#27272a" }}>Signup</button>
+        <button onClick={() => setMode("reset")} style={{ ...styles.segmentButton, background: mode === "reset" ? "#2563eb" : "#27272a" }}>Reset</button>
+      </div>
+      <form onSubmit={submit} style={styles.formGrid}>
+        {mode === "signup" ? <Field label="Name" value={form.name} onChange={(value) => setForm((current) => ({ ...current, name: value }))} /> : null}
+        <Field label="Email" type="email" value={form.email} onChange={(value) => setForm((current) => ({ ...current, email: value }))} />
+        {mode !== "reset" ? <Field label="Password" type="password" value={form.password} onChange={(value) => setForm((current) => ({ ...current, password: value }))} /> : null}
+        {mode === "signup" ? <Field label="Confirm Password" type="password" value={form.confirmPassword} onChange={(value) => setForm((current) => ({ ...current, confirmPassword: value }))} /> : null}
+        {mode === "signup" ? <SelectField label="Trader Type" value={form.traderType} options={["beginner", "intermediate", "advanced"]} onChange={(value) => setForm((current) => ({ ...current, traderType: value }))} /> : null}
+        {mode === "signup" ? <SelectField label="Preferred Market" value={form.preferredMarket} options={["MNQ", "NQ", "ES", "MES", "crypto", "options"]} onChange={(value) => setForm((current) => ({ ...current, preferredMarket: value }))} /> : null}
+        {mode === "signup" ? <SelectField label="Account Type" value={form.accountType} options={["personal", "funded", "both"]} onChange={(value) => setForm((current) => ({ ...current, accountType: value }))} /> : null}
+        {mode === "login" ? (
+          <label style={styles.switchRow}>
+            <input
+              type="checkbox"
+              checked={form.rememberMe}
+              onChange={(event) => setForm((current) => ({ ...current, rememberMe: event.target.checked }))}
+            />
+            Remember me
+          </label>
+        ) : null}
+        <button style={styles.settingsButton}>{mode === "signup" ? "Create Account" : mode === "reset" ? "Send Reset Email" : "Log In"}</button>
+      </form>
+      {mode === "login" ? (
+        <button onClick={() => setMode("reset")} style={{ ...styles.textButton, marginTop: "12px" }}>Forgot password?</button>
+      ) : null}
+      {message ? <p style={{ ...styles.muted, marginTop: "12px" }}>{message}</p> : null}
+      </section>
+    </div>
+  );
+}
+
 function Dashboard({
   activePosition,
   applyQuickSetup,
@@ -963,6 +1493,7 @@ function Dashboard({
   engine,
   entry,
   fastMessage,
+  layoutPrefs,
   lastUpdated,
   price,
   priceStatus,
@@ -1050,6 +1581,8 @@ function Dashboard({
       {streamerMode ? (
         <LivestreamDashboard
           activePosition={activePosition}
+          brokerConnection={brokerConnection}
+          discipline={discipline}
           engine={engine}
           price={price}
           profile={profile}
@@ -1071,7 +1604,7 @@ function Dashboard({
         </div>
       </section>
 
-      <TradeChartPanel
+      {layoutPrefs.chart ? <TradeChartPanel
         chartData={chartData}
         currentPrice={price}
         entry={entry}
@@ -1081,10 +1614,10 @@ function Dashboard({
         resistance={resistance}
         trim1={engine.trim1}
         trim2={engine.trim2}
-      />
+      /> : null}
 
       <section style={styles.alphaTopGrid}>
-        <div style={styles.scoreCard}>
+        {layoutPrefs.score ? <div style={styles.scoreCard}>
           <p style={styles.cardLabel}>
             <span style={styles.labelWithHelp}>
               Trade Score
@@ -1096,9 +1629,9 @@ function Dashboard({
           <div style={styles.scoreTrack}>
             <div style={{ ...styles.scoreFill, width: `${engine.score}%`, background: engine.confidenceColor }} />
           </div>
-        </div>
+        </div> : null}
 
-        <div style={styles.coachCard}>
+        {layoutPrefs.coach ? <div style={styles.coachCard}>
           <p style={styles.cardLabel}>Trade Coach</p>
           <div style={styles.coachGrid}>
             <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={simpleBias === "WAIT" ? "warn" : "good"} />
@@ -1106,10 +1639,10 @@ function Dashboard({
             <Metric label="Action" value={levelCoach.action === "WAIT" ? simpleAction : levelCoach.action} tone={simpleBias === "WAIT" ? "warn" : "good"} />
           </div>
           <p style={styles.coachMessage}>{levelCoach.message}</p>
-        </div>
+        </div> : null}
       </section>
 
-      <section style={styles.rulesCard}>
+      {layoutPrefs.risk ? <section style={styles.rulesCard}>
         <div>
           <p style={styles.cardLabel}>Today&apos;s Trading Rules</p>
           <h2 style={styles.sectionTitle}>Stay inside your limits</h2>
@@ -1120,7 +1653,7 @@ function Dashboard({
           <Metric label="Current P/L" value={`$${discipline.dailyPnl.toFixed(2)}`} tone={discipline.dailyPnl >= 0 ? "good" : "bad"} />
           <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : riskStatus === "Warning" ? "warn" : "bad"} />
         </div>
-      </section>
+      </section> : null}
 
       <section style={styles.alphaMiddleGrid}>
         <section style={styles.tradePlanHero}>
@@ -1345,14 +1878,14 @@ function Dashboard({
             <span>Last updated: {lastUpdated}</span>
           </div>
           {priceStatus ? <div style={styles.priceWarning}>{priceStatus}</div> : null}
-          {dataSource === "Broker Connection" ? (
+          {dataSource === "Broker Connection" || dataSource.includes("Tradovate") ? (
             <div style={styles.brokerStatusCard}>
               <span style={{ ...styles.statusPill, background: brokerConnection.connected ? "#166534" : "#3f3f46" }}>
-                {brokerConnection.connected ? "Connected" : "Waiting"}
+                {brokerConnection.connectionStatus || (brokerConnection.connected ? "Connected" : "Waiting")}
               </span>
               <span>{brokerConnection.platform}</span>
-              <span>{brokerConnection.accountId || "No account linked"}</span>
-              <span>Balance: ${Number(brokerConnection.accountBalance || 0).toFixed(2)}</span>
+              {!streamerMode ? <span>{brokerConnection.accountId || "No account linked"}</span> : null}
+              {!streamerMode ? <span>Balance: ${Number(brokerConnection.accountBalance || 0).toFixed(2)}</span> : null}
               <span>Open P/L: ${Number(brokerConnection.openPnl || 0).toFixed(2)}</span>
               <span>Realized P/L: ${Number(brokerConnection.realizedPnl || 0).toFixed(2)}</span>
             </div>
@@ -1842,8 +2375,9 @@ function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support
   );
 }
 
-function LivestreamDashboard({ activePosition, coachMessage, engine, price, profile, riskStatus, visualPlan }) {
+function LivestreamDashboard({ activePosition, brokerConnection, coachMessage, discipline, engine, price, profile, riskStatus, visualPlan }) {
   const positionLabel = activePosition ? `${activePosition.direction.toUpperCase()} ${activePosition.contracts}` : "No Position";
+  const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
 
   return (
     <section style={styles.livestreamPanel}>
@@ -1855,6 +2389,8 @@ function LivestreamDashboard({ activePosition, coachMessage, engine, price, prof
       <div style={styles.liveMetricGrid}>
         <Metric label="Trade Score" value={`${engine.score}/100`} />
         <Metric label="Open P/L" value={`$${engine.openPnl.toFixed(2)}`} tone={engine.openPnl >= 0 ? "good" : "bad"} />
+        <Metric label="Daily P/L" value={`$${fundedMetrics.dailyPnl.toFixed(2)}`} />
+        <Metric label="Drawdown Left" value={`$${fundedMetrics.drawdownRemaining.toFixed(2)}`} />
         <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : "warn"} />
         <Metric label="Stop" value={Number(visualPlan.stop || engine.smartStop).toFixed(2)} />
         <Metric label="Trim 1" value={Number(visualPlan.trim1 || engine.trim1).toFixed(2)} />
@@ -1882,9 +2418,11 @@ function getSmartStop({ direction, entry, resistance, riskPoints, support }) {
 }
 
 function getConnectionStatusLabel(connection) {
+  if (connection?.connectionStatus) return connection.connectionStatus;
   if (!connection?.connected) return "Not Connected";
   if (connection.platform === "Demo Broker") return "Demo Connected";
-  if (connection.platform?.toLowerCase().includes("tradovate")) return "Tradovate Connected";
+  if (connection.platform === "Tradovate Live Read-Only") return "Live Read-Only Connected";
+  if (connection.platform === "Tradovate Demo Read-Only") return "Demo Connected";
   if (connection.platform === "TradingView Webhook") return "TradingView Connected";
   return `${connection.platform} Connected`;
 }
@@ -1905,6 +2443,44 @@ function buildBrokerSafetyWarnings({ activePosition, brokerConnection, disciplin
   return [...new Set(warnings)];
 }
 
+function getFundedAccountMetrics({ brokerConnection, discipline, profile }) {
+  const accountBalance = Number(brokerConnection.accountBalance || profile.accountSize || profile.startingBalance);
+  const startingBalance = Number(profile.startingBalance || profile.accountSize || 0);
+  const trailingDrawdown = Number(profile.trailingDrawdown || 0);
+  const drawdownFloor = Math.max(startingBalance - trailingDrawdown, accountBalance - trailingDrawdown);
+  const drawdownRemaining = Math.max(0, accountBalance - drawdownFloor);
+  const dailyPnl = Number(discipline.dailyPnl || 0);
+  const dailyLossLimit = Number(profile.maxDailyLoss || 0);
+  const profitGoal = Number(profile.profitGoal || 0);
+  const consistencyCap = profitGoal > 0 ? profitGoal * (Number(profile.consistencyRuleTarget || 30) / 100) : 0;
+
+  return {
+    accountBalance,
+    consistencyCap,
+    dailyLossLimit,
+    dailyPnl,
+    drawdownFloor,
+    drawdownRemaining,
+    profitGoal,
+  };
+}
+
+function buildFundedRuleWarnings({ brokerConnection, discipline, profile }) {
+  const warnings = [];
+  const position = brokerConnection.position;
+  const contracts = Number(position?.contracts || 0);
+  const metrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
+
+  if (metrics.dailyLossLimit > 0 && Math.abs(metrics.dailyPnl) >= metrics.dailyLossLimit * 0.8) warnings.push("Daily loss limit approaching");
+  if (metrics.drawdownRemaining <= Math.max(100, Number(profile.trailingDrawdown || 0) * 0.2)) warnings.push("Trailing drawdown risk");
+  if (contracts > Number(profile.maxContracts || profile.defaultContracts)) warnings.push("Position size too large");
+  if (discipline.tradesTaken >= Number(profile.maxTradesPerDay || 0)) warnings.push("Max trades reached");
+  if (metrics.consistencyCap > 0 && Math.max(metrics.dailyPnl, 0) > metrics.consistencyCap) warnings.push("Consistency rule risk");
+  if (warnings.length >= 2 || metrics.drawdownRemaining <= 0) warnings.push("Stop trading to protect payout");
+
+  return [...new Set(warnings)];
+}
+
 function ConnectionsPage({
   activePosition,
   brokerConnection,
@@ -1919,9 +2495,11 @@ function ConnectionsPage({
   startDemoBroker,
 }) {
   const [tradovateStatus, setTradovateStatus] = useState(null);
-  const statusLabel = brokerConnection.error ? "Error" : getConnectionStatusLabel(brokerConnection);
+  const statusLabel = getConnectionStatusLabel(brokerConnection);
   const position = brokerConnection.position || activePosition;
   const safetyWarnings = buildBrokerSafetyWarnings({ activePosition, brokerConnection, discipline, engine, profile });
+  const fundedWarnings = buildFundedRuleWarnings({ brokerConnection, discipline, profile });
+  const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
 
   const checkTradovateReadOnly = async () => {
     try {
@@ -1939,8 +2517,46 @@ function ConnectionsPage({
   return (
     <main style={styles.mainGrid}>
       <section style={styles.card}>
+        <p style={styles.cardLabel}>Funded Account</p>
+        <h2 style={styles.sectionTitle}>Platform-First Setup</h2>
+        <div style={styles.connectionGrid}>
+          <Metric label="Provider" value={profile.fundedProvider} />
+          <Metric label="Platform" value={profile.fundedPlatform} />
+          <Metric label="Phase" value={profile.accountPhase} />
+          <Metric label="Daily P/L" value={`$${fundedMetrics.dailyPnl.toFixed(2)}`} tone={fundedMetrics.dailyPnl >= 0 ? "good" : "bad"} />
+          <Metric label="Drawdown Remaining" value={`$${fundedMetrics.drawdownRemaining.toFixed(2)}`} tone={fundedMetrics.drawdownRemaining > 500 ? "good" : "warn"} />
+          <Metric label="Profit Goal" value={`$${fundedMetrics.profitGoal.toFixed(2)}`} />
+        </div>
+        <p style={{ ...styles.muted, marginTop: "14px" }}>Trade Pilot is a funded-account execution and risk assistant. It is not a broker or signal service.</p>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Connection Modes</p>
+        <h2 style={styles.sectionTitle}>Read-Only Platform Paths</h2>
+        <div style={styles.sourceGrid}>
+          <SourceOption title="Manual Mode" text="Manually enter P/L, drawdown, and account stats." active={profile.fundedPlatform === "Manual Mode"} />
+          <SourceOption title="CSV Import" text="Upload trade reports from supported platforms as a fallback." active={profile.fundedPlatform === "CSV Import"} />
+          <SourceOption title="Tradovate Read-Only" text="Use Tradovate API access when enabled by the account/platform." active={profile.fundedPlatform === "Tradovate"} />
+          <SourceOption title="Rithmic Read-Only" text="Prepared for a Rithmic API or third-party bridge integration." active={profile.fundedPlatform === "Rithmic"} />
+          <SourceOption title="TopstepX Read-Only" text="Prepared for TopstepX API read-only account data." active={profile.fundedPlatform === "TopstepX"} />
+          <SourceOption title="NinjaTrader/CQG Later" text="Reserved for future read-only platform support." active={profile.fundedPlatform === "NinjaTrader/CQG"} />
+        </div>
+      </section>
+
+      <section style={styles.safetyCard}>
+        <p style={styles.cardLabel}>Prop Firm Rule Monitor</p>
+        <h2 style={styles.sectionTitle}>Protect the Payout</h2>
+        <div style={styles.warningStack}>
+          {(fundedWarnings.length ? fundedWarnings : ["Inside funded-account guardrails."]).map((warning) => (
+            <div key={warning} style={warning.includes("Inside") ? styles.coachPrompt : styles.warningBox}>{warning}</div>
+          ))}
+        </div>
+      </section>
+
+      <section style={styles.card}>
         <p style={styles.cardLabel}>Connection Status</p>
         <h2 style={styles.sectionTitle}>{statusLabel}</h2>
+        {brokerConnection.error ? <div style={styles.priceWarning}>{brokerConnection.error}</div> : null}
         <div style={styles.connectionGrid}>
           <Metric label="Market" value={profile.mainMarket} />
           <Metric label="Current Price" value={Number(price).toFixed(2)} />
@@ -1986,7 +2602,7 @@ function ConnectionsPage({
       <section style={styles.card}>
         <p style={styles.cardLabel}>Phase 2</p>
         <h2 style={styles.sectionTitle}>Tradovate Read-Only Prep</h2>
-        <p style={styles.muted}>Broker passwords never go in frontend code. Environment variables and OAuth/API tokens belong on the backend only.</p>
+        <p style={styles.muted}>Use your dedicated Tradovate API password. Broker credentials, API keys, and token status stay on the backend only.</p>
         <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
           <button onClick={() => connectTradovateReadOnly("demo")} style={styles.settingsButton}>Connect Demo Read-Only</button>
           <button onClick={() => connectTradovateReadOnly("live")} style={styles.dismissButton}>Connect Live Read-Only</button>
@@ -2179,7 +2795,15 @@ function KeyLevelCoach({
   );
 }
 
-function JournalPage({ activePosition, engine, discipline }) {
+function JournalPage({ activePosition, addJournalEntry, engine, discipline, journalEntries }) {
+  const [note, setNote] = useState("");
+  const submit = (event) => {
+    event.preventDefault();
+    if (!note.trim()) return;
+    addJournalEntry(note.trim());
+    setNote("");
+  };
+
   return (
     <main style={styles.mainGrid}>
       <section style={styles.card}>
@@ -2201,6 +2825,19 @@ function JournalPage({ activePosition, engine, discipline }) {
             : "Use Fast Mode or dashboard inputs to create an execution context for review."}
         </p>
       </section>
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Personal Journal</p>
+        <h2 style={styles.sectionTitle}>Save Trade Notes</h2>
+        <form onSubmit={submit}>
+          <textarea style={styles.textArea} value={note} onChange={(event) => setNote(event.target.value)} placeholder="What did you see? What did you do well? What needs work?" />
+          <button style={styles.settingsButton}>Save Journal Entry</button>
+        </form>
+        <div style={{ ...styles.warningStack, marginTop: "16px" }}>
+          {journalEntries.slice(0, 8).map((entry) => (
+            <PlanItem key={entry.id || entry.stamp} title={new Date(entry.stamp).toLocaleString()} text={`${entry.market || ""} ${entry.note || ""}`} />
+          ))}
+        </div>
+      </section>
     </main>
   );
 }
@@ -2210,7 +2847,7 @@ function ProfilePage({ profile, updateProfile }) {
     <section style={styles.card}>
       <p style={styles.cardLabel}>Profile</p>
       <h2 style={styles.sectionTitle}>Trader Settings</h2>
-      <p style={{ ...styles.muted, marginBottom: "18px" }}>Saved locally on this device. These values drive guardrails, scoring, and defaults.</p>
+      <p style={{ ...styles.muted, marginBottom: "18px" }}>Saved locally on this device, and synced to your personal dashboard when signed in.</p>
       <ProfileFields profile={profile} updateProfile={updateProfile} />
     </section>
   );
@@ -2221,10 +2858,18 @@ function ProfileFields({ profile, updateProfile }) {
     <>
       <div style={styles.formGrid}>
         <Field label="Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
+        <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
         <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
         <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
-        <SelectField label="Account Type" value={profile.accountType} options={["personal", "prop"]} onChange={(value) => updateProfile("accountType", value)} />
+        <SelectField label="Account Type" value={profile.accountType} options={["personal", "funded", "both", "prop"]} onChange={(value) => updateProfile("accountType", value)} />
+        <SelectField label="Funded Provider" value={profile.fundedProvider} options={fundedProviders} onChange={(value) => updateProfile("fundedProvider", value)} />
+        <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
+        <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} />
         <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
+        <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
+        <Field label="Trailing Drawdown" type="number" value={profile.trailingDrawdown} onChange={(value) => updateProfile("trailingDrawdown", value)} />
+        <Field label="Profit Goal" type="number" value={profile.profitGoal} onChange={(value) => updateProfile("profitGoal", value)} />
+        <Field label="Consistency Rule Target %" type="number" value={profile.consistencyRuleTarget} onChange={(value) => updateProfile("consistencyRuleTarget", value)} />
         <Field label="Max Daily Loss" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
         <Field label="Max Risk Per Trade" type="number" value={profile.maxRiskPerTrade} onChange={(value) => updateProfile("maxRiskPerTrade", value)} />
         <Field label="Max Trades Per Day" type="number" value={profile.maxTradesPerDay} onChange={(value) => updateProfile("maxTradesPerDay", value)} />
@@ -2451,7 +3096,7 @@ function SettingsModal({ profile, updateProfile, onClose }) {
         <div style={styles.formGrid}>
           <Field label="Trader Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
           <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
-          <SelectField label="Account Type" value={profile.accountType} options={["personal", "prop"]} onChange={(value) => updateProfile("accountType", value)} />
+          <SelectField label="Account Type" value={profile.accountType} options={["personal", "funded", "both", "prop"]} onChange={(value) => updateProfile("accountType", value)} />
           <SelectField label="Main Market" value={profile.mainMarket} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
           <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
           <Field label="Max Daily Loss" type="number" value={profile.maxDailyLoss} onChange={(value) => updateProfile("maxDailyLoss", value)} />
@@ -2571,6 +3216,37 @@ const styles = {
     display: "flex",
     gap: "10px",
     flexWrap: "wrap",
+    justifyContent: "flex-end",
+    maxWidth: "720px",
+  },
+  authActions: {
+    alignItems: "center",
+    display: "flex",
+    gap: "8px",
+    flexWrap: "wrap",
+  },
+  accountPill: {
+    background: "#020617",
+    border: "1px solid #334155",
+    borderRadius: "999px",
+    color: "#dbeafe",
+    fontSize: "12px",
+    fontWeight: 900,
+    maxWidth: "240px",
+    overflow: "hidden",
+    padding: "9px 12px",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  authButton: {
+    background: "#0f172a",
+    border: "1px solid #38bdf8",
+    borderRadius: "10px",
+    color: "#e0f2fe",
+    cursor: "pointer",
+    fontSize: "13px",
+    fontWeight: 900,
+    padding: "10px 12px",
   },
   streamerToggle: {
     alignItems: "center",
@@ -2604,6 +3280,21 @@ const styles = {
     fontWeight: 800,
     marginBottom: "8px",
     padding: "8px 10px",
+  },
+  guestPrompt: {
+    alignItems: "center",
+    background: "rgba(8, 47, 73, .72)",
+    border: "1px solid rgba(14, 116, 144, .85)",
+    borderRadius: "12px",
+    color: "#cffafe",
+    display: "flex",
+    flexWrap: "wrap",
+    fontSize: "13px",
+    fontWeight: 900,
+    gap: "12px",
+    justifyContent: "space-between",
+    marginBottom: "12px",
+    padding: "10px 12px",
   },
   onboardingCard: {
     alignItems: "center",
@@ -2718,6 +3409,20 @@ const styles = {
     cursor: "pointer",
     fontWeight: 800,
     padding: "12px 18px",
+  },
+  inlineActions: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "10px",
+    marginTop: "16px",
+  },
+  textButton: {
+    background: "transparent",
+    border: "none",
+    color: "#7dd3fc",
+    cursor: "pointer",
+    fontWeight: 900,
+    padding: 0,
   },
   feedbackButton: {
     background: "#0ea5e9",

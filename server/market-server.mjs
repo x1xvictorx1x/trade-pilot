@@ -4,8 +4,11 @@ import { createBrokerBridge } from "./providers/broker-bridge.mjs";
 import {
   authenticateTradovate,
   createTradovateReadOnlyProvider,
+  findTradovateContract,
   getTradovateAccounts,
+  getTradovateFills,
   getTradovateMarketPrice,
+  getTradovateMe,
   getTradovateOrders,
   getTradovatePositions,
 } from "./providers/tradovate-readonly.mjs";
@@ -149,21 +152,36 @@ function sendTradovateReadOnlyPlan(response) {
   });
 }
 
-function normalizeTradovateSnapshot({ accounts = [], mode, orders = [], positions = [], symbol }) {
+function normalizeTradovateSnapshot({ accounts = [], market = {}, mode, orders = [], positions = [], symbol }) {
   const normalizedSymbol = normalizeSymbol(symbol);
-  const account = accounts[0] || {};
-  const position = positions.find((item) => normalizeSymbol(item.symbol || item.contractName || normalizedSymbol) === normalizedSymbol) || positions[0];
-  const quote = quoteFromBase(normalizedSymbol, latestQuotes.get(normalizedSymbol)?.price ?? marketDefaults[normalizedSymbol]);
+  const account = Array.isArray(accounts) ? accounts[0] || {} : accounts;
+  const positionList = Array.isArray(positions) ? positions : [];
+  const orderList = Array.isArray(orders) ? orders : [];
+  const position = positionList.find((item) => normalizeSymbol(item.symbol || item.contractName || item.contract?.name || normalizedSymbol) === normalizedSymbol) || positionList[0];
+  const fallbackQuote = quoteFromBase(normalizedSymbol, latestQuotes.get(normalizedSymbol)?.price ?? marketDefaults[normalizedSymbol]);
+  const quote = market.quote
+    ? {
+        ask: Number(market.quote.ask ?? market.quote.price ?? fallbackQuote.ask),
+        bid: Number(market.quote.bid ?? market.quote.price ?? fallbackQuote.bid),
+        price: Number(market.quote.price ?? fallbackQuote.price),
+        source: "Tradovate Market Data",
+        symbol: normalizedSymbol,
+        timestamp: new Date().toISOString(),
+      }
+    : fallbackQuote;
   const size = Number(position?.netPos ?? position?.quantity ?? position?.contracts ?? 0);
   const entry = Number(position?.netPrice ?? position?.averagePrice ?? position?.entryPrice ?? quote.price);
-  const workingOrders = orders.filter((order) => !String(order.ordStatus || order.status || "").toLowerCase().includes("filled"));
-  const fills = orders.filter((order) => String(order.ordStatus || order.status || "").toLowerCase().includes("filled"));
-  const openPnl = Number(position?.openPnl ?? position?.unrealizedPnl ?? position?.pnl ?? 0);
-  const realizedPnl = Number(account.realizedPnl ?? account.realizedPnL ?? 0);
+  const workingOrders = orderList.filter((order) => {
+    const status = String(order.ordStatus || order.status || "").toLowerCase();
+    return status.includes("working") || status.includes("submitted") || status.includes("accepted") || (!status.includes("filled") && !status.includes("cancel"));
+  });
+  const fills = orderList.filter((order) => String(order.ordStatus || order.status || "").toLowerCase().includes("filled"));
+  const openPnl = Number(position?.openPnl ?? position?.unrealizedPnl ?? position?.pnl ?? position?.profitAndLoss ?? 0);
+  const realizedPnl = Number(account.realizedPnl ?? account.realizedPnL ?? account.realizedProfitLoss ?? 0);
 
   return {
-    accountBalance: Number(account.cashBalance ?? account.netLiq ?? account.balance ?? 0),
-    accountId: account.id ? String(account.id) : "",
+    accountBalance: Number(account.cashBalance ?? account.netLiq ?? account.balance ?? account.netLiquidation ?? 0),
+    accountId: account.id ? String(account.id) : account.name || "",
     ask: quote.ask,
     bid: quote.bid,
     fills,
@@ -185,6 +203,18 @@ function normalizeTradovateSnapshot({ accounts = [], mode, orders = [], position
     timestamp: new Date().toISOString(),
     workingOrders,
   };
+}
+
+async function buildTradovateSnapshot(mode, symbol) {
+  const [accounts, positions, orders, market] = await Promise.all([
+    getTradovateAccounts(mode),
+    getTradovatePositions(mode),
+    getTradovateOrders(mode),
+    getTradovateMarketPrice(mode, symbol),
+  ]);
+  const snapshot = brokerBridge.applyPayload(normalizeTradovateSnapshot({ accounts, market, mode, orders, positions, symbol }));
+  if (snapshot.quote) latestQuotes.set(snapshot.quote.symbol, snapshot.quote);
+  return { accounts, market, orders, positions, snapshot };
 }
 
 const server = http.createServer(async (request, response) => {
@@ -264,20 +294,30 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (request.method === "GET" && url.pathname === "/api/tradovate/auth") {
-    const token = await authenticateTradovate(url.searchParams.get("mode"));
+  if (request.method === "POST" && url.pathname === "/api/tradovate/auth") {
+    const payload = await readBody(request);
+    const mode = payload.mode === "live" ? "live" : "demo";
+    const token = await authenticateTradovate(mode);
     sendJson(response, 200, {
       connected: true,
       endpoint: token.endpoint.apiBase,
+      hasLive: token.hasLive,
+      hasMarketData: token.hasMarketData,
       mode: token.mode,
       ordersEnabled: false,
       tokenStatus: "server-only",
+      userStatus: token.userStatus,
       websocket: token.endpoint.mdSocket,
     });
     return;
   }
 
-  if (request.method === "GET" && url.pathname === "/api/tradovate/account") {
+  if (request.method === "GET" && url.pathname === "/api/tradovate/me") {
+    sendJson(response, 200, await getTradovateMe(url.searchParams.get("mode")));
+    return;
+  }
+
+  if (request.method === "GET" && (url.pathname === "/api/tradovate/account" || url.pathname === "/api/tradovate/accounts")) {
     sendJson(response, 200, await getTradovateAccounts(url.searchParams.get("mode")));
     return;
   }
@@ -292,17 +332,20 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (request.method === "GET" && url.pathname === "/api/tradovate/market-price") {
+  if (request.method === "GET" && url.pathname === "/api/tradovate/fills") {
+    sendJson(response, 200, await getTradovateFills(url.searchParams.get("mode")));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/tradovate/contract") {
+    sendJson(response, 200, await findTradovateContract(url.searchParams.get("mode"), url.searchParams.get("symbol")));
+    return;
+  }
+
+  if (request.method === "GET" && (url.pathname === "/api/tradovate/market-price" || url.pathname === "/api/tradovate/quote" || url.pathname === "/api/tradovate/price")) {
     const mode = url.searchParams.get("mode") === "live" ? "live" : "demo";
     const symbol = normalizeSymbol(url.searchParams.get("symbol"));
-    const [accounts, positions, orders, market] = await Promise.all([
-      getTradovateAccounts(mode),
-      getTradovatePositions(mode),
-      getTradovateOrders(mode),
-      getTradovateMarketPrice(mode, symbol),
-    ]);
-    const snapshot = brokerBridge.applyPayload(normalizeTradovateSnapshot({ accounts, mode, orders, positions, symbol }));
-    if (snapshot.quote) latestQuotes.set(snapshot.quote.symbol, snapshot.quote);
+    const { market, snapshot } = await buildTradovateSnapshot(mode, symbol);
     sendJson(response, 200, { market, snapshot });
     return;
   }
