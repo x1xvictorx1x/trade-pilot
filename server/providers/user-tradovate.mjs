@@ -102,7 +102,7 @@ function decrypt(value) {
 function normalizeAccountType(accountType = "demo") {
   const value = String(accountType || "demo").toLowerCase();
   if (["live", "personal", "personal live"].includes(value)) return "live";
-  if (["funded", "prop", "eval", "evaluation", "funded/eval"].includes(value)) return "funded";
+  if (["funded", "prop", "eval", "evaluation", "funded/eval", "funded-live"].includes(value)) return "funded";
   return "demo";
 }
 
@@ -111,7 +111,7 @@ function endpointFor(accountType) {
 }
 
 function requireCredentialFields(input) {
-  const required = ["username", "password", "cid", "sec", "appId", "appVersion"];
+  const required = ["username", "password", "cid", "sec"];
   const missing = required.filter((key) => !input[key]);
   if (missing.length) {
     const error = new Error(`Missing Tradovate API fields: ${missing.join(", ")}.`);
@@ -160,6 +160,7 @@ function safeConnection(row, extra = {}) {
     hasLive: Boolean(row.has_live ?? meta.has_live),
     hasMarketData: Boolean(row.has_market_data ?? meta.has_market_data),
     mode: "read-only",
+    providerName: row.metadata?.provider || meta.metadata?.provider || meta.provider || "",
     provider: "tradovate",
     readOnly: true,
     selectedAccountId: row.selected_account_id || meta.selected_account_id || "",
@@ -233,18 +234,19 @@ async function renewIfNeeded(supabase, connection) {
 export async function connectUserTradovate(request, body) {
   const { supabase, user } = await requireUser(request);
   const input = {
-    accountType: normalizeAccountType(body.accountType),
-    appId: body.appId,
-    appVersion: body.appVersion,
+    accountType: normalizeAccountType(body.accountType || body.environment),
+    appId: body.appId || "trade-pilot",
+    appVersion: body.appVersion || "1.0",
     cid: body.cid,
-    deviceId: body.deviceId || `trade-pilot-${user.id.slice(0, 8)}`,
+    deviceId: body.deviceId || "tradepilot-web",
+    environment: body.environment || (normalizeAccountType(body.accountType) === "demo" ? "demo" : "live"),
     password: body.password,
     sec: body.sec,
     username: body.username,
   };
   requireCredentialFields(input);
 
-  const endpoint = endpointFor(input.accountType);
+  const endpoint = input.environment === "live" ? endpoints.live : endpointFor(input.accountType);
   const authBody = {
     appId: input.appId,
     appVersion: input.appVersion,
@@ -309,6 +311,7 @@ export async function connectUserTradovate(request, body) {
     md_access_token_encrypted: encrypt(auth.mdAccessToken || auth.accessToken),
     metadata: {
       accountCount: accountList.length,
+      provider: body.provider || "",
       readOnly: true,
       selectedAccount: selected,
       userStatus: auth.userStatus,
@@ -360,6 +363,7 @@ export async function connectUserTradovate(request, body) {
     fills: Array.isArray(fills) ? fills : [],
     message: hasFunded ? "Tradovate Connected. Funded / Eval detected. Read-only mode active." : "Tradovate Connected. Read-only mode active.",
     positions: Array.isArray(positions) ? positions : [],
+    provider: body.provider || "",
     quote,
     symbol: contractName,
   });

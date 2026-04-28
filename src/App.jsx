@@ -1255,6 +1255,7 @@ export default function App() {
       openPnl: Number(position?.openPnl || 0),
       platform: "Tradovate",
       position,
+      provider: result.provider || "",
       quote: result.quote || null,
       readOnly: true,
       selectedAccountId: result.selectedAccountId,
@@ -1274,6 +1275,7 @@ export default function App() {
       updateProfile("accountType", "Funded / Prop Firm Account");
       updateProfile("fundedPlatform", "Tradovate");
     }
+    if (result.provider) updateProfile("fundedProvider", result.provider);
     setFastMessage(result.message || "Tradovate Connected. Read-only mode active.");
     setPriceStatus("");
     notify("Tradovate Connected");
@@ -3816,11 +3818,16 @@ function ConnectionsPage({
   const [tradovateStatus, setTradovateStatus] = useState(null);
   const [tradovateAccountType, setTradovateAccountType] = useState("prop");
   const [tradovateDemoAuthStatus, setTradovateDemoAuthStatus] = useState(null);
+  const [brokerModalOpen, setBrokerModalOpen] = useState(false);
+  const [brokerStep, setBrokerStep] = useState(1);
+  const [brokerPlatform, setBrokerPlatform] = useState("Tradovate");
+  const [brokerProvider, setBrokerProvider] = useState("Lucid Trading");
   const [tradovateCredentials, setTradovateCredentials] = useState({
-    appId: "TradePilot",
+    appId: "trade-pilot",
     appVersion: "1.0",
     cid: "",
-    deviceId: "",
+    deviceId: "tradepilot-web",
+    environment: "demo",
     password: "",
     sec: "",
     username: "",
@@ -3863,12 +3870,21 @@ function ConnectionsPage({
       return;
     }
 
+    const missing = ["username", "password", "cid", "sec"].filter((key) => !String(tradovateCredentials[key] || "").trim());
+    if (missing.length) {
+      const message = "Missing Tradovate API fields: username, password, cid, sec.";
+      setTradovateDemoAuthStatus({ connected: false, error: message, message: "Failed" });
+      notify?.(message);
+      return;
+    }
+
     setTradovateDemoAuthStatus({ connected: false, message: "Connecting user-owned Tradovate..." });
     try {
       const response = await fetch("/api/broker/tradovate/connect", {
         body: JSON.stringify({
           ...tradovateCredentials,
           accountType: tradovateAccountType === "prop" ? "funded" : tradovateAccountType,
+          provider: brokerProvider,
           symbol: profile.mainMarket,
         }),
         headers: {
@@ -3881,10 +3897,12 @@ function ConnectionsPage({
       if (!response.ok || !result.connected) throw new Error(result.error || "Tradovate connection failed.");
       setTradovateDemoAuthStatus({
         ...result,
-        message: result.hasFunded ? "Connected - Funded / Eval detected" : "Connected",
+        message: "Tradovate Connected — Read-only mode active.",
       });
       onUserTradovateConnected?.(result);
-      notify?.("Tradovate Connected");
+      setBrokerModalOpen(false);
+      setBrokerStep(1);
+      notify?.("Tradovate Connected — Read-only mode active.");
       if (result.hasFunded) updateProfile("accountType", "Funded / Prop Firm Account");
     } catch (error) {
       const message = error.message || "Tradovate API access is required for direct connection. Use Manual Mode or TradingView Webhook until enabled.";
@@ -3912,6 +3930,33 @@ function ConnectionsPage({
     }
   };
 
+  const continueBrokerFlow = () => {
+    if (brokerStep < 4) {
+      setBrokerStep((step) => step + 1);
+      return;
+    }
+    if (brokerPlatform === "Manual Mode") {
+      setBrokerModalOpen(false);
+      activateManualMode();
+      return;
+    }
+    if (brokerPlatform === "TradingView Webhook") {
+      setBrokerModalOpen(false);
+      activateTradingViewMode();
+      return;
+    }
+    if (brokerPlatform !== "Tradovate") {
+      setTradovateDemoAuthStatus({
+        connected: false,
+        error: `${brokerPlatform} connection is coming soon unless partner API access is available.`,
+        message: "Coming soon",
+      });
+      notify?.(`${brokerPlatform} coming soon`);
+      return;
+    }
+    connectUserTradovate();
+  };
+
   return (
     <main style={styles.mainGrid}>
       <div style={styles.fullWidthSection}>
@@ -3927,10 +3972,15 @@ function ConnectionsPage({
           {isFunded ? <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} /> : null}
         </div>
         <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
+          <button onClick={() => setBrokerModalOpen(true)} style={styles.settingsButton}>Connect Broker</button>
           <button onClick={activateManualMode} style={styles.dismissButton}>Use Manual Mode</button>
           <button onClick={startDemoBroker} style={styles.settingsButton}>Connect Demo Broker</button>
           <button onClick={activateTradingViewMode} style={styles.dismissButton}>Use TradingView Webhook</button>
-          <button onClick={connectUserTradovate} style={styles.secondaryButton}>Connect Tradovate</button>
+          <button onClick={() => {
+            setBrokerPlatform("Tradovate");
+            setBrokerStep(4);
+            setBrokerModalOpen(true);
+          }} style={styles.secondaryButton}>Connect Tradovate</button>
         </div>
         {tradovateDemoAuthStatus ? (
           <div style={{ ...(tradovateDemoAuthStatus.connected ? styles.coachPrompt : styles.priceWarning), marginTop: "14px" }}>
@@ -4096,17 +4146,12 @@ function ConnectionsPage({
             <button key={mode} onClick={() => setTradovateAccountType(mode)} style={{ ...styles.segmentButton, background: tradovateAccountType === mode ? "#2563eb" : "#111827" }}>{label}</button>
           ))}
         </div>
-        <div style={{ ...styles.formGrid, marginTop: "16px" }}>
-          <Field label="Tradovate Username" value={tradovateCredentials.username} onChange={(value) => updateTradovateCredential("username", value)} />
-          <Field label="API Password" type="password" value={tradovateCredentials.password} onChange={(value) => updateTradovateCredential("password", value)} />
-          <Field label="CID" value={tradovateCredentials.cid} onChange={(value) => updateTradovateCredential("cid", value)} />
-          <Field label="SEC" type="password" value={tradovateCredentials.sec} onChange={(value) => updateTradovateCredential("sec", value)} />
-          <Field label="App ID" value={tradovateCredentials.appId} onChange={(value) => updateTradovateCredential("appId", value)} />
-          <Field label="App Version" value={tradovateCredentials.appVersion} onChange={(value) => updateTradovateCredential("appVersion", value)} />
-          <Field label="Device ID" value={tradovateCredentials.deviceId} onChange={(value) => updateTradovateCredential("deviceId", value)} />
-        </div>
         <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
-          <button onClick={connectUserTradovate} style={styles.settingsButton}>Connect Tradovate</button>
+          <button onClick={() => {
+            setBrokerPlatform("Tradovate");
+            setBrokerStep(4);
+            setBrokerModalOpen(true);
+          }} style={styles.settingsButton}>Connect Tradovate</button>
           <button onClick={checkTradovateReadOnly} style={styles.secondaryButton}>Check API Plan</button>
           <button onClick={disconnectUserTradovate} style={styles.secondaryButton}>Disconnect Tradovate</button>
         </div>
@@ -4141,7 +4186,169 @@ function ConnectionsPage({
         <PlanItem title="Audit Log" text="Future approvals should create a permanent action log with timestamp, user intent, and broker response." />
         <PlanItem title="Legal Disclaimers" text="Any trading action workflow must include clear risk and responsibility language." />
       </section>
+
+      {brokerModalOpen ? (
+        <BrokerConnectModal
+          accountType={tradovateAccountType}
+          brokerPlatform={brokerPlatform}
+          brokerProvider={brokerProvider}
+          brokerStep={brokerStep}
+          credentials={tradovateCredentials}
+          onAccountType={setTradovateAccountType}
+          onClose={() => setBrokerModalOpen(false)}
+          onContinue={continueBrokerFlow}
+          onCredential={updateTradovateCredential}
+          onPlatform={setBrokerPlatform}
+          onProvider={setBrokerProvider}
+          onStep={setBrokerStep}
+          status={tradovateDemoAuthStatus}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function BrokerConnectModal({
+  accountType,
+  brokerPlatform,
+  brokerProvider,
+  brokerStep,
+  credentials,
+  onAccountType,
+  onClose,
+  onContinue,
+  onCredential,
+  onPlatform,
+  onProvider,
+  onStep,
+  status,
+}) {
+  const platformOptions = ["Tradovate", "NinjaTrader", "Rithmic", "TopstepX", "Manual Mode", "TradingView Webhook"];
+  const accountOptions = [
+    ["demo", "Demo"],
+    ["live", "Personal Live"],
+    ["prop", "Funded / Eval"],
+    ["funded-live", "Funded Live"],
+  ];
+  const providerOptions = ["Lucid Trading", "Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other"];
+  const nextLabel = brokerStep < 4 ? "Continue" : brokerPlatform === "Tradovate" ? "Connect Tradovate" : "Activate";
+
+  return (
+    <div style={{ ...styles.modalBackdrop, zIndex: 55 }}>
+      <section style={styles.modal}>
+        <div style={styles.modalHeader}>
+          <div>
+            <p style={styles.cardLabel}>Broker Connect</p>
+            <h2 style={styles.sectionTitle}>Connect Broker</h2>
+          </div>
+          <button onClick={onClose} style={styles.dismissButton}>Close</button>
+        </div>
+        <div style={styles.segmentGroup}>
+          {[1, 2, 3, 4].map((step) => (
+            <button
+              key={step}
+              onClick={() => onStep(step)}
+              style={{ ...styles.segmentButton, background: brokerStep === step ? "#2563eb" : "#111827" }}
+            >
+              Step {step}
+            </button>
+          ))}
+        </div>
+
+        {brokerStep === 1 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 1</p>
+            <h3 style={styles.sectionTitle}>Choose Platform</h3>
+            <div style={styles.sourceGrid}>
+              {platformOptions.map((platform) => (
+                <button
+                  key={platform}
+                  onClick={() => onPlatform(platform)}
+                  style={{ ...styles.sourceButton, borderColor: brokerPlatform === platform ? "#38bdf8" : "#334155" }}
+                >
+                  <strong>{platform}</strong>
+                  <span>{platform === "Tradovate" ? "Read-only API connection" : platform === "Manual Mode" || platform === "TradingView Webhook" ? "Works now" : "Coming soon"}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {brokerStep === 2 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 2</p>
+            <h3 style={styles.sectionTitle}>Choose Account Type</h3>
+            <div style={styles.sourceGrid}>
+              {accountOptions.map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => onAccountType(value)}
+                  style={{ ...styles.sourceButton, borderColor: accountType === value ? "#38bdf8" : "#334155" }}
+                >
+                  <strong>{label}</strong>
+                  <span>Read-only dashboard mode</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {brokerStep === 3 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 3</p>
+            <h3 style={styles.sectionTitle}>Choose Provider</h3>
+            <div style={styles.sourceGrid}>
+              {providerOptions.map((provider) => (
+                <button
+                  key={provider}
+                  onClick={() => onProvider(provider)}
+                  style={{ ...styles.sourceButton, borderColor: brokerProvider === provider ? "#38bdf8" : "#334155" }}
+                >
+                  <strong>{provider}</strong>
+                  <span>{provider === "Other" ? "Manual provider" : "Funded/prop rule profile"}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {brokerStep === 4 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 4</p>
+            <h3 style={styles.sectionTitle}>Connect</h3>
+            {brokerPlatform === "Tradovate" ? (
+              <>
+                <p style={styles.muted}>OAuth popup is planned. For alpha, use secure read-only API credentials. Secrets are encrypted server-side and tokens never return to the browser.</p>
+                <div style={{ ...styles.formGrid, marginTop: "16px" }}>
+                  <Field label="Username" value={credentials.username} onChange={(value) => onCredential("username", value)} />
+                  <Field label="API Password" type="password" value={credentials.password} onChange={(value) => onCredential("password", value)} />
+                  <Field label="CID" value={credentials.cid} onChange={(value) => onCredential("cid", value)} />
+                  <Field label="SEC" type="password" value={credentials.sec} onChange={(value) => onCredential("sec", value)} />
+                  <Field label="App ID" value={credentials.appId} onChange={(value) => onCredential("appId", value)} />
+                  <Field label="App Version" value={credentials.appVersion} onChange={(value) => onCredential("appVersion", value)} />
+                  <Field label="Device ID" value={credentials.deviceId} onChange={(value) => onCredential("deviceId", value)} />
+                  <SelectField label="Environment" value={credentials.environment} options={["demo", "live"]} onChange={(value) => onCredential("environment", value)} />
+                </div>
+              </>
+            ) : (
+              <p style={styles.muted}>
+                {brokerPlatform === "Manual Mode" || brokerPlatform === "TradingView Webhook"
+                  ? `${brokerPlatform} can be activated without broker credentials.`
+                  : `${brokerPlatform} is coming soon unless API partner access is available.`}
+              </p>
+            )}
+          </section>
+        ) : null}
+
+        {status?.error ? <div style={{ ...styles.priceWarning, marginTop: "14px" }}>{status.error}</div> : null}
+        {status?.connected ? <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>Tradovate Connected — Read-only mode active.</div> : null}
+
+        <div style={{ ...styles.installBannerActions, marginTop: "18px" }}>
+          {brokerStep > 1 ? <button onClick={() => onStep(brokerStep - 1)} style={styles.secondaryButton}>Back</button> : null}
+          <button onClick={onContinue} style={styles.settingsButton}>{nextLabel}</button>
+        </div>
+      </section>
+    </div>
   );
 }
 
