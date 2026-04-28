@@ -1,6 +1,6 @@
 export function allowCors(response) {
   response.setHeader("Access-Control-Allow-Origin", "*");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  response.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
   response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 }
 

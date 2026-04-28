@@ -55,13 +55,48 @@ create table if not exists public.broker_connections (
   provider text,
   platform text not null,
   account_type text default 'personal',
+  username text,
+  encrypted_api_password text,
+  encrypted_cid text,
+  encrypted_sec text,
+  app_id text,
+  app_version text,
+  device_id text,
+  access_token_encrypted text,
+  md_access_token_encrypted text,
+  expiration_time timestamptz,
+  has_live boolean default false,
+  has_funded boolean default false,
+  has_market_data boolean default false,
+  connection_status text default 'not_connected',
+  account_name text,
+  selected_account_id text,
   mode text default 'read-only',
   status text default 'not_connected',
   metadata jsonb default '{}'::jsonb,
   created_at timestamptz default now(),
   updated_at timestamptz default now(),
-  unique(user_id, platform)
+  unique(user_id, platform),
+  unique(user_id, provider)
 );
+
+alter table public.broker_connections add column if not exists username text;
+alter table public.broker_connections add column if not exists encrypted_api_password text;
+alter table public.broker_connections add column if not exists encrypted_cid text;
+alter table public.broker_connections add column if not exists encrypted_sec text;
+alter table public.broker_connections add column if not exists app_id text;
+alter table public.broker_connections add column if not exists app_version text;
+alter table public.broker_connections add column if not exists device_id text;
+alter table public.broker_connections add column if not exists access_token_encrypted text;
+alter table public.broker_connections add column if not exists md_access_token_encrypted text;
+alter table public.broker_connections add column if not exists expiration_time timestamptz;
+alter table public.broker_connections add column if not exists has_live boolean default false;
+alter table public.broker_connections add column if not exists has_funded boolean default false;
+alter table public.broker_connections add column if not exists has_market_data boolean default false;
+alter table public.broker_connections add column if not exists connection_status text default 'not_connected';
+alter table public.broker_connections add column if not exists account_name text;
+alter table public.broker_connections add column if not exists selected_account_id text;
+create unique index if not exists broker_connections_user_provider_key on public.broker_connections(user_id, provider);
 
 create table if not exists public.watchlist (
   id uuid primary key default gen_random_uuid(),

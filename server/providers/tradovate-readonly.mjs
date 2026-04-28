@@ -319,7 +319,7 @@ function extractQuote(payload, symbol) {
   return null;
 }
 
-function readMarketDataQuote({ socketUrl, symbol, token }) {
+export function readMarketDataQuote({ socketUrl, symbol, token }) {
   if (typeof WebSocket === "undefined") return Promise.resolve(null);
 
   return new Promise((resolve) => {

@@ -1097,7 +1097,7 @@ export default function App() {
         source: "Simulated demo data",
       });
       setActivePage("connections");
-    } catch (error) {
+    } catch {
       applyDemoBrokerSnapshot(createLocalDemoBrokerSnapshot());
       setPriceStatus("Local demo data is active. Start the market server later for streaming ticks.");
       setActivePage("connections");
@@ -1214,7 +1214,7 @@ export default function App() {
       setAutoPrice(true);
       setFastMessage(`${mode === "prop" ? "Prop/Funded" : mode === "live" ? "Live" : "Demo"} Tradovate read-only connected. Trading actions remain disabled.`);
       setActivePage("dashboard");
-    } catch (error) {
+    } catch {
       const message = "Tradovate API credentials are not configured yet. Add Vercel env vars first.";
       setBrokerConnection((current) => ({
         ...current,
@@ -1227,6 +1227,70 @@ export default function App() {
       notify("Tradovate credentials missing");
       setActivePage("connections");
     }
+  };
+
+  const applyUserTradovateConnection = (result) => {
+    const firstPosition = Array.isArray(result.positions) ? result.positions[0] : null;
+    const position = firstPosition
+      ? {
+          contracts: Math.abs(Number(firstPosition.netPos ?? firstPosition.quantity ?? firstPosition.contracts ?? 0)),
+          direction: Number(firstPosition.netPos ?? firstPosition.quantity ?? 0) < 0 ? "short" : "long",
+          entry: Number(firstPosition.netPrice ?? firstPosition.averagePrice ?? firstPosition.entryPrice ?? price),
+          openPnl: Number(firstPosition.openPnl ?? firstPosition.unrealizedPnl ?? 0),
+          status: "active",
+          symbol: profile.mainMarket,
+        }
+      : null;
+    setBrokerConnection({
+      accountName: result.accountName || "Tradovate Account",
+      accountType: result.accountType || "demo",
+      connected: true,
+      connectionStatus: "Tradovate Connected",
+      error: "",
+      expirationTime: result.expirationTime,
+      fills: result.fills || [],
+      hasFunded: result.hasFunded,
+      hasLive: result.hasLive,
+      hasMarketData: result.hasMarketData,
+      openPnl: Number(position?.openPnl || 0),
+      platform: "Tradovate",
+      position,
+      quote: result.quote || null,
+      readOnly: true,
+      selectedAccountId: result.selectedAccountId,
+      source: "User-owned Tradovate read-only",
+      username: result.username,
+      workingOrders: [],
+    });
+    if (position) setActivePosition(position);
+    if (result.quote?.price) setPrice(Number(result.quote.price));
+    if (Number.isFinite(Number(result.quote?.bid)) && Number.isFinite(Number(result.quote?.ask))) {
+      setQuote({ bid: Number(result.quote.bid), ask: Number(result.quote.ask) });
+    }
+    setDataSource("Tradovate Read-Only");
+    setAutoPrice(true);
+    setLastUpdated(new Date().toLocaleTimeString());
+    if (result.hasFunded || result.accountType === "funded") {
+      updateProfile("accountType", "Funded / Prop Firm Account");
+      updateProfile("fundedPlatform", "Tradovate");
+    }
+    setFastMessage(result.message || "Tradovate Connected. Read-only mode active.");
+    setPriceStatus("");
+    notify("Tradovate Connected");
+  };
+
+  const applyUserTradovateDisconnect = () => {
+    setBrokerConnection((current) => ({
+      ...current,
+      connected: false,
+      connectionStatus: "Disconnected",
+      error: "",
+      platform: "Tradovate",
+      source: "Disconnected",
+    }));
+    setDataSource("Manual Mode");
+    setFastMessage("Tradovate disconnected. Manual Mode is active.");
+    notify("Tradovate disconnected");
   };
 
   const signOut = async () => {
@@ -1550,6 +1614,10 @@ export default function App() {
             price={price}
             profile={profile}
             quote={quote}
+            session={session}
+            onAuthOpen={setAuthModal}
+            onUserTradovateDisconnected={applyUserTradovateDisconnect}
+            onUserTradovateConnected={applyUserTradovateConnection}
             connectTradovateReadOnly={connectTradovateReadOnly}
             notify={notify}
             saveConnectionSettings={savePersonalWorkspace}
@@ -2271,7 +2339,6 @@ function Dashboard({
   journalEntries,
   layoutPrefs,
   lastUpdated,
-  notify,
   price,
   priceStatus,
   plannedTrade,
@@ -3730,21 +3797,34 @@ function ConnectionsPage({
   activateTradingViewMode,
   activePosition,
   brokerConnection,
-  connectTradovateReadOnly,
   dataSource,
   discipline,
   engine,
   lastUpdated,
+  notify,
+  onAuthOpen,
+  onUserTradovateConnected,
+  onUserTradovateDisconnected,
   price,
   profile,
   quote,
   saveConnectionSettings,
+  session,
   startDemoBroker,
   updateProfile,
 }) {
   const [tradovateStatus, setTradovateStatus] = useState(null);
   const [tradovateAccountType, setTradovateAccountType] = useState("prop");
   const [tradovateDemoAuthStatus, setTradovateDemoAuthStatus] = useState(null);
+  const [tradovateCredentials, setTradovateCredentials] = useState({
+    appId: "TradePilot",
+    appVersion: "1.0",
+    cid: "",
+    deviceId: "",
+    password: "",
+    sec: "",
+    username: "",
+  });
   const [saveStatus, setSaveStatus] = useState("");
   const statusLabel = getConnectionStatusLabel(brokerConnection);
   const connectionMessage = getConnectionStateMessage({ brokerConnection, dataSource, profile });
@@ -3767,24 +3847,68 @@ function ConnectionsPage({
     }
   };
 
-  const testTradovateDemoConnection = async () => {
-    setTradovateDemoAuthStatus({ connected: false, message: "Testing Tradovate demo connection..." });
-    try {
-      const response = await fetch(`${tradovateApiBase}/api/tradovate/demo/auth`, { method: "POST" });
-      const result = await response.json();
-      if (!response.ok || !result.connected) throw new Error(result.error || "Tradovate demo connection failed.");
-      setTradovateDemoAuthStatus({
-        ...result,
-        message: "Connected",
-      });
-      notify?.("Tradovate Demo Connected");
-    } catch (error) {
+  const updateTradovateCredential = (key, value) => {
+    setTradovateCredentials((current) => ({ ...current, [key]: value }));
+  };
+
+  const connectUserTradovate = async () => {
+    if (!session?.access_token) {
       setTradovateDemoAuthStatus({
         connected: false,
-        error: "Tradovate API credentials are not configured yet. Add Vercel env vars first.",
+        error: "Log in before connecting your Tradovate account.",
         message: "Failed",
       });
-      notify?.("Tradovate credentials missing");
+      notify?.("Log in before connecting Tradovate");
+      onAuthOpen?.("login");
+      return;
+    }
+
+    setTradovateDemoAuthStatus({ connected: false, message: "Connecting user-owned Tradovate..." });
+    try {
+      const response = await fetch("/api/broker/tradovate/connect", {
+        body: JSON.stringify({
+          ...tradovateCredentials,
+          accountType: tradovateAccountType === "prop" ? "funded" : tradovateAccountType,
+          symbol: profile.mainMarket,
+        }),
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+      });
+      const result = await response.json();
+      if (!response.ok || !result.connected) throw new Error(result.error || "Tradovate connection failed.");
+      setTradovateDemoAuthStatus({
+        ...result,
+        message: result.hasFunded ? "Connected - Funded / Eval detected" : "Connected",
+      });
+      onUserTradovateConnected?.(result);
+      notify?.("Tradovate Connected");
+      if (result.hasFunded) updateProfile("accountType", "Funded / Prop Firm Account");
+    } catch (error) {
+      const message = error.message || "Tradovate API access is required for direct connection. Use Manual Mode or TradingView Webhook until enabled.";
+      setTradovateDemoAuthStatus({
+        connected: false,
+        error: message,
+        message: "Failed",
+      });
+      notify?.("Tradovate connection failed");
+    }
+  };
+
+  const disconnectUserTradovate = async () => {
+    if (!session?.access_token) {
+      onUserTradovateDisconnected?.();
+      return;
+    }
+    try {
+      await fetch("/api/broker/tradovate/disconnect", {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+        method: "POST",
+      });
+    } finally {
+      onUserTradovateDisconnected?.();
     }
   };
 
@@ -3806,8 +3930,7 @@ function ConnectionsPage({
           <button onClick={activateManualMode} style={styles.dismissButton}>Use Manual Mode</button>
           <button onClick={startDemoBroker} style={styles.settingsButton}>Connect Demo Broker</button>
           <button onClick={activateTradingViewMode} style={styles.dismissButton}>Use TradingView Webhook</button>
-          <button onClick={testTradovateDemoConnection} style={styles.secondaryButton}>Test Tradovate Demo Connection</button>
-          <button onClick={() => connectTradovateReadOnly("demo")} style={styles.secondaryButton}>Try Tradovate Read-Only</button>
+          <button onClick={connectUserTradovate} style={styles.secondaryButton}>Connect Tradovate</button>
         </div>
         {tradovateDemoAuthStatus ? (
           <div style={{ ...(tradovateDemoAuthStatus.connected ? styles.coachPrompt : styles.priceWarning), marginTop: "14px" }}>
@@ -3952,9 +4075,9 @@ function ConnectionsPage({
         <div style={styles.sourceGrid}>
           <SourceOption title="Manual Mode" text="Use dashboard inputs, sliders, and Fast Mode without external broker data." active={dataSource === "Manual Mode"} />
           <SourceOption title="Demo / Simulated Broker" text="Connects to the local demo stream for safe testing." active={brokerConnection.platform === "Demo Broker"} />
-          <SourceOption title="Tradovate Demo Read-Only" text="Uses demo.tradovateapi.com/v1 and server-side credentials only." active={dataSource === tradovateModes.demo} />
-          <SourceOption title="Tradovate Prop/Funded Read-Only" text="Uses live.tradovateapi.com/v1 for prop accounts. No trading actions are implemented." active={dataSource === tradovateModes.prop} />
-          <SourceOption title="Tradovate Live Read-Only" text="Uses live.tradovateapi.com/v1 with order placement disabled." active={dataSource === tradovateModes.live} />
+          <SourceOption title="Tradovate Demo Read-Only" text="Connect your own demo API credentials. Secrets are encrypted server-side." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "demo"} />
+          <SourceOption title="Tradovate Prop/Funded Read-Only" text="Connect your own funded/eval API credentials. No trading actions are implemented." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "funded"} />
+          <SourceOption title="Tradovate Live Read-Only" text="Connect your own live API credentials with order placement disabled." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "live"} />
           <SourceOption title="TradingView Webhook" text="Accepts symbol, price, signal type, support, resistance, and timestamp." />
           <SourceOption title="CSV Import" text="Reserved for trade-history review and coaching analytics." />
         </div>
@@ -3973,10 +4096,23 @@ function ConnectionsPage({
             <button key={mode} onClick={() => setTradovateAccountType(mode)} style={{ ...styles.segmentButton, background: tradovateAccountType === mode ? "#2563eb" : "#111827" }}>{label}</button>
           ))}
         </div>
-        <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
-          <button onClick={() => connectTradovateReadOnly(tradovateAccountType)} style={styles.settingsButton}>Connect Selected Read-Only</button>
-          <button onClick={checkTradovateReadOnly} style={styles.secondaryButton}>Check API Plan</button>
+        <div style={{ ...styles.formGrid, marginTop: "16px" }}>
+          <Field label="Tradovate Username" value={tradovateCredentials.username} onChange={(value) => updateTradovateCredential("username", value)} />
+          <Field label="API Password" type="password" value={tradovateCredentials.password} onChange={(value) => updateTradovateCredential("password", value)} />
+          <Field label="CID" value={tradovateCredentials.cid} onChange={(value) => updateTradovateCredential("cid", value)} />
+          <Field label="SEC" type="password" value={tradovateCredentials.sec} onChange={(value) => updateTradovateCredential("sec", value)} />
+          <Field label="App ID" value={tradovateCredentials.appId} onChange={(value) => updateTradovateCredential("appId", value)} />
+          <Field label="App Version" value={tradovateCredentials.appVersion} onChange={(value) => updateTradovateCredential("appVersion", value)} />
+          <Field label="Device ID" value={tradovateCredentials.deviceId} onChange={(value) => updateTradovateCredential("deviceId", value)} />
         </div>
+        <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
+          <button onClick={connectUserTradovate} style={styles.settingsButton}>Connect Tradovate</button>
+          <button onClick={checkTradovateReadOnly} style={styles.secondaryButton}>Check API Plan</button>
+          <button onClick={disconnectUserTradovate} style={styles.secondaryButton}>Disconnect Tradovate</button>
+        </div>
+        <p style={{ ...styles.muted, marginTop: "12px" }}>
+          User-owned connection stores encrypted credentials server-side per signed-in user. Read-only mode active. No order placement, cancellation, or modification endpoints are used.
+        </p>
         <p style={{ ...styles.muted, marginTop: "12px" }}>If Tradovate API access is unavailable, use TradingView Webhook + Manual Mode. Trade Pilot will not block the dashboard.</p>
         {tradovateStatus ? (
           <div style={{ ...styles.warningStack, marginTop: "16px" }}>
