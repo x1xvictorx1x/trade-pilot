@@ -22,6 +22,7 @@ const streamerModeStorageKey = "tradePilotStreamerMode";
 const subscriberStorageKey = "tradePilotSubscribers";
 const journalStorageKey = "tradePilotJournal";
 const layoutStorageKey = "tradePilotLayout";
+const connectionSettingsStorageKey = "tradePilotConnectionSettings";
 const watchlistStorageKey = "tradePilotWatchlist";
 
 const defaultProfile = {
@@ -322,6 +323,7 @@ export default function App() {
   const [authModal, setAuthModal] = useState(null);
   const [authMessage, setAuthMessage] = useState("");
   const [syncStatus, setSyncStatus] = useState("Local workspace");
+  const [toastMessage, setToastMessage] = useState("");
   const [autoPrice, setAutoPrice] = useState(true);
   const [dataSource, setDataSource] = useState("Market Data API");
   const [lastUpdated, setLastUpdated] = useState("Manual price");
@@ -690,9 +692,13 @@ export default function App() {
     setDiscipline((current) => ({ ...current, [key]: value }));
   };
 
-  const savePersonalWorkspace = async () => {
-    if (!session?.user || !supabase) return;
+  const notify = (message) => {
+    setToastMessage(message);
+    window.clearTimeout(notify.timer);
+    notify.timer = window.setTimeout(() => setToastMessage(""), 2800);
+  };
 
+  const savePersonalWorkspace = async () => {
     const riskSettings = {
       defaultContracts: profile.defaultContracts,
       defaultRiskPoints: profile.defaultRiskPoints,
@@ -731,6 +737,16 @@ export default function App() {
         trailingDrawdown: profile.trailingDrawdown,
       },
     };
+
+    if (!session?.user || !supabase) {
+      localStorage.setItem(connectionSettingsStorageKey, JSON.stringify({
+        brokerConnection,
+        connectionSettings,
+        savedAt: new Date().toISOString(),
+      }));
+      setSyncStatus("Connection settings saved locally");
+      return "local";
+    }
 
     await Promise.all([
       supabase.from("profiles").upsert(profileToDatabase(profile, session.user, streamerMode)),
@@ -773,6 +789,7 @@ export default function App() {
     ]);
 
     setSyncStatus("Personal dashboard saved");
+    return "supabase";
   };
 
   useEffect(() => {
@@ -953,6 +970,11 @@ export default function App() {
       ask: Number(snapshot.ask ?? snapshot.quote?.ask ?? ((snapshot.price || 27500) + 0.25)),
     });
     updateDiscipline("dailyPnl", Number(snapshot.dailyPnl ?? snapshot.openPnl ?? 0));
+    setWatchlist((current) => {
+      const symbol = snapshot.symbol || profile.mainMarket || "MNQ";
+      const demoItem = { id: "demo-broker-watch", notes: "Demo broker price feed active", symbol };
+      return [demoItem, ...current.filter((item) => item.id !== demoItem.id && item.symbol !== symbol)].slice(0, 8);
+    });
     if (snapshot.position) {
       setActivePosition(snapshot.position);
       setPlannedTrade({
@@ -969,6 +991,7 @@ export default function App() {
     setLastUpdated(new Date(snapshot.timestamp || snapshot.updatedAt || Date.now()).toLocaleTimeString());
     setFastMessage("Demo Broker Connected - simulated data is powering the dashboard.");
     setPriceStatus("");
+    notify("Demo Broker Connected");
     setActivePage("connections");
   };
 
@@ -1035,6 +1058,7 @@ export default function App() {
     }));
     setFastMessage("Manual Mode Active - enter price and levels yourself.");
     setPriceStatus("");
+    notify("Manual Mode Active");
     setActivePage("connections");
   };
 
@@ -1052,6 +1076,7 @@ export default function App() {
     }));
     setFastMessage("Waiting for TradingView webhook data.");
     setPriceStatus("");
+    notify("Waiting for TradingView Webhook");
     setActivePage("connections");
   };
 
@@ -1190,15 +1215,16 @@ export default function App() {
       setFastMessage(`${mode === "prop" ? "Prop/Funded" : mode === "live" ? "Live" : "Demo"} Tradovate read-only connected. Trading actions remain disabled.`);
       setActivePage("dashboard");
     } catch (error) {
-      const message = "Tradovate direct connection requires API access. Use Manual Mode or TradingView Webhook for now.";
+      const message = "Tradovate API credentials are not configured yet. Add Vercel env vars first.";
       setBrokerConnection((current) => ({
         ...current,
         connected: false,
-        connectionStatus: "Tradovate API Required",
+        connectionStatus: "Not configured yet",
         error: message,
         platform,
       }));
       setPriceStatus(message);
+      notify("Tradovate credentials missing");
       setActivePage("connections");
     }
   };
@@ -1427,10 +1453,11 @@ export default function App() {
           setActivePage={setActivePage}
           setLayoutPrefs={setLayoutPrefs}
           setStreamerMode={setStreamerMode}
+          signedIn={Boolean(session?.user)}
           streamerMode={streamerMode}
           watchlist={watchlist}
         >
-        {!streamerMode ? <div style={styles.alphaBanner}>Trade Pilot Alpha — educational tool. Not financial advice.</div> : null}
+        {!streamerMode ? <div style={styles.alphaBanner}>Trade Pilot Alpha - educational tool. Not financial advice.</div> : null}
         {!streamerMode && !session?.user ? (
           <div style={styles.guestPrompt}>
             <span>Create a free account to save your trading workspace.</span>
@@ -1456,6 +1483,7 @@ export default function App() {
 
         {activePage === "home" ? (
           <HomePage
+            signedIn={Boolean(session?.user)}
             onJoinAlpha={() => setAuthModal("signup")}
             onLaunch={() => setActivePage("dashboard")}
           />
@@ -1523,6 +1551,7 @@ export default function App() {
             profile={profile}
             quote={quote}
             connectTradovateReadOnly={connectTradovateReadOnly}
+            notify={notify}
             saveConnectionSettings={savePersonalWorkspace}
             startDemoBroker={startDemoBroker}
             updateProfile={updateProfile}
@@ -1575,6 +1604,7 @@ export default function App() {
       ) : null}
 
       {!streamerMode ? <a className="tradepilot-feedback" href="mailto:support@tradepilot.app?subject=Trade%20Pilot%20Alpha%20Feedback" style={styles.feedbackButton}>Feedback</a> : null}
+      {toastMessage ? <div style={styles.toast}>{toastMessage}</div> : null}
 
       {feedbackOpen ? (
         <FeedbackModal
@@ -1657,10 +1687,11 @@ function DashboardFrame({
   setActivePage,
   setLayoutPrefs,
   setStreamerMode,
+  signedIn,
   streamerMode,
   watchlist,
 }) {
-  const useDashboardChrome = !streamerMode && activePage !== "home";
+  const useDashboardChrome = !streamerMode && (activePage !== "home" || signedIn);
 
   if (!useDashboardChrome) {
     return <main style={styles.standaloneMain}>{children}</main>;
@@ -1685,7 +1716,7 @@ function DashboardFrame({
 }
 
 function DesktopSidebar({ activePage, setActivePage, setStreamerMode }) {
-  const items = ["Home", "Dashboard", "Journal", "Account", "Connections", "Settings"];
+  const items = ["Home", "Dashboard", "Connections", "Journal", "Account", "Profile", "Settings"];
 
   return (
     <aside className="left-sidebar" style={styles.leftSidebar}>
@@ -1850,10 +1881,13 @@ function PageTitle({ title, subtitle }) {
   );
 }
 
-function HomePage({ onJoinAlpha, onLaunch }) {
+function HomePage({ onJoinAlpha, onLaunch, signedIn }) {
   return (
     <main style={styles.homePage}>
-      <PageTitle title="Home" subtitle="Welcome to Trade Pilot Alpha" />
+      <PageTitle
+        title={signedIn ? "Trade Pilot Home" : "Home"}
+        subtitle={signedIn ? "Welcome back. Choose your workspace." : "Welcome to Trade Pilot Alpha"}
+      />
       <section style={styles.homeHero}>
         <div>
           <p style={styles.cardLabel}>Trade Pilot Alpha</p>
@@ -1968,7 +2002,7 @@ function AccountPage({ authMessage, isConfigured, layoutPrefs, onAuthOpen, sessi
   return (
     <main style={styles.mainGrid}>
       <div style={styles.fullWidthSection}>
-        <PageTitle title="Account" subtitle="Manage subscription, security, and account settings." />
+        <PageTitle title="Account" subtitle="Manage login and subscription." />
       </div>
       <section style={styles.card}>
         <p style={styles.cardLabel}>Personal Dashboard</p>
@@ -2237,6 +2271,7 @@ function Dashboard({
   journalEntries,
   layoutPrefs,
   lastUpdated,
+  notify,
   price,
   priceStatus,
   plannedTrade,
@@ -2386,7 +2421,7 @@ function Dashboard({
 
   return (
     <>
-      <PageTitle title="Dashboard" subtitle="Plan trades, manage risk, and review your setup." />
+      <PageTitle title="Dashboard" subtitle="Plan trades and manage risk." />
       <section style={styles.dashboardToolbar}>
         <button onClick={() => setCustomizeOpen((open) => !open)} style={styles.settingsButton}>Customize Dashboard</button>
         <span style={styles.muted}>Layout: {layoutPrefs.mode || "Pro"}</span>
@@ -3629,7 +3664,7 @@ function getConnectionStateMessage({ brokerConnection, dataSource, profile }) {
   if (platform === "Demo Broker" || dataSource === "Demo Broker") return "Demo Broker Connected - simulated data.";
   if (platform === "Manual Mode" || dataSource === "Manual Mode") return "Manual Mode Active - enter price and levels yourself.";
   if (platform === "TradingView Webhook" || dataSource === "TradingView Webhook") return "Waiting for webhook data.";
-  if (platform?.includes("Tradovate") || profile.fundedPlatform === "Tradovate") return "Tradovate read-only coming soon unless API access is configured.";
+  if (platform?.includes("Tradovate") || profile.fundedPlatform === "Tradovate") return "Tradovate API credentials are not configured yet. Add Vercel env vars first.";
   if (profile.accountType === "Funded/prop account") return "Funded account rules active. Broker data may still be manual unless API is connected.";
   return "Not connected. Choose a data source.";
 }
@@ -3742,12 +3777,14 @@ function ConnectionsPage({
         ...result,
         message: "Connected",
       });
+      notify?.("Tradovate Demo Connected");
     } catch (error) {
       setTradovateDemoAuthStatus({
         connected: false,
-        error: error.message || "Tradovate demo connection failed.",
+        error: "Tradovate API credentials are not configured yet. Add Vercel env vars first.",
         message: "Failed",
       });
+      notify?.("Tradovate credentials missing");
     }
   };
 
@@ -3789,9 +3826,25 @@ function ConnectionsPage({
           </div>
         ) : null}
         <div style={{ ...styles.coachPrompt, marginTop: "16px" }}>{connectionMessage}</div>
+        {dataSource === "TradingView Webhook" ? (
+          <div style={{ ...styles.subPanel, marginTop: "14px" }}>
+            <p style={styles.cardLabel}>Webhook</p>
+            <p style={styles.muted}>POST /api/webhook/tradingview</p>
+            <pre style={styles.sharePreview}>{JSON.stringify({
+              symbol: "MNQ",
+              price: 27500.25,
+              timeframe: "5m",
+              support: 27460,
+              resistance: 27550,
+              bias: "bullish",
+              timestamp: new Date().toISOString(),
+            }, null, 2)}</pre>
+          </div>
+        ) : null}
         <button
           onClick={async () => {
             await saveConnectionSettings?.();
+            notify?.("Connection settings saved");
             setSaveStatus("Connection settings saved.");
           }}
           style={{ ...styles.settingsButton, marginTop: "16px" }}
@@ -4125,7 +4178,7 @@ function JournalPage({ activePosition, addJournalEntry, engine, discipline, jour
   return (
     <main style={styles.mainGrid}>
       <div style={styles.fullWidthSection}>
-        <PageTitle title="Journal" subtitle="Track trades, notes, and execution habits." />
+        <PageTitle title="Journal" subtitle="Track trades and notes." />
       </div>
       <section style={styles.card}>
         <p style={styles.cardLabel}>Journal</p>
@@ -4167,7 +4220,7 @@ function ProfilePage({ profile, updateProfile }) {
   return (
     <main style={styles.mainGrid}>
       <div style={styles.fullWidthSection}>
-        <PageTitle title="Profile" subtitle="Save your trading preferences." />
+        <PageTitle title="Profile" subtitle="Trading preferences and account setup." />
       </div>
       <section style={styles.card}>
         <p style={styles.cardLabel}>Profile</p>
@@ -4931,10 +4984,10 @@ const styles = {
     flexWrap: "wrap",
   },
   installButton: {
-    background: "#f8fafc",
-    border: "none",
+    background: "#2563eb",
+    border: "1px solid #3b82f6",
     borderRadius: "12px",
-    color: "#020617",
+    color: "#ffffff",
     cursor: "pointer",
     fontWeight: 900,
     padding: "11px 14px",
@@ -5097,10 +5150,10 @@ const styles = {
     margin: "6px 0 0",
   },
   settingsButton: {
-    background: "#f8fafc",
-    border: "none",
+    background: "#2563eb",
+    border: "1px solid #3b82f6",
     borderRadius: "12px",
-    color: "#020617",
+    color: "#ffffff",
     cursor: "pointer",
     fontWeight: 800,
     padding: "12px 18px",
@@ -5134,14 +5187,29 @@ const styles = {
     right: "14px",
     zIndex: 15,
   },
+  toast: {
+    background: "#0f172a",
+    border: "1px solid #38bdf8",
+    borderRadius: "12px",
+    bottom: "64px",
+    boxShadow: "0 18px 45px rgba(0,0,0,.35)",
+    color: "#ffffff",
+    fontSize: "14px",
+    fontWeight: 900,
+    padding: "12px 14px",
+    position: "fixed",
+    right: "14px",
+    zIndex: 50,
+  },
   link: {
     color: "#7dd3fc",
     fontWeight: 800,
   },
   secondaryButton: {
+    background: "#1f2937",
     border: "1px solid #3f3f46",
     borderRadius: "12px",
-    color: "white",
+    color: "#ffffff",
     cursor: "pointer",
     fontWeight: 800,
     padding: "12px 16px",
@@ -5233,10 +5301,10 @@ const styles = {
     padding: "10px",
   },
   generateButton: {
-    background: "#f8fafc",
-    border: "none",
+    background: "#2563eb",
+    border: "1px solid #3b82f6",
     borderRadius: "14px",
-    color: "#020617",
+    color: "#ffffff",
     cursor: "pointer",
     fontSize: "17px",
     fontWeight: 950,
@@ -5962,10 +6030,10 @@ const styles = {
     margin: "18px 0 12px",
   },
   acceptButton: {
-    background: "#f8fafc",
-    border: "none",
+    background: "#2563eb",
+    border: "1px solid #3b82f6",
     borderRadius: "12px",
-    color: "#020617",
+    color: "#ffffff",
     cursor: "pointer",
     fontSize: "16px",
     fontWeight: 900,
