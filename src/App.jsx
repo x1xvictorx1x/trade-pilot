@@ -1258,6 +1258,7 @@ export default function App() {
       provider: result.provider || "",
       quote: result.quote || null,
       readOnly: true,
+      accounts: result.accounts || [],
       selectedAccountId: result.selectedAccountId,
       source: "User-owned Tradovate read-only",
       username: result.username,
@@ -1293,6 +1294,15 @@ export default function App() {
     setDataSource("Manual Mode");
     setFastMessage("Tradovate disconnected. Manual Mode is active.");
     notify("Tradovate disconnected");
+  };
+
+  const applyUserTradovateAccount = (account) => {
+    setBrokerConnection((current) => ({
+      ...current,
+      accountName: account?.name || current.accountName,
+      selectedAccountId: account?.id ? String(account.id) : current.selectedAccountId,
+    }));
+    notify("Active Tradovate account set");
   };
 
   const signOut = async () => {
@@ -1618,6 +1628,7 @@ export default function App() {
             quote={quote}
             session={session}
             onAuthOpen={setAuthModal}
+            onUserTradovateAccount={applyUserTradovateAccount}
             onUserTradovateDisconnected={applyUserTradovateDisconnect}
             onUserTradovateConnected={applyUserTradovateConnection}
             connectTradovateReadOnly={connectTradovateReadOnly}
@@ -3805,6 +3816,7 @@ function ConnectionsPage({
   lastUpdated,
   notify,
   onAuthOpen,
+  onUserTradovateAccount,
   onUserTradovateConnected,
   onUserTradovateDisconnected,
   price,
@@ -3930,6 +3942,49 @@ function ConnectionsPage({
     }
   };
 
+  const refreshUserTradovate = async () => {
+    if (!session?.access_token) {
+      notify?.("Log in before refreshing Tradovate");
+      onAuthOpen?.("login");
+      return;
+    }
+    try {
+      const authHeader = { Authorization: `Bearer ${session.access_token}` };
+      const [statusResponse, accountsResponse, positionsResponse, quoteResponse] = await Promise.all([
+        fetch("/api/broker/tradovate/status", { headers: authHeader }),
+        fetch("/api/broker/tradovate/accounts", { headers: authHeader }),
+        fetch(`/api/broker/tradovate/positions?accountId=${encodeURIComponent(brokerConnection.selectedAccountId || "")}`, { headers: authHeader }),
+        fetch(`/api/broker/tradovate/quote?symbol=${encodeURIComponent(profile.mainMarket)}`, { headers: authHeader }),
+      ]);
+      const [status, accounts, positions, quote] = await Promise.all([
+        statusResponse.json(),
+        accountsResponse.json(),
+        positionsResponse.json(),
+        quoteResponse.json(),
+      ]);
+      if (!statusResponse.ok) throw new Error(status.error || "Tradovate status unavailable.");
+      onUserTradovateConnected?.({
+        ...status,
+        accounts: Array.isArray(accounts.accounts) ? accounts.accounts.map((account) => ({
+          id: account.id,
+          name: account.name || account.nickname || "Tradovate Account",
+          type: account.accountType || account.type || status.accountType,
+        })) : brokerConnection.accounts || [],
+        positions: positions.positions || [],
+        quote: quote.quote || null,
+        selectedAccountId: brokerConnection.selectedAccountId || status.selectedAccountId,
+      });
+      notify?.("Tradovate refreshed");
+    } catch (error) {
+      setTradovateDemoAuthStatus({
+        connected: false,
+        error: error.message || "Tradovate refresh failed.",
+        message: "Failed",
+      });
+      notify?.("Tradovate refresh failed");
+    }
+  };
+
   const continueBrokerFlow = () => {
     if (brokerStep < 4) {
       setBrokerStep((step) => step + 1);
@@ -3984,7 +4039,7 @@ function ConnectionsPage({
         </div>
         {tradovateDemoAuthStatus ? (
           <div style={{ ...(tradovateDemoAuthStatus.connected ? styles.coachPrompt : styles.priceWarning), marginTop: "14px" }}>
-            <strong>Tradovate Demo: {tradovateDemoAuthStatus.message}</strong>
+            <strong>Tradovate: {tradovateDemoAuthStatus.message}</strong>
             {tradovateDemoAuthStatus.error ? <p style={{ margin: "6px 0 0" }}>{tradovateDemoAuthStatus.error}</p> : null}
             {tradovateDemoAuthStatus.connected ? (
               <div style={{ ...styles.metricGrid, marginTop: "12px" }}>
@@ -4104,6 +4159,39 @@ function ConnectionsPage({
           <Metric label="Data Source" value={brokerConnection.source || dataSource} />
           <Metric label="Last Updated" value={lastUpdated} />
         </div>
+        {brokerConnection.platform === "Tradovate" ? (
+          <div style={{ ...styles.subPanel, marginTop: "16px" }}>
+            <p style={styles.cardLabel}>Connected Account</p>
+            <h3 style={styles.sectionTitle}>{brokerConnection.accountName || "Tradovate Account"}</h3>
+            <div style={styles.metricGrid}>
+              <Metric label="Platform" value="Tradovate" />
+              <Metric label="Provider" value={brokerConnection.provider || profile.fundedProvider || "Other"} />
+              <Metric label="Active Account" value={brokerConnection.selectedAccountId || "Choose account"} />
+              <Metric label="Mode" value="Read-only mode active" tone="good" />
+              <Metric label="Market Data" value={brokerConnection.hasMarketData ? "Enabled" : "Not detected"} />
+              <Metric label="Funded" value={brokerConnection.hasFunded ? "Detected" : "No"} />
+            </div>
+            {brokerConnection.accounts?.length ? (
+              <div style={{ ...styles.sourceGrid, marginTop: "14px" }}>
+                {brokerConnection.accounts.map((account) => (
+                  <button
+                    key={account.id || account.name}
+                    onClick={() => onUserTradovateAccount?.(account)}
+                    style={{ ...styles.sourceButton, borderColor: String(brokerConnection.selectedAccountId) === String(account.id) ? "#38bdf8" : "#334155" }}
+                  >
+                    <strong>{account.name || "Tradovate Account"}</strong>
+                    <span>{String(brokerConnection.selectedAccountId) === String(account.id) ? "Active" : "Set Active"}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <div style={{ ...styles.installBannerActions, marginTop: "14px" }}>
+              <button onClick={() => onUserTradovateAccount?.(brokerConnection.accounts?.[0] || { id: brokerConnection.selectedAccountId, name: brokerConnection.accountName })} style={styles.settingsButton}>Set Active</button>
+              <button onClick={refreshUserTradovate} style={styles.secondaryButton}>Refresh</button>
+              <button onClick={disconnectUserTradovate} style={styles.secondaryButton}>Disconnect</button>
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <section style={styles.card}>
