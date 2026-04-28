@@ -1,10 +1,12 @@
 const endpoints = {
   demo: {
     apiBase: "https://demo.tradovateapi.com/v1",
+    apiSocket: "wss://demo.tradovateapi.com/v1/websocket",
     mdSocket: "wss://md-demo.tradovateapi.com/v1/websocket",
   },
   live: {
     apiBase: "https://live.tradovateapi.com/v1",
+    apiSocket: "wss://live.tradovateapi.com/v1/websocket",
     mdSocket: "wss://md.tradovateapi.com/v1/websocket",
   },
 };
@@ -146,7 +148,8 @@ export async function getTradovateAccounts(mode = "demo") {
   return tradovateFetch(getMode(mode), "/account/list");
 }
 
-export async function getTradovatePositions(mode = "demo") {
+export async function getTradovatePositions(mode = "demo", accountId = "") {
+  if (accountId) return tradovateFetch(getMode(mode), `/position/deps?masterid=${encodeURIComponent(accountId)}`);
   return tradovateFetch(getMode(mode), "/position/list");
 }
 
@@ -159,12 +162,12 @@ export async function getTradovateFills(mode = "demo") {
 }
 
 export async function findTradovateContract(mode = "demo", symbol = "MNQ") {
-  const normalized = String(symbol || "MNQ").trim().toUpperCase();
+  const normalized = getTradovateContractName(symbol);
   return tradovateFetch(getMode(mode), `/contract/find?name=${encodeURIComponent(normalized)}`);
 }
 
 export async function getTradovateMarketPrice(mode = "demo", symbol = "MNQ") {
-  const normalized = String(symbol || "MNQ").trim().toUpperCase();
+  const normalized = getTradovateContractName(symbol);
   const token = await authenticateTradovate(mode);
   const quote = await readMarketDataQuote({ socketUrl: token.endpoint.mdSocket, symbol: normalized, token: token.mdAccessToken });
 
@@ -176,6 +179,47 @@ export async function getTradovateMarketPrice(mode = "demo", symbol = "MNQ") {
     symbol: normalized,
     websocket: endpoints[getMode(mode) === "prop" ? "live" : getMode(mode)].mdSocket,
   };
+}
+
+export async function getTradovateChart(mode = "demo", symbol = "MNQ", options = {}) {
+  const normalized = getTradovateContractName(symbol);
+  const token = await authenticateTradovate(mode);
+  const chart = await readMarketDataChart({
+    bars: Number(options.bars || 80),
+    elementSize: Number(options.elementSize || 5),
+    socketUrl: token.endpoint.mdSocket,
+    symbol: normalized,
+    token: token.mdAccessToken,
+  });
+
+  return {
+    chart,
+    note: chart?.bars?.length
+      ? "Chart data read from Tradovate demo market-data websocket in server read-only mode."
+      : "Market-data websocket is configured, but no chart bars were returned before timeout.",
+    symbol: normalized,
+    websocket: token.endpoint.mdSocket,
+  };
+}
+
+export function getTradovateContractName(symbol = "MNQ") {
+  const raw = String(symbol || "MNQ").trim().toUpperCase();
+  if (/^[A-Z]{2,}[FGHJKMNQUVXZ]\d{1,2}$/.test(raw)) return raw;
+
+  const root = raw.replace(/[^A-Z]/g, "") || "MNQ";
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+  const expirations = [
+    { code: "H", month: 3 },
+    { code: "M", month: 6 },
+    { code: "U", month: 9 },
+    { code: "Z", month: 12 },
+  ];
+  const selected = expirations.find((item) => month <= item.month) || expirations[0];
+  const contractYear = month <= 12 ? year : year + 1;
+  const yearDigit = String(contractYear).slice(-1);
+  return `${root}${selected.code}${yearDigit}`;
 }
 
 function extractQuote(payload, symbol) {
@@ -190,6 +234,23 @@ function extractQuote(payload, symbol) {
     }
 
     const candidate = item.props || item.d || item.data || item;
+    const quoteEntry = candidate.entries || candidate.Entries;
+    if (quoteEntry && typeof quoteEntry === "object") {
+      const bidEntry = quoteEntry.Bid || quoteEntry.bid;
+      const askEntry = quoteEntry.Offer || quoteEntry.Ask || quoteEntry.offer || quoteEntry.ask;
+      const tradeEntry = quoteEntry.Trade || quoteEntry.trade;
+      const bid = Number(bidEntry?.price);
+      const ask = Number(askEntry?.price);
+      const price = Number(tradeEntry?.price);
+      const fallbackPrice = Number.isFinite(price) ? price : Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : bid || ask;
+      if (Number.isFinite(fallbackPrice)) {
+        return {
+          ask: Number.isFinite(ask) ? ask : fallbackPrice,
+          bid: Number.isFinite(bid) ? bid : fallbackPrice,
+          price: fallbackPrice,
+        };
+      }
+    }
     const price = Number(candidate.lastPrice ?? candidate.last ?? candidate.price ?? candidate.tradePrice ?? candidate.mark);
     const bid = Number(candidate.bidPrice ?? candidate.bid);
     const ask = Number(candidate.askPrice ?? candidate.ask);
@@ -259,6 +320,112 @@ function readMarketDataQuote({ socketUrl, symbol, token }) {
         }
       } catch {
         if (raw.toLowerCase().includes("authorize")) sendRequest("md/subscribeQuote", { symbol });
+      }
+    });
+
+    socket.addEventListener("error", () => finish(null));
+    socket.addEventListener("close", () => finish(null));
+  });
+}
+
+function extractChart(payload) {
+  const queue = Array.isArray(payload) ? [...payload] : [payload];
+
+  while (queue.length) {
+    const item = queue.shift();
+    if (!item || typeof item !== "object") continue;
+    if (Array.isArray(item)) {
+      queue.push(...item);
+      continue;
+    }
+
+    const candidate = item.props || item.d || item.data || item;
+    const bars = candidate.bars || candidate.chart || candidate.candles || candidate.ohlc;
+    if (Array.isArray(bars) && bars.length) {
+      return {
+        bars: bars.map((bar) => ({
+          close: Number(bar.close ?? bar.c ?? bar.price ?? 0),
+          high: Number(bar.high ?? bar.h ?? bar.close ?? 0),
+          low: Number(bar.low ?? bar.l ?? bar.close ?? 0),
+          open: Number(bar.open ?? bar.o ?? bar.close ?? 0),
+          timestamp: bar.timestamp || bar.time || bar.t || new Date().toISOString(),
+          volume: Number(bar.volume ?? bar.v ?? 0),
+        })),
+        subscriptionId: candidate.subscriptionId || candidate.id || item.id || "",
+      };
+    }
+
+    queue.push(...Object.values(item).filter((value) => value && typeof value === "object"));
+  }
+
+  return null;
+}
+
+function readMarketDataChart({ bars, elementSize, socketUrl, symbol, token }) {
+  if (typeof WebSocket === "undefined") return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    let requestId = 0;
+    let settled = false;
+    const socket = new WebSocket(socketUrl);
+    const timeout = setTimeout(() => finish(null), 6500);
+
+    const sendRequest = (route, payload) => {
+      requestId += 1;
+      socket.send(`${route}\n${requestId}\n\n${typeof payload === "string" ? payload : JSON.stringify(payload)}`);
+    };
+
+    const finish = (chart) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      try {
+        socket.close();
+      } catch {
+        // best-effort cleanup
+      }
+      resolve(chart);
+    };
+
+    const requestChart = () => {
+      sendRequest("md/getChart", {
+        chartDescription: {
+          elementSize,
+          elementSizeUnit: "UnderlyingUnits",
+          underlyingType: "MinuteBar",
+          withHistogram: false,
+        },
+        symbol,
+        timeRange: {
+          asCloseAsTimestamp: new Date().toISOString(),
+          closestTimestamp: new Date().toISOString(),
+          closestTickId: 0,
+          itemCount: bars,
+        },
+      });
+    };
+
+    socket.addEventListener("open", () => {
+      sendRequest("authorize", token);
+    });
+
+    socket.addEventListener("message", (event) => {
+      const raw = String(event.data || "");
+      if (!raw || raw === "o" || raw === "h") return;
+      const body = raw.startsWith("a") ? raw.slice(1) : raw;
+
+      try {
+        const parsed = JSON.parse(body);
+        const chart = extractChart(parsed);
+        if (chart) {
+          finish(chart);
+          return;
+        }
+
+        const text = JSON.stringify(parsed);
+        if (text.includes("authorize") || text.includes("200") || text.includes("OK")) requestChart();
+      } catch {
+        if (raw.toLowerCase().includes("authorize")) requestChart();
       }
     });
 

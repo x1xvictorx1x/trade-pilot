@@ -6,6 +6,7 @@ import {
   createTradovateReadOnlyProvider,
   findTradovateContract,
   getTradovateAccounts,
+  getTradovateChart,
   getTradovateFills,
   getTradovateMarketPrice,
   getTradovateMe,
@@ -233,9 +234,11 @@ function normalizeTradovateSnapshot({ accounts = [], fills = [], market = {}, mo
 }
 
 async function buildTradovateSnapshot(mode, symbol) {
-  const [accounts, positions, orders, fills, market] = await Promise.all([
-    getTradovateAccounts(mode),
-    getTradovatePositions(mode),
+  const accounts = await getTradovateAccounts(mode);
+  const account = Array.isArray(accounts) ? accounts[0] : accounts;
+  const accountId = account?.id || account?.accountId || "";
+  const [positions, orders, fills, market] = await Promise.all([
+    getTradovatePositions(mode, accountId),
     getTradovateOrders(mode),
     getTradovateFills(mode),
     getTradovateMarketPrice(mode, symbol),
@@ -322,6 +325,62 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname === "/api/tradovate/read-only/status") {
     sendTradovateReadOnlyPlan(response);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/tradovate/demo/auth") {
+    const token = await authenticateTradovate("demo");
+    sendJson(response, 200, {
+      connected: true,
+      endpoint: token.endpoint.apiBase,
+      hasLive: token.hasLive,
+      hasMarketData: token.hasMarketData,
+      mode: "demo",
+      ordersEnabled: false,
+      tokenStatus: "server-only",
+      userStatus: token.userStatus,
+      websocket: token.endpoint.apiSocket,
+      marketDataWebsocket: token.endpoint.mdSocket,
+    });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/tradovate/demo/accounts") {
+    sendJson(response, 200, await getTradovateAccounts("demo"));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/tradovate/demo/positions") {
+    let accountId = url.searchParams.get("accountId") || url.searchParams.get("masterid");
+    if (!accountId) {
+      const accounts = await getTradovateAccounts("demo");
+      const account = Array.isArray(accounts) ? accounts[0] : accounts;
+      accountId = account?.id || account?.accountId || "";
+    }
+    sendJson(response, 200, await getTradovatePositions("demo", accountId));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/tradovate/demo/fills") {
+    sendJson(response, 200, await getTradovateFills("demo"));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/tradovate/demo/contract") {
+    sendJson(response, 200, await findTradovateContract("demo", url.searchParams.get("name") || url.searchParams.get("symbol") || "MNQ"));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/tradovate/demo/chart") {
+    sendJson(response, 200, await getTradovateChart("demo", url.searchParams.get("name") || url.searchParams.get("symbol") || "MNQ", {
+      bars: url.searchParams.get("bars"),
+      elementSize: url.searchParams.get("elementSize"),
+    }));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/tradovate/demo/quote") {
+    sendJson(response, 200, await getTradovateMarketPrice("demo", url.searchParams.get("name") || url.searchParams.get("symbol") || "MNQ"));
     return;
   }
 

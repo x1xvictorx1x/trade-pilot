@@ -109,6 +109,7 @@ const navigationTabs = ["Home", "Dashboard", "Journal", "Account"];
 const moreTabs = ["Profile", "Settings", "Connections", "Install", "Help", "Support"];
 const authRedirectUrl = "https://tradepilottool.com";
 const marketServerUrl = "http://127.0.0.1:8787";
+const tradovateApiBase = typeof window !== "undefined" && ["127.0.0.1", "localhost"].includes(window.location.hostname) ? marketServerUrl : "";
 const brokerSamplePayload = {
   platform: "Demo Broker",
   accountId: "SIM-001",
@@ -1090,6 +1091,75 @@ export default function App() {
     setPriceStatus("");
 
     try {
+      if (mode === "demo") {
+        const response = await fetch(`${tradovateApiBase}/api/tradovate/demo/auth`, { method: "POST" });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Tradovate demo authentication failed.");
+
+        const [accountsResponse, positionsResponse, fillsResponse, contractResponse, chartResponse] = await Promise.all([
+          fetch(`${tradovateApiBase}/api/tradovate/demo/accounts`),
+          fetch(`${tradovateApiBase}/api/tradovate/demo/positions`),
+          fetch(`${tradovateApiBase}/api/tradovate/demo/fills`),
+          fetch(`${tradovateApiBase}/api/tradovate/demo/contract?symbol=${encodeURIComponent(profile.mainMarket)}`),
+          fetch(`${tradovateApiBase}/api/tradovate/demo/chart?symbol=${encodeURIComponent(profile.mainMarket)}`),
+        ]);
+        const [accounts, positions, fills, contract, chart] = await Promise.all([
+          accountsResponse.json(),
+          positionsResponse.json(),
+          fillsResponse.json(),
+          contractResponse.json(),
+          chartResponse.json(),
+        ]);
+        if (!accountsResponse.ok) throw new Error(accounts.error || "Tradovate demo accounts unavailable.");
+
+        const account = Array.isArray(accounts) ? accounts[0] || {} : accounts;
+        const positionList = Array.isArray(positions) ? positions : [];
+        const position = positionList[0];
+        const bars = chart?.chart?.bars || [];
+        const latestBar = bars.at?.(-1) || {};
+        const nextPrice = Number(latestBar.close || price);
+        const nextSnapshot = {
+          accountBalance: Number(account.cashBalance ?? account.netLiq ?? account.balance ?? profile.accountSize),
+          accountId: account.id ? String(account.id) : account.accountId ? String(account.accountId) : "",
+          accountName: account.name || account.nickname || "Tradovate Demo Account",
+          accountType: "demo",
+          ask: Number((nextPrice + 0.25).toFixed(2)),
+          bid: Number((nextPrice - 0.25).toFixed(2)),
+          connected: true,
+          connectionStatus: "Demo Connected",
+          dailyPnl: 0,
+          error: "",
+          fills: Array.isArray(fills) ? fills : [],
+          openPnl: Number(position?.openPnl ?? position?.unrealizedPnl ?? 0),
+          platform,
+          position: position
+            ? {
+                contracts: Math.abs(Number(position.netPos ?? position.quantity ?? position.contracts ?? 0)),
+                direction: Number(position.netPos ?? position.quantity ?? 0) < 0 ? "short" : "long",
+                entry: Number(position.netPrice ?? position.averagePrice ?? position.entryPrice ?? nextPrice),
+                openPnl: Number(position.openPnl ?? position.unrealizedPnl ?? 0),
+                status: "active",
+                symbol: profile.mainMarket,
+              }
+            : null,
+          price: nextPrice,
+          realizedPnl: 0,
+          source: "Tradovate Demo API",
+          symbol: profile.mainMarket,
+          tradovateContract: contract,
+          tradovateChart: chart,
+        };
+
+        setBrokerConnection(nextSnapshot);
+        if (Number.isFinite(nextPrice)) setPrice(nextPrice);
+        setQuote({ bid: nextSnapshot.bid, ask: nextSnapshot.ask });
+        setDataSource(tradovateModes.demo);
+        setAutoPrice(true);
+        setFastMessage("Tradovate Demo read-only connected. Trading actions remain disabled.");
+        setActivePage("dashboard");
+        return;
+      }
+
       const response = await fetch(`${marketServerUrl}/api/tradovate/auth`, {
         body: JSON.stringify({ mode }),
         headers: { "Content-Type": "application/json" },
