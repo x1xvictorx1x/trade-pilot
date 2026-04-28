@@ -3709,6 +3709,7 @@ function ConnectionsPage({
 }) {
   const [tradovateStatus, setTradovateStatus] = useState(null);
   const [tradovateAccountType, setTradovateAccountType] = useState("prop");
+  const [tradovateDemoAuthStatus, setTradovateDemoAuthStatus] = useState(null);
   const [saveStatus, setSaveStatus] = useState("");
   const statusLabel = getConnectionStatusLabel(brokerConnection);
   const connectionMessage = getConnectionStateMessage({ brokerConnection, dataSource, profile });
@@ -3731,6 +3732,25 @@ function ConnectionsPage({
     }
   };
 
+  const testTradovateDemoConnection = async () => {
+    setTradovateDemoAuthStatus({ connected: false, message: "Testing Tradovate demo connection..." });
+    try {
+      const response = await fetch(`${tradovateApiBase}/api/tradovate/demo/auth`, { method: "POST" });
+      const result = await response.json();
+      if (!response.ok || !result.connected) throw new Error(result.error || "Tradovate demo connection failed.");
+      setTradovateDemoAuthStatus({
+        ...result,
+        message: "Connected",
+      });
+    } catch (error) {
+      setTradovateDemoAuthStatus({
+        connected: false,
+        error: error.message || "Tradovate demo connection failed.",
+        message: "Failed",
+      });
+    }
+  };
+
   return (
     <main style={styles.mainGrid}>
       <div style={styles.fullWidthSection}>
@@ -3749,8 +3769,25 @@ function ConnectionsPage({
           <button onClick={activateManualMode} style={styles.dismissButton}>Use Manual Mode</button>
           <button onClick={startDemoBroker} style={styles.settingsButton}>Connect Demo Broker</button>
           <button onClick={activateTradingViewMode} style={styles.dismissButton}>Use TradingView Webhook</button>
+          <button onClick={testTradovateDemoConnection} style={styles.secondaryButton}>Test Tradovate Demo Connection</button>
           <button onClick={() => connectTradovateReadOnly("demo")} style={styles.secondaryButton}>Try Tradovate Read-Only</button>
         </div>
+        {tradovateDemoAuthStatus ? (
+          <div style={{ ...(tradovateDemoAuthStatus.connected ? styles.coachPrompt : styles.priceWarning), marginTop: "14px" }}>
+            <strong>Tradovate Demo: {tradovateDemoAuthStatus.message}</strong>
+            {tradovateDemoAuthStatus.error ? <p style={{ margin: "6px 0 0" }}>{tradovateDemoAuthStatus.error}</p> : null}
+            {tradovateDemoAuthStatus.connected ? (
+              <div style={{ ...styles.metricGrid, marginTop: "12px" }}>
+                <Metric label="User ID" value={String(tradovateDemoAuthStatus.userId || "Connected")} />
+                <Metric label="Name" value={tradovateDemoAuthStatus.name || "Demo user"} />
+                <Metric label="Live" value={tradovateDemoAuthStatus.hasLive ? "Yes" : "No"} />
+                <Metric label="Funded" value={tradovateDemoAuthStatus.hasFunded ? "Yes" : "No"} />
+                <Metric label="Market Data" value={tradovateDemoAuthStatus.hasMarketData ? "Yes" : "No"} />
+                <Metric label="Expires" value={tradovateDemoAuthStatus.expirationTime ? new Date(tradovateDemoAuthStatus.expirationTime).toLocaleTimeString() : "Unknown"} />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div style={{ ...styles.coachPrompt, marginTop: "16px" }}>{connectionMessage}</div>
         <button
           onClick={async () => {

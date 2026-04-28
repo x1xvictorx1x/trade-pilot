@@ -21,16 +21,16 @@ function getMode(mode) {
   return "demo";
 }
 
-function getConfig(mode) {
+function getConfig(mode, overrides = {}) {
   const envPrefix = mode === "prop" ? "TRADOVATE_PROP" : mode === "live" ? "TRADOVATE_LIVE" : "TRADOVATE";
   return {
-    appId: process.env[`${envPrefix}_APP_ID`] || process.env.TRADOVATE_APP_ID || "TradePilot",
-    appVersion: process.env[`${envPrefix}_APP_VERSION`] || process.env.TRADOVATE_APP_VERSION || "0.1.0",
-    cid: process.env[`${envPrefix}_CID`] || process.env.TRADOVATE_CID || process.env[`${envPrefix}_CLIENT_ID`] || process.env.TRADOVATE_CLIENT_ID,
-    deviceId: process.env[`${envPrefix}_DEVICE_ID`] || process.env.TRADOVATE_DEVICE_ID || "trade-pilot-local",
-    name: process.env[`${envPrefix}_USERNAME`] || process.env.TRADOVATE_USERNAME,
-    sec: process.env[`${envPrefix}_SEC`] || process.env.TRADOVATE_SEC || process.env[`${envPrefix}_CLIENT_SECRET`] || process.env.TRADOVATE_CLIENT_SECRET,
-    password: process.env[`${envPrefix}_API_PASSWORD`] || process.env.TRADOVATE_API_PASSWORD || process.env[`${envPrefix}_PASSWORD`] || process.env.TRADOVATE_PASSWORD,
+    appId: overrides.appId || process.env[`${envPrefix}_APP_ID`] || process.env.TRADOVATE_APP_ID || "TradePilot",
+    appVersion: overrides.appVersion || process.env[`${envPrefix}_APP_VERSION`] || process.env.TRADOVATE_APP_VERSION || "0.1.0",
+    cid: overrides.cid || process.env[`${envPrefix}_CID`] || process.env.TRADOVATE_CID || process.env[`${envPrefix}_CLIENT_ID`] || process.env.TRADOVATE_CLIENT_ID,
+    deviceId: overrides.deviceId || process.env[`${envPrefix}_DEVICE_ID`] || process.env.TRADOVATE_DEVICE_ID || "trade-pilot-local",
+    name: overrides.name || process.env[`${envPrefix}_USERNAME`] || process.env.TRADOVATE_USERNAME,
+    sec: overrides.sec || process.env[`${envPrefix}_SEC`] || process.env.TRADOVATE_SEC || process.env[`${envPrefix}_CLIENT_SECRET`] || process.env.TRADOVATE_CLIENT_SECRET,
+    password: overrides.password || process.env[`${envPrefix}_API_PASSWORD`] || process.env.TRADOVATE_API_PASSWORD || process.env[`${envPrefix}_PASSWORD`] || process.env.TRADOVATE_PASSWORD,
   };
 }
 
@@ -96,9 +96,12 @@ export async function authenticateTradovate(modeInput = "demo") {
     accountType: mode === "prop" ? "funded/prop" : mode === "live" ? "personal live" : "demo",
     endpoint: endpoints[mode === "prop" ? "live" : mode],
     expiresAt: Number.isFinite(expirationDate) ? expirationDate : Date.now() + (Number.isFinite(ttl) ? ttl : 20 * 60 * 1000),
+    expirationTime: data.expirationTime || null,
+    hasFunded: Boolean(data.hasFunded ?? data.hasFundedAccount ?? data.hasEvaluationAccount),
     hasLive: Boolean(data.hasLive),
     hasMarketData: Boolean(data.hasMarketData),
     mode,
+    name: data.name || config.name,
     userStatus: data.userStatus,
     userId: data.userId,
   };
@@ -132,12 +135,57 @@ export async function renewTradovateAccessToken(modeInput = "demo", cachedToken)
     accessToken: data.accessToken,
     mdAccessToken: data.mdAccessToken || cached.mdAccessToken || data.accessToken,
     expiresAt: Number.isFinite(expirationDate) ? expirationDate : Date.now() + 90 * 60 * 1000,
+    expirationTime: data.expirationTime || cached.expirationTime || null,
+    hasFunded: Boolean(data.hasFunded ?? data.hasFundedAccount ?? data.hasEvaluationAccount ?? cached.hasFunded),
     hasLive: Boolean(data.hasLive ?? cached.hasLive),
     hasMarketData: Boolean(data.hasMarketData ?? cached.hasMarketData),
+    name: data.name || cached.name,
     userStatus: data.userStatus ?? cached.userStatus,
   };
   tokenCache.set(mode, renewed);
   return renewed;
+}
+
+export async function testTradovateDemoAuth(input = {}) {
+  const hasInputCredentials = ["name", "password", "appId", "appVersion", "deviceId", "cid", "sec"].some((key) => input[key]);
+
+  if (!hasInputCredentials) {
+    const token = await authenticateTradovate("demo");
+    return {
+      connected: true,
+      expirationTime: token.expirationTime,
+      hasFunded: token.hasFunded,
+      hasLive: token.hasLive,
+      hasMarketData: token.hasMarketData,
+      name: token.name,
+      userId: token.userId,
+    };
+  }
+
+  const config = getConfig("demo", input);
+  ensureConfigured(config);
+
+  const response = await fetch(`${endpoints.demo.apiBase}/auth/accesstokenrequest`, {
+    body: JSON.stringify(config),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.accessToken) {
+    const error = new Error(data.message || data.errorText || "Tradovate demo authentication failed.");
+    error.status = response.status || 401;
+    throw error;
+  }
+
+  return {
+    connected: true,
+    expirationTime: data.expirationTime || null,
+    hasFunded: Boolean(data.hasFunded ?? data.hasFundedAccount ?? data.hasEvaluationAccount),
+    hasLive: Boolean(data.hasLive),
+    hasMarketData: Boolean(data.hasMarketData),
+    name: data.name || config.name,
+    userId: data.userId,
+  };
 }
 
 export async function getTradovateMe(mode = "demo") {

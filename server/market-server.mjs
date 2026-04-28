@@ -12,6 +12,7 @@ import {
   getTradovateMe,
   getTradovateOrders,
   getTradovatePositions,
+  testTradovateDemoAuth,
 } from "./providers/tradovate-readonly.mjs";
 
 const port = Number(process.env.TRADE_PILOT_MARKET_PORT || 8787);
@@ -329,19 +330,8 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "POST" && url.pathname === "/api/tradovate/demo/auth") {
-    const token = await authenticateTradovate("demo");
-    sendJson(response, 200, {
-      connected: true,
-      endpoint: token.endpoint.apiBase,
-      hasLive: token.hasLive,
-      hasMarketData: token.hasMarketData,
-      mode: "demo",
-      ordersEnabled: false,
-      tokenStatus: "server-only",
-      userStatus: token.userStatus,
-      websocket: token.endpoint.apiSocket,
-      marketDataWebsocket: token.endpoint.mdSocket,
-    });
+    const payload = await readBody(request);
+    sendJson(response, 200, await testTradovateDemoAuth(payload));
     return;
   }
 
