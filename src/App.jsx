@@ -15,6 +15,7 @@ import { isSupabaseConfigured, supabase } from "./supabaseClient";
 const profileStorageKey = "tradePilotProfile";
 const disciplineStorageKey = "tradePilotDiscipline";
 const activePositionStorageKey = "tradePilotActivePosition";
+const activeTradeStorageKey = "tradePilotActiveTrade";
 const disclaimerStorageKey = "tradePilotDisclaimerAccepted";
 const feedbackStorageKey = "tradePilotFeedback";
 const supportStorageKey = "tradePilotSupportMessages";
@@ -124,7 +125,7 @@ const accountTypeOptions = ["Personal Trading Account", "Funded / Prop Firm Acco
 const fundedProviders = ["None", "Lucid Trading", "Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other"];
 const fundedPlatforms = ["Manual Mode", "TradingView Webhook", "Tradovate", "Rithmic", "TopstepX", "CSV Import", "Other"];
 const navigationTabs = ["Home", "Dashboard", "Journal", "Account"];
-const moreTabs = ["Profile", "Settings", "Connections", "Install", "Help", "Support"];
+const moreTabs = ["Profile", "Settings", "Connections", "Install", "Help", "Support", "QA"];
 const authRedirectUrl = "https://tradepilottool.com";
 const marketServerUrl = "http://127.0.0.1:8787";
 const tradovateApiBase = typeof window !== "undefined" && ["127.0.0.1", "localhost"].includes(window.location.hostname) ? marketServerUrl : "";
@@ -237,6 +238,108 @@ function loadActivePosition() {
     return safeJsonParse(saved, null);
   } catch {
     return null;
+  }
+}
+
+function defaultActiveTrade(overrides = {}) {
+  return {
+    contracts: 0,
+    currentPrice: 0,
+    direction: "long",
+    entry: 0,
+    isActive: false,
+    market: "NQ",
+    openedAt: "",
+    realizedPL: 0,
+    runner: 0,
+    source: "manual",
+    status: "waiting_entry",
+    stop: 0,
+    tp1: 0,
+    tp2: 0,
+    unrealizedPL: 0,
+    ...overrides,
+  };
+}
+
+function normalizeActiveTrade(raw) {
+  const trade = raw && typeof raw === "object" ? raw : {};
+  const direction = trade.direction === "short" ? "short" : "long";
+  return defaultActiveTrade({
+    ...trade,
+    contracts: safeNumber(trade.contracts, trade.quantity, 0),
+    currentPrice: safeNumber(trade.currentPrice, trade.price, 0),
+    direction,
+    entry: safeNumber(trade.entry, trade.averagePrice, 0),
+    isActive: Boolean(trade.isActive),
+    market: normalizeFuturesSymbol(trade.market || trade.symbol || "NQ"),
+    realizedPL: safeNumber(trade.realizedPL, trade.realizedPnl, 0),
+    runner: safeNumber(trade.runner, trade.target, 0),
+    status: trade.status || (trade.isActive ? "active" : "waiting_entry"),
+    stop: safeNumber(trade.stop, 0),
+    tp1: safeNumber(trade.tp1, trade.trim1, 0),
+    tp2: safeNumber(trade.tp2, trade.trim2, 0),
+    unrealizedPL: safeNumber(trade.unrealizedPL, trade.openPnl, 0),
+  });
+}
+
+function activeTradeFromPlan(plan, { currentPrice, market, source = "manual", status = "active" } = {}) {
+  if (!plan || plan.direction === "none") return defaultActiveTrade({ currentPrice, market, source });
+  const normalized = normalizeTradePlan(plan);
+  const spec = marketSpecs[market] || marketSpecs.MNQ;
+  const livePrice = safeNumber(currentPrice, normalized.entry, 0);
+  const contracts = safeNumber(normalized.contracts, 1);
+  const points = normalized.direction === "short" ? normalized.entry - livePrice : livePrice - normalized.entry;
+  return normalizeActiveTrade({
+    contracts,
+    currentPrice: livePrice,
+    direction: normalized.direction,
+    entry: normalized.entry,
+    isActive: status !== "waiting_entry" && status !== "closed",
+    market,
+    openedAt: plan.openedAt || new Date().toISOString(),
+    realizedPL: 0,
+    runner: normalized.runner,
+    source,
+    status,
+    stop: normalized.stop,
+    tp1: normalized.trim1,
+    tp2: normalized.trim2,
+    unrealizedPL: points * spec.pointValue * contracts,
+  });
+}
+
+function updateActiveTradeProgress(trade, currentPrice, market) {
+  const current = normalizeActiveTrade(trade);
+  if (!current.isActive && current.status !== "waiting_entry") {
+    return { ...current, currentPrice: safeNumber(currentPrice, current.currentPrice), market: market || current.market };
+  }
+  const livePrice = safeNumber(currentPrice, current.currentPrice, current.entry);
+  const spec = marketSpecs[market || current.market] || marketSpecs.MNQ;
+  const points = current.direction === "short" ? current.entry - livePrice : livePrice - current.entry;
+  const hit = (target) => Number.isFinite(Number(target)) && Number(target) > 0 && (current.direction === "short" ? livePrice <= Number(target) : livePrice >= Number(target));
+  const stopHit = Number(current.stop) > 0 && (current.direction === "short" ? livePrice >= Number(current.stop) : livePrice <= Number(current.stop));
+  let status = current.status || "waiting_entry";
+  if (stopHit) status = "closed";
+  else if (hit(current.runner)) status = "runner";
+  else if (hit(current.tp2)) status = "tp2_hit";
+  else if (hit(current.tp1)) status = "tp1_hit";
+  else if (current.isActive) status = "active";
+  return {
+    ...current,
+    currentPrice: livePrice,
+    isActive: status !== "closed" && current.isActive,
+    market: market || current.market,
+    status,
+    unrealizedPL: points * spec.pointValue * Math.max(1, current.contracts),
+  };
+}
+
+function loadActiveTrade() {
+  try {
+    return normalizeActiveTrade(safeJsonParse(localStorage.getItem(activeTradeStorageKey), null));
+  } catch {
+    return defaultActiveTrade();
   }
 }
 
@@ -520,6 +623,7 @@ export default function App() {
     return savedPlan?.status === "active" || savedPlan?.status === "managing_trade" ? savedPlan : null;
   });
   const [plannedTrade, setPlannedTrade] = useState(() => workspace.tradePlan || loadActivePosition());
+  const [activeTrade, setActiveTrade] = useState(() => loadActiveTrade());
   const [activePage, setActivePage] = useState("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -551,6 +655,7 @@ export default function App() {
     updated: "",
   });
   const audioReadyRef = useRef(false);
+  const lastClosedTradeRef = useRef("");
   const [autoPrice, setAutoPrice] = useState(true);
   const [dataSource, setDataSource] = useState("Market Data API");
   const [lastUpdated, setLastUpdated] = useState("Manual price");
@@ -603,7 +708,19 @@ export default function App() {
   }, [activePosition]);
 
   useEffect(() => {
-    if (plannedTrade?.status === "active" || plannedTrade?.status === "managing_trade") setActivePosition(plannedTrade);
+    localStorage.setItem(activeTradeStorageKey, JSON.stringify(normalizeActiveTrade(activeTrade)));
+  }, [activeTrade]);
+
+  useEffect(() => {
+    if (plannedTrade?.status === "active" || plannedTrade?.status === "managing_trade") {
+      setActivePosition(plannedTrade);
+      setActiveTrade(activeTradeFromPlan(plannedTrade, {
+        currentPrice: price,
+        market: profile.mainMarket,
+        source: dataSource === "Demo Broker" ? "demo" : dataSource === "TradingView Webhook" ? "tradingview" : "manual",
+        status: plannedTrade.status === "active" ? "active" : plannedTrade.status,
+      }));
+    }
   }, [plannedTrade]);
 
   useEffect(() => {
@@ -798,6 +915,10 @@ export default function App() {
   }, [dataSource]);
 
   useEffect(() => {
+    setActiveTrade((current) => updateActiveTradeProgress(current, price, profile.mainMarket));
+  }, [price, profile.mainMarket]);
+
+  useEffect(() => {
     if (!plannedTrade) return;
     const validation = validateTradePlan(plannedTrade);
     if (validation.valid) return;
@@ -883,10 +1004,17 @@ export default function App() {
           setupType: "Broker Connection",
           status: "active",
         });
+        setActiveTrade(activeTradeFromPlan(brokerPlan, {
+          currentPrice: snapshot.quote?.price ?? snapshot.price ?? brokerPlan.entry,
+          market: brokerPosition.symbol || profile.mainMarket,
+          source: "broker",
+          status: "active",
+        }));
         setFastMessage(`${snapshot.platform} synced an active ${brokerPosition.direction} position.`);
       } else if (snapshot.connected && !snapshot.position) {
         setActivePosition(null);
         setPlannedTrade(null);
+        setActiveTrade((current) => normalizeActiveTrade({ ...current, isActive: false, status: "closed" }));
         setFastMessage(`${snapshot.platform} is connected. No active position detected.`);
       }
     };
@@ -1251,6 +1379,12 @@ export default function App() {
       status: "active",
     });
     setPlannedTrade(nextPlan);
+    setActiveTrade(activeTradeFromPlan(nextPlan, {
+      currentPrice: price,
+      market: profile.mainMarket,
+      source: "manual",
+      status: "active",
+    }));
     setDiscipline((current) => ({ ...current, tradesTaken: current.tradesTaken + 1 }));
     setFastMessage(`${nextDirection === "long" ? "Long" : "Short"} loaded. Entry, stop, trims, and runner are ready.`);
   };
@@ -1337,9 +1471,22 @@ export default function App() {
     };
 
     if (action === "exit") {
+      setActiveTrade((current) => normalizeActiveTrade({
+        ...current,
+        currentPrice: price,
+        isActive: false,
+        realizedPL: current.unrealizedPL,
+        status: "closed",
+      }));
       setActivePosition(null);
       setPlannedTrade(null);
     } else {
+      setActiveTrade((current) => normalizeActiveTrade({
+        ...current,
+        currentPrice: price,
+        isActive: true,
+        status: action === "trim1" ? "tp1_hit" : action === "trim2" ? "tp2_hit" : current.status,
+      }));
       setActivePosition((current) => ({
         ...current,
         status: action,
@@ -1360,6 +1507,7 @@ export default function App() {
     const hasEntry = Number.isFinite(Number(alert.entry));
     const hasStop = Number.isFinite(Number(alert.stop));
     const alertBias = normalizeActiveBias(alert.bias);
+    const alertEvent = String(alert.event || alert.type || "").toLowerCase();
     if (nextMarket && nextMarket !== profile.mainMarket) updateProfile("mainMarket", nextMarket);
     if (Number.isFinite(nextPrice)) setPrice(nextPrice);
     const nextDirection = alert.direction === "long" || alert.direction === "short"
@@ -1424,6 +1572,41 @@ export default function App() {
         });
         setPlannedTrade(tvPlan);
       }
+    }
+    if (["entry", "tp1", "tp2", "stop", "exit"].includes(alertEvent)) {
+      setActiveTrade((current) => {
+        if (alertEvent === "entry") {
+          const eventPlan = normalizeTradePlan({
+            contracts,
+            direction: nextDirection,
+            entry: safeNumber(alert.entry, nextPrice),
+            runner: safeNumber(alert.runner, alert.target, current.runner, nextDirection === "short" ? nextPrice - profile.runnerPoints : nextPrice + profile.runnerPoints),
+            sourceMode: "TradingView Webhook",
+            status: "active",
+            stop: safeNumber(alert.stop, nextDirection === "short" ? nextPrice + profile.defaultRiskPoints : nextPrice - profile.defaultRiskPoints),
+            trim1: safeNumber(alert.tp1, alert.trim1, nextDirection === "short" ? nextPrice - profile.trim1Points : nextPrice + profile.trim1Points),
+            trim2: safeNumber(alert.tp2, alert.trim2, nextDirection === "short" ? nextPrice - profile.trim2Points : nextPrice + profile.trim2Points),
+          });
+          setPlannedTrade(eventPlan);
+          setActivePosition(eventPlan);
+          return activeTradeFromPlan(eventPlan, { currentPrice: nextPrice, market: nextMarket, source: "tradingview", status: "active" });
+        }
+        if (alertEvent === "exit" || alertEvent === "stop") {
+          return normalizeActiveTrade({
+            ...current,
+            currentPrice: safeNumber(nextPrice, current.currentPrice),
+            isActive: false,
+            realizedPL: current.realizedPL || current.unrealizedPL,
+            status: alertEvent === "stop" ? "closed" : "closed",
+          });
+        }
+        return normalizeActiveTrade({
+          ...current,
+          currentPrice: safeNumber(nextPrice, current.currentPrice),
+          isActive: true,
+          status: alertEvent === "tp1" ? "tp1_hit" : "tp2_hit",
+        });
+      });
     }
     setBrokerConnection((current) => ({
       ...current,
@@ -1490,6 +1673,12 @@ export default function App() {
       });
       setActivePosition(demoPlan);
       setPlannedTrade(demoPlan);
+      setActiveTrade(activeTradeFromPlan(demoPlan, {
+        currentPrice: snapshot.price || snapshot.quote?.price || demoPlan.entry,
+        market: snapshot.symbol || profile.mainMarket,
+        source: "demo",
+        status: "active",
+      }));
     }
     setLastUpdated(new Date(snapshot.timestamp || snapshot.updatedAt || Date.now()).toLocaleTimeString());
     setFastMessage("Demo Broker Connected - simulated data is powering the dashboard.");
@@ -1816,15 +2005,17 @@ export default function App() {
   };
 
   const addJournalEntry = async (entryText) => {
+    const customEntry = entryText && typeof entryText === "object" ? entryText : null;
     const entry = {
       action: engine.suggestedAction,
       dailyPnl: discipline.dailyPnl,
       market: profile.mainMarket,
-      note: entryText,
+      note: customEntry ? customEntry.note || "Trade closed." : entryText,
       plan: plannedTrade,
       price,
       score: engine.score,
       stamp: new Date().toISOString(),
+      ...customEntry,
     };
     setJournalEntries((current) => [entry, ...current]);
 
@@ -1833,6 +2024,41 @@ export default function App() {
       setSyncStatus("Journal saved");
     }
   };
+
+  useEffect(() => {
+    if (!activeTrade || activeTrade.status !== "closed") return;
+    const closeKey = `${activeTrade.openedAt}-${activeTrade.realizedPL}-${activeTrade.currentPrice}`;
+    if (lastClosedTradeRef.current === closeKey) return;
+    lastClosedTradeRef.current = closeKey;
+    const executionGrade = gradeCompletedTrade({ trade: activeTrade, plan: plannedTrade, profile });
+    addJournalEntry({
+      contracts: activeTrade.contracts,
+      direction: activeTrade.direction,
+      entry: activeTrade.entry,
+      executionGrade,
+      exit: activeTrade.currentPrice,
+      market: activeTrade.market,
+      note: `${executionGrade.label}. ${executionGrade.lesson}`,
+      pnl: activeTrade.realizedPL || activeTrade.unrealizedPL,
+      screenshot: "placeholder",
+      setupGrade: getTradeGrade({
+        contracts: activeTrade.contracts,
+        dailyPnl: discipline.dailyPnl,
+        entry: activeTrade.entry,
+        maxContracts: profile.maxContracts,
+        maxDailyLoss: profile.maxDailyLoss,
+        price: activeTrade.currentPrice,
+        rewardRisk: calculateRewardRisk({ plan: plannedTrade || activeTrade, pointValue: marketSpecs[activeTrade.market]?.pointValue || 20 }),
+        resistance,
+        stop: activeTrade.stop,
+        support,
+        zoneDetection: {},
+      }),
+      stop: activeTrade.stop,
+      targets: [activeTrade.tp1, activeTrade.tp2, activeTrade.runner],
+    });
+    notify("Trade closed and journaled.", "success");
+  }, [activeTrade?.status, activeTrade?.realizedPL, activeTrade?.currentPrice]);
 
   return (
     <div className="app-shell" style={styles.page}>
@@ -2155,6 +2381,7 @@ export default function App() {
         {activePage === "dashboard" ? (
           <Dashboard
             activePosition={activePosition}
+            activeTrade={activeTrade}
             addJournalEntry={addJournalEntry}
             applyQuickSetup={applyQuickSetup}
             autoPrice={autoPrice}
@@ -2226,6 +2453,8 @@ export default function App() {
             notify={notify}
             saveConnectionSettings={savePersonalWorkspace}
             setActivePage={setActivePage}
+            setPlannedTrade={setPlannedTrade}
+            setActiveTrade={setActiveTrade}
             startDemoBroker={startDemoBroker}
             updateProfile={updateProfile}
             webhookDebug={webhookDebug}
@@ -2266,6 +2495,18 @@ export default function App() {
             applyAlert={applyAlert}
             profile={profile}
             updateProfile={updateProfile}
+          />
+        ) : null}
+        {activePage === "qa" ? (
+          <QAChecklistPage
+            activeTrade={activeTrade}
+            brokerConnection={brokerConnection}
+            dataSource={dataSource}
+            isSupabaseReady={Boolean(supabase && isSupabaseConfigured)}
+            layoutPrefs={layoutPrefs}
+            plannedTrade={plannedTrade}
+            profile={profile}
+            webhookDebug={webhookDebug}
           />
         ) : null}
         {!streamerMode ? <AlphaSignup /> : null}
@@ -2390,7 +2631,7 @@ function DashboardFrame({
 }
 
 function DesktopSidebar({ activePage, setActivePage, setStreamerMode }) {
-  const items = ["Home", "Dashboard", "Connections", "Journal", "Account", "Profile", "Settings"];
+  const items = ["Home", "Dashboard", "Connections", "Journal", "Account", "Profile", "Settings", "QA"];
 
   return (
     <aside className="left-sidebar" style={styles.leftSidebar}>
@@ -2921,6 +3162,7 @@ function normalizeCardOrder(order = []) {
 
 function Dashboard({
   activePosition,
+  activeTrade,
   addJournalEntry,
   applyQuickSetup,
   autoPrice,
@@ -2954,6 +3196,8 @@ function Dashboard({
   setDirection,
   setEntry,
   setPrice,
+  setPlannedTrade,
+  setActiveTrade,
   setBreakoutLevel,
   setLevelBias,
   setLayoutPrefs,
@@ -3041,8 +3285,10 @@ function Dashboard({
   const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
   const rewardRisk = calculateRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
   const tradeGrade = getTradeGrade({
+    activeBias,
     contracts: visualPlan.contracts ?? contracts,
     dailyPnl: discipline.dailyPnl,
+    direction: visualPlan.direction,
     entry: visualPlan.entry,
     maxContracts: profile.maxContracts,
     maxDailyLoss: profile.maxDailyLoss,
@@ -3088,6 +3334,40 @@ function Dashboard({
     if (!journalNote.trim()) return;
     addJournalEntry(journalNote.trim());
     setJournalNote("");
+  };
+
+  const markTradeActive = () => {
+    if (!hasPlan) {
+      notify("Generate a valid trade plan first.", "failure");
+      return;
+    }
+    const nextTrade = activeTradeFromPlan(visualPlan, {
+      currentPrice: price,
+      market: profile.mainMarket,
+      source: dataSource === "TradingView Webhook" ? "tradingview" : dataSource === "Demo Broker" ? "demo" : "manual",
+      status: "active",
+    });
+    setActiveTrade(nextTrade);
+    setActivePosition({ ...visualPlan, openedAt: nextTrade.openedAt, status: "active" });
+    setPlannedTrade?.({ ...visualPlan, openedAt: nextTrade.openedAt, status: "active" });
+    notify("Trade marked active.", "success");
+  };
+
+  const closeActiveTrade = () => {
+    if (!activeTrade?.isActive) {
+      notify("No active trade to close.", "failure");
+      return;
+    }
+    setActiveTrade((current) => normalizeActiveTrade({
+      ...current,
+      currentPrice: price,
+      isActive: false,
+      realizedPL: current.unrealizedPL,
+      status: "closed",
+    }));
+    setActivePosition(null);
+    setPlannedTrade?.(null);
+    notify("Trade marked closed.", "success");
   };
 
   const cardOrder = normalizeCardOrder(effectiveLayout.cardOrder);
@@ -3193,11 +3473,25 @@ function Dashboard({
       </section>
       <section style={styles.dashboardToolbar}>
         <button onClick={() => setCustomizeOpen((open) => !open)} style={styles.settingsButton}>Customize Dashboard</button>
+        <button onClick={markTradeActive} style={styles.settingsButton}>Mark Trade Active</button>
+        <button onClick={closeActiveTrade} style={styles.secondaryButton}>Close / Journal Trade</button>
         <span style={styles.muted}>Layout: {layoutPrefs.mode || "Pro"}</span>
+        <span style={styles.muted}>Active Trade: {activeTrade?.isActive ? `${activeTrade.direction.toUpperCase()} ${activeTrade.market}` : "None"}</span>
       </section>
       {customizeOpen ? (
         <CustomizeDashboardPanel layoutPrefs={layoutPrefs} notify={notify} setLayoutPrefs={setLayoutPrefs} />
       ) : null}
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Execution Flow</p>
+        <div style={styles.rulesGrid}>
+          <Metric label="1. Market" value={profile.mainMarket} />
+          <Metric label="2. Data Source" value={dataSource} />
+          <Metric label="3. Plan" value={hasPlan ? "Ready" : "Waiting"} tone={hasPlan ? "good" : "warn"} />
+          <Metric label="4. Active Trade" value={activeTrade?.isActive ? activeTrade.status : "Waiting entry"} tone={activeTrade?.isActive ? "good" : "warn"} />
+          <Metric label="5. Manage" value={activeTrade?.isActive ? getTargetProgressMessage({ activePosition, plan: visualPlan, price }) : "Not active"} />
+          <Metric label="6. Journal" value="Auto on close" />
+        </div>
+      </section>
       <section
         className={`dashboard-card-board mode-${String(effectiveLayout.mode || "Pro").toLowerCase().replace(/\s+/g, "-")}`}
         style={styles.dashboardCardBoard}
@@ -3784,7 +4078,9 @@ function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, mi
             <Metric label="Risk" value={`$${rewardRisk.risk.toFixed(2)}`} tone={rewardRisk.risk > profile.maxRiskPerTrade ? "bad" : "neutral"} />
             <Metric label="Reward/Risk" value={`${rewardRisk.ratio.toFixed(1)}R`} />
             <Metric label="Trade Grade" tooltip={tooltipText.tradeScore} value={`${tradeGrade.letter} ${tradeGrade.score}/100`} />
+            <Metric label="Entry Quality" value={tradeGrade.entryQuality?.label || "Pending"} tone={tradeGrade.entryQuality?.label === "Ideal" ? "good" : tradeGrade.entryQuality?.label === "Chasing" || tradeGrade.entryQuality?.label === "Invalid" ? "bad" : "warn"} />
           </div>
+          {tradeGrade.entryQuality?.message ? <div style={tradeGrade.entryQuality.label === "Ideal" ? styles.coachPrompt : styles.priceWarning}>{tradeGrade.entryQuality.message}</div> : null}
           {!autoTradePlan.noTrade ? (
             <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
               Auto plan: {autoTradePlan.direction.toUpperCase()} entry {autoTradePlan.entry.toFixed(2)}, stop {autoTradePlan.stop.toFixed(2)}, trims {autoTradePlan.trim1.toFixed(2)} / {autoTradePlan.trim2.toFixed(2)}, runner {autoTradePlan.runner.toFixed(2)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100. {autoTradePlan.reason}
@@ -4240,7 +4536,36 @@ function averageNearest(levels, price, side) {
   return Number((candidates.reduce((sum, level) => sum + level, 0) / Math.max(1, candidates.length)).toFixed(2));
 }
 
-function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss, price, rewardRisk, resistance, stop, support, zoneDetection = {} }) {
+function getEntryQuality({ direction = "long", entry, price, resistance, support, zoneDetection = {} }) {
+  const range = Math.max(1, Math.abs(Number(resistance) - Number(support)));
+  const supportLevel = Number(zoneDetection.supportLevel ?? support);
+  const resistanceLevel = Number(zoneDetection.resistanceLevel ?? resistance);
+  const nearSupport = Math.abs(Number(entry) - supportLevel) <= range * 0.18;
+  const nearResistance = Math.abs(Number(entry) - resistanceLevel) <= range * 0.18;
+  const middleLow = Number(zoneDetection.middleZoneLow ?? Number(support) + range * 0.35);
+  const middleHigh = Number(zoneDetection.middleZoneHigh ?? Number(resistance) - range * 0.35);
+  const inMiddle = Number(entry) > middleLow && Number(entry) < middleHigh;
+  const stretched = Math.abs(Number(price) - Number(entry)) > range * 0.35;
+  if (inMiddle) return { label: "Invalid", message: "Entry Quality: Invalid - do not enter mid-range." };
+  if (direction === "long") {
+    if (nearSupport) return { label: "Ideal", message: "Entry Quality: Ideal - long setup is near support/retest." };
+    if (Number(entry) > supportLevel + range * 0.5 || stretched) return { label: "Chasing", message: "Entry Quality: Chasing - wait for pullback." };
+    return { label: "Late", message: "Entry Quality: Late - needs confirmation." };
+  }
+  if (nearResistance) return { label: "Ideal", message: "Entry Quality: Ideal - short setup is near resistance/retest." };
+  if (Number(entry) < resistanceLevel - range * 0.5 || stretched) return { label: "Chasing", message: "Entry Quality: Chasing - wait for pullback." };
+  return { label: "Late", message: "Entry Quality: Late - needs confirmation." };
+}
+
+function getSetupGradeLabel(score) {
+  if (score >= 90) return "A+";
+  if (score >= 80) return "A";
+  if (score >= 70) return "B";
+  if (score >= 60) return "C";
+  return "Avoid";
+}
+
+function getTradeGrade({ activeBias = "neutral", contracts, dailyPnl, direction = "long", entry, maxContracts, maxDailyLoss, price, rewardRisk, resistance, stop, support, zoneDetection = {} }) {
   if (rewardRisk?.invalid || rewardRisk?.runnerReward <= 0 || rewardRisk?.ratio <= 0) {
     return {
       letter: "Invalid",
@@ -4258,6 +4583,9 @@ function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss,
   const middleHigh = Number(zoneDetection.middleZoneHigh ?? resistance - range * 0.35);
   const middleEntry = entry > middleLow && entry < middleHigh;
   const stopOutsideStructure = stop < support || stop > resistance;
+  const stopCorrectSide = direction === "short" ? Number(stop) > Number(entry) : Number(stop) < Number(entry);
+  const biasAligned = normalizeActiveBias(activeBias) === "neutral" || directionFromBias(activeBias) === direction;
+  const entryQuality = getEntryQuality({ direction, entry, price, resistance, support, zoneDetection });
   const riskPoints = Math.abs(entry - stop);
   let score = 100;
   const reasons = [];
@@ -4267,8 +4595,11 @@ function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss,
     reasons.push("entry was too far from support/resistance");
   }
   if (rewardRisk.ratio < 1.5) {
-    score -= 18;
-    reasons.push("risk/reward is thin");
+    score -= 22;
+    reasons.push("target is too close for the risk");
+  } else if (rewardRisk.ratio < 2) {
+    score -= 10;
+    reasons.push("risk/reward is under 2R");
   }
   if (riskPoints > range * 0.35) {
     score -= 12;
@@ -4277,6 +4608,14 @@ function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss,
   if (!stopOutsideStructure) {
     score -= 14;
     reasons.push("stop is inside the range");
+  }
+  if (!stopCorrectSide) {
+    score -= 35;
+    reasons.push("stop is on the wrong side");
+  }
+  if (!biasAligned) {
+    score -= 22;
+    reasons.push("bias does not align with direction");
   }
   if (Number(contracts) > Number(maxContracts || 1)) {
     score -= 18;
@@ -4294,14 +4633,51 @@ function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss,
     score -= 8;
     reasons.push("current price is stretched from entry");
   }
+  if (entryQuality.label === "Chasing") {
+    score -= 12;
+    reasons.push("entry is chasing");
+  }
+  if (entryQuality.label === "Invalid") {
+    score -= 25;
+    reasons.push("do not enter mid-range");
+  }
 
   const boundedScore = Math.max(0, Math.min(100, Math.round(score)));
-  const letter = boundedScore >= 85 ? "A" : boundedScore >= 70 ? "B" : boundedScore >= 55 ? "C" : "D";
+  const letter = getSetupGradeLabel(boundedScore);
   const reason = reasons.length
     ? `${letter} grade: ${reasons[0]}.`
     : `${letter} grade: clean location, controlled risk, and plan is defined.`;
 
-  return { letter, reason, score: boundedScore, reasons };
+  return { entryQuality, letter, reason, score: boundedScore, reasons };
+}
+
+function gradeCompletedTrade({ plan, profile, trade }) {
+  const safeTrade = normalizeActiveTrade(trade);
+  const followedPlan = !plan || Math.abs(Number(plan.entry) - safeTrade.entry) <= 2;
+  const respectedStop = safeTrade.status !== "closed" || safeTrade.realizedPL >= -Math.abs(profile.maxRiskPerTrade || 0) * 1.25;
+  const oversized = safeTrade.contracts > Number(profile.maxContracts || safeTrade.contracts);
+  const rMultiple = safeTrade.realizedPL && profile.maxRiskPerTrade ? safeTrade.realizedPL / Math.max(1, Math.abs(profile.maxRiskPerTrade)) : 0;
+  let score = 86;
+  const mistakes = [];
+  if (!followedPlan) {
+    score -= 14;
+    mistakes.push("entry drifted from the plan");
+  }
+  if (!respectedStop) {
+    score -= 20;
+    mistakes.push("loss exceeded planned risk");
+  }
+  if (oversized) {
+    score -= 18;
+    mistakes.push("position size was too high");
+  }
+  if (safeTrade.status === "tp1_hit" || safeTrade.status === "tp2_hit" || safeTrade.status === "runner") score += 6;
+  if (rMultiple < -1) score -= 10;
+  const boundedScore = Math.max(0, Math.min(100, Math.round(score)));
+  const label = boundedScore >= 85 ? "Execution Grade: A" : boundedScore >= 75 ? "Execution Grade: B" : boundedScore >= 65 ? "Execution Grade: C" : "Execution Grade: D";
+  const mistake = mistakes[0] || "No major execution mistake detected.";
+  const lesson = mistakes.length ? `Next improvement: ${mistake}.` : "Next improvement: keep following the plan and document the setup.";
+  return { label, lesson, mistake, rMultiple: Number(rMultiple.toFixed(2)), score: boundedScore };
 }
 
 function formatOptionalPrice(value) {
@@ -4797,16 +5173,18 @@ function buildChartData({ price, entry, stop, support, resistance, trim1, trim2,
 
 function getLiveCoachMessage({ activeBias, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, tradeGrade, visualPlan }) {
   if (discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss)) return "Daily loss limit reached. Stop trading.";
+  if (activePosition || activeTradePlan?.status === "managing_trade") {
+    const isLong = (activePosition?.direction || activeTradePlan?.direction || visualPlan.direction) !== "short";
+    const stopHit = isLong ? price <= visualPlan.stop : price >= visualPlan.stop;
+    if (stopHit) return "Stop area reached. Respect your plan.";
+    return getTargetProgressMessage({ activePosition, plan: activeTradePlan || visualPlan, price });
+  }
   if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message;
   if (normalizeActiveBias(activeBias) === "neutral" || activeTradePlan?.direction === "none") return "Waiting for valid setup.";
   if (!visualPlan?.entry || !visualPlan?.stop) return "Plan outdated. Regenerate from current market data.";
   if (tradeGrade?.letter === "Invalid") return "Invalid plan: targets are on the wrong side of entry.";
   if ((activePosition?.contracts || visualPlan.contracts || 0) > profile.maxContracts) return "High risk size detected. Reduce contracts.";
   if (tradeGrade?.score < 55) return "Risk too high. Lower contracts or wait for a cleaner level.";
-
-  const isLong = (activePosition?.direction || activeTradePlan?.direction || visualPlan.direction) !== "short";
-  const stopHit = isLong ? price <= visualPlan.stop : price >= visualPlan.stop;
-  if (stopHit) return "Stop area reached. Respect your plan.";
   return getTargetProgressMessage({ activePosition, plan: activeTradePlan || visualPlan, price }) || engine.autoCoaching[0] || "Hold plan. Let price reach a decision level.";
 }
 
@@ -5114,6 +5492,7 @@ function ConnectionsPage({
   saveConnectionSettings,
   session,
   setActivePage,
+  setActiveTrade,
   startDemoBroker,
   updateProfile,
   webhookDebug,
@@ -6551,6 +6930,37 @@ function SourceOption({ title, text, active }) {
       <strong>{title}</strong>
       <p>{text}</p>
     </div>
+  );
+}
+
+function QAChecklistPage({ activeTrade, brokerConnection, dataSource, isSupabaseReady, layoutPrefs, plannedTrade, profile, webhookDebug }) {
+  const checks = [
+    ["Supabase connected", isSupabaseReady],
+    ["Auth infrastructure ready", Boolean(isSupabaseConfigured)],
+    ["Webhook latest signal received", webhookDebug?.received === "Yes"],
+    ["Demo broker works", brokerConnection?.platform === "Demo Broker" || dataSource === "Demo Broker"],
+    ["Manual mode works", dataSource === "Manual Mode"],
+    ["TradingView mode works", dataSource === "TradingView Webhook" && brokerConnection?.connectionStatus === "TradingView signal received"],
+    ["Layout saved", Boolean(layoutPrefs?.mode)],
+    ["Sound enabled", profile.soundAlerts !== false],
+    ["Active trade detected", Boolean(activeTrade?.isActive)],
+    ["Plan validation passed", plannedTrade ? validateTradePlan(plannedTrade).valid : false],
+  ];
+  return (
+    <section style={styles.pageSection}>
+      <PageTitle title="QA Checklist" subtitle="Alpha readiness checks for Trade Pilot." />
+      <div style={styles.card}>
+        <p style={styles.cardLabel}>Dev Mode</p>
+        <div style={styles.warningStack}>
+          {checks.map(([label, passed]) => (
+            <div key={label} style={passed ? styles.coachPrompt : styles.warningBox}>
+              {passed ? "Pass" : "Check"} - {label}
+            </div>
+          ))}
+        </div>
+        <p style={{ ...styles.muted, marginTop: "14px" }}>Run this before alpha pushes: demo/manual/TradingView, layout, active trade detection, and plan validation should all be checked.</p>
+      </div>
+    </section>
   );
 }
 
