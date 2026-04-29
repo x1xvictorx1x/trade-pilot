@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -49,6 +49,7 @@ const defaultProfile = {
   trim2Points: 20,
   runnerPoints: 35,
   voiceAlerts: true,
+  soundAlerts: true,
 };
 
 const pointValues = {
@@ -298,6 +299,7 @@ function profileFromDatabase(row, fallback) {
     trim1Points: Number(row.trim1_points ?? fallback.trim1Points),
     trim2Points: Number(row.trim2_points ?? fallback.trim2Points),
     voiceAlerts: row.voice_alerts ?? fallback.voiceAlerts,
+    soundAlerts: row.sound_alerts ?? fallback.soundAlerts,
   };
 }
 
@@ -333,6 +335,14 @@ export default function App() {
   const [authMessage, setAuthMessage] = useState("");
   const [syncStatus, setSyncStatus] = useState("Local workspace");
   const [toastMessage, setToastMessage] = useState("");
+  const [webhookDebug, setWebhookDebug] = useState({
+    error: "",
+    price: "",
+    received: "",
+    symbol: "",
+    updated: "",
+  });
+  const audioReadyRef = useRef(false);
   const [autoPrice, setAutoPrice] = useState(true);
   const [dataSource, setDataSource] = useState("Market Data API");
   const [lastUpdated, setLastUpdated] = useState("Manual price");
@@ -410,6 +420,18 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(watchlistStorageKey, JSON.stringify(watchlist));
   }, [watchlist]);
+
+  useEffect(() => {
+    const unlockAudio = () => {
+      audioReadyRef.current = true;
+    };
+    window.addEventListener("pointerdown", unlockAudio, { once: true });
+    window.addEventListener("keydown", unlockAudio, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
+    };
+  }, []);
 
   useEffect(() => {
     if (!supabase) return undefined;
@@ -642,19 +664,40 @@ export default function App() {
       let lastWebhookTimestamp = "";
       const refreshTradingViewWebhook = async () => {
         try {
-          const response = await fetch(`/api/webhook/tradingview?symbol=${encodeURIComponent(profile.mainMarket)}`);
+          const response = await fetch("/api/webhook/tradingview/latest");
           const result = await response.json();
-          if (!response.ok) throw new Error(result.error || "TradingView alerts unavailable.");
-          if (!result.alert) {
+          if (!response.ok || result.ok === false) throw new Error(result.error || "TradingView alerts unavailable.");
+          if (!result.signal) {
+            setWebhookDebug((current) => ({
+              ...current,
+              error: "",
+              received: "No",
+              updated: new Date().toLocaleTimeString(),
+            }));
             setPriceStatus("Waiting for TradingView alert data.");
             return;
           }
-          if (result.alert.timestamp === lastWebhookTimestamp) return;
-          lastWebhookTimestamp = result.alert.timestamp;
-          applyAlert(result.alert);
+          const signalTime = result.signal.created_at || result.signal.timestamp;
+          setWebhookDebug({
+            error: "",
+            price: String(result.signal.price ?? ""),
+            received: "Yes",
+            symbol: result.signal.symbol || "",
+            updated: signalTime ? new Date(signalTime).toLocaleTimeString() : new Date().toLocaleTimeString(),
+          });
+          if (signalTime === lastWebhookTimestamp) return;
+          lastWebhookTimestamp = signalTime;
+          applyAlert(result.signal);
           setPriceStatus("");
+          notify("TradingView signal received.", "success");
         } catch (error) {
+          setWebhookDebug((current) => ({
+            ...current,
+            error: error.message || "TradingView webhook error",
+            updated: new Date().toLocaleTimeString(),
+          }));
           setPriceStatus(error.message || "TradingView alerts unavailable.");
+          notify(error.message || "TradingView webhook error", "failure");
         }
       };
 
@@ -727,8 +770,36 @@ export default function App() {
     setDiscipline((current) => ({ ...current, [key]: value }));
   };
 
-  const notify = (message) => {
+  const playBeep = (type = "success") => {
+    if (!profile.soundAlerts || !audioReadyRef.current) return;
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const context = new AudioContext();
+    const beep = (frequency, start, duration) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.frequency.value = frequency;
+      oscillator.type = "sine";
+      gain.gain.setValueAtTime(0.0001, context.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.08, context.currentTime + start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + start + duration);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(context.currentTime + start);
+      oscillator.stop(context.currentTime + start + duration + 0.03);
+    };
+    if (type === "failure") {
+      beep(220, 0, 0.14);
+      beep(180, 0.18, 0.18);
+    } else {
+      beep(740, 0, 0.12);
+    }
+    window.setTimeout(() => context.close?.(), 600);
+  };
+
+  const notify = (message, type = "info") => {
     setToastMessage(message);
+    if (type === "success" || type === "failure") playBeep(type);
     window.clearTimeout(notify.timer);
     notify.timer = window.setTimeout(() => setToastMessage(""), 2800);
   };
@@ -1049,7 +1120,7 @@ export default function App() {
     setLastUpdated(new Date(snapshot.timestamp || snapshot.updatedAt || Date.now()).toLocaleTimeString());
     setFastMessage("Demo Broker Connected - simulated data is powering the dashboard.");
     setPriceStatus("");
-    notify("Demo Broker Connected");
+    notify("Demo Broker connected.", "success");
     setActivePage("connections");
   };
 
@@ -1116,7 +1187,7 @@ export default function App() {
     }));
     setFastMessage("Manual Mode Active - enter price and levels yourself.");
     setPriceStatus("");
-    notify("Manual Mode Active");
+    notify("Manual Mode Active", "success");
     setActivePage("connections");
   };
 
@@ -1282,7 +1353,7 @@ export default function App() {
         platform,
       }));
       setPriceStatus(message);
-      notify("Tradovate credentials missing");
+      notify("Tradovate credentials missing.", "failure");
       setActivePage("connections");
     }
   };
@@ -1337,7 +1408,7 @@ export default function App() {
     if (result.provider) updateProfile("fundedProvider", result.provider);
     setFastMessage(result.message || "Tradovate Connected. Read-only mode active.");
     setPriceStatus("");
-    notify("Tradovate Connected");
+    notify("Tradovate connected.", "success");
   };
 
   const applyUserTradovateDisconnect = () => {
@@ -1702,6 +1773,7 @@ export default function App() {
             setActivePage={setActivePage}
             startDemoBroker={startDemoBroker}
             updateProfile={updateProfile}
+            webhookDebug={webhookDebug}
           />
         ) : null}
         {activePage === "account" ? (
@@ -3947,6 +4019,7 @@ function ConnectionsPage({
   setActivePage,
   startDemoBroker,
   updateProfile,
+  webhookDebug,
 }) {
   const [tradovateStatus, setTradovateStatus] = useState(null);
   const [tradovateAccountType, setTradovateAccountType] = useState("prop");
@@ -4012,7 +4085,7 @@ function ConnectionsPage({
       : "Missing API credentials. Use Manual Mode or TradingView Alerts until your provider enables API access.";
     if (!hasTradovateApiAccess) {
       setTradovateDemoAuthStatus({ connected: false, error: missingCredentialsMessage, message: "API access required" });
-      notify?.(missingCredentialsMessage);
+      notify?.(missingCredentialsMessage, "failure");
       return;
     }
 
@@ -4030,7 +4103,7 @@ function ConnectionsPage({
     const missing = ["username", "password", "cid", "sec"].filter((key) => !String(tradovateCredentials[key] || "").trim());
     if (missing.length) {
       setTradovateDemoAuthStatus({ connected: false, error: missingCredentialsMessage, message: "Failed" });
-      notify?.(missingCredentialsMessage);
+      notify?.(missingCredentialsMessage, "failure");
       return;
     }
 
@@ -4058,7 +4131,7 @@ function ConnectionsPage({
       onUserTradovateConnected?.(result);
       setBrokerModalOpen(false);
       setBrokerStep(1);
-      notify?.("Tradovate Connected — Read-only mode active.");
+      notify?.("Tradovate Connected — Read-only mode active.", "success");
       if (result.hasFunded) updateProfile("accountType", "Funded / Prop Firm Account");
     } catch (error) {
       const message = error.message || "Tradovate API access is required for direct connection. Use Manual Mode or TradingView Alerts until enabled.";
@@ -4067,7 +4140,7 @@ function ConnectionsPage({
         error: message,
         message: "Failed",
       });
-      notify?.("Tradovate connection failed");
+      notify?.("Tradovate connection failed", "failure");
     }
   };
 
@@ -4085,7 +4158,7 @@ function ConnectionsPage({
       manualFallback: true,
       message: "Lucid Manual Mode active. Funded rules are enabled without broker API.",
     });
-    notify?.("Lucid Manual Mode active");
+    notify?.("Lucid Manual Mode active", "success");
   };
 
   const activateLucidTradingViewMode = () => {
@@ -4119,18 +4192,34 @@ function ConnectionsPage({
       timestamp: "test",
     };
     try {
-      await fetch("/api/webhook/tradingview", {
+      const response = await fetch("/api/webhook/tradingview", {
         body: JSON.stringify(payload),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       });
-    } catch {
-      // Local dashboard still updates even if the deployed endpoint is unreachable.
+      const result = await response.json();
+      if (!response.ok || result.ok === false) throw new Error(result.error || "TradingView webhook error");
+      setWebhookDebug({
+        error: "",
+        price: String(payload.price),
+        received: "Yes",
+        symbol: payload.symbol,
+        updated: new Date().toLocaleTimeString(),
+      });
+    } catch (error) {
+      setWebhookDebug({
+        error: error.message || "TradingView webhook error",
+        price: "",
+        received: "No",
+        symbol: payload.symbol,
+        updated: new Date().toLocaleTimeString(),
+      });
+      notify?.(error.message || "TradingView webhook error", "failure");
     }
     applyAlert?.(payload);
     setTradingViewWizardOpen(false);
     setActivePage("dashboard");
-    notify?.("TradingView signal received.");
+    notify?.("TradingView signal received.", "success");
   };
 
   const disconnectUserTradovate = async () => {
@@ -4187,7 +4276,7 @@ function ConnectionsPage({
         error: error.message || "Tradovate refresh failed.",
         message: "Failed",
       });
-      notify?.("Tradovate refresh failed");
+      notify?.("Tradovate refresh failed", "failure");
     }
   };
 
@@ -4294,11 +4383,26 @@ function ConnectionsPage({
             }, null, 2)}</pre>
           </div>
         ) : null}
+        <div style={{ ...styles.subPanel, marginTop: "14px" }}>
+          <p style={styles.cardLabel}>TradingView Debug</p>
+          <div style={styles.metricGrid}>
+            <Metric label="Last webhook received" value={webhookDebug?.received || "No"} tone={webhookDebug?.received === "Yes" ? "good" : "warn"} />
+            <Metric label="Last symbol" value={webhookDebug?.symbol || "None"} />
+            <Metric label="Last price" value={webhookDebug?.price || "None"} />
+            <Metric label="Last error" value={webhookDebug?.error || "None"} tone={webhookDebug?.error ? "bad" : "neutral"} />
+            <Metric label="Last updated" value={webhookDebug?.updated || "Waiting"} />
+          </div>
+        </div>
         <button
           onClick={async () => {
-            await saveConnectionSettings?.();
-            notify?.("Connection settings saved");
-            setSaveStatus("Connection settings saved.");
+            try {
+              await saveConnectionSettings?.();
+              notify?.("Connection saved.", "success");
+              setSaveStatus("Connection settings saved.");
+            } catch (error) {
+              notify?.("Save failed.", "failure");
+              setSaveStatus(error.message || "Save failed.");
+            }
           }}
           style={{ ...styles.settingsButton, marginTop: "16px" }}
         >
@@ -5086,6 +5190,10 @@ function ProfileFields({ profile, updateProfile }) {
         <input type="checkbox" checked={profile.voiceAlerts} onChange={(event) => updateProfile("voiceAlerts", event.target.checked)} />
         Voice alerts on/off
       </label>
+      <label style={styles.switchRow}>
+        <input type="checkbox" checked={profile.soundAlerts !== false} onChange={(event) => updateProfile("soundAlerts", event.target.checked)} />
+        Sound alerts on/off
+      </label>
     </>
   );
 }
@@ -5225,10 +5333,16 @@ function SettingsPage({ applyAlert, profile, updateProfile }) {
           </div>
         ) : null}
         {settingsTab === "Alerts" ? (
-          <label style={styles.switchRow}>
-            <input type="checkbox" checked={profile.voiceAlerts} onChange={(event) => updateProfile("voiceAlerts", event.target.checked)} />
-            Voice alerts on/off
-          </label>
+          <div style={styles.warningStack}>
+            <label style={styles.switchRow}>
+              <input type="checkbox" checked={profile.voiceAlerts} onChange={(event) => updateProfile("voiceAlerts", event.target.checked)} />
+              Voice alerts on/off
+            </label>
+            <label style={styles.switchRow}>
+              <input type="checkbox" checked={profile.soundAlerts !== false} onChange={(event) => updateProfile("soundAlerts", event.target.checked)} />
+              Sound alerts on/off
+            </label>
+          </div>
         ) : null}
       </section>
       <DataSourcePage applyAlert={applyAlert} />

@@ -1,0 +1,116 @@
+import { createClient } from "@supabase/supabase-js";
+
+const latestBySymbol = globalThis.__tradePilotTradingViewAlerts || new Map();
+globalThis.__tradePilotTradingViewAlerts = latestBySymbol;
+
+const supabaseUrl =
+  process.env.SUPABASE_URL ||
+  process.env.VITE_SUPABASE_URL ||
+  process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+const supabase = supabaseUrl && supabaseServiceKey
+  ? createClient(supabaseUrl, supabaseServiceKey, {
+      auth: { persistSession: false },
+    })
+  : null;
+
+export function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+export function toNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+export function normalizeSignal(payload = {}) {
+  const symbol = String(payload.symbol || "").trim().toUpperCase();
+  const price = toNumber(payload.price);
+  if (!symbol || price === null) return { error: "Missing symbol or price" };
+
+  const signal = {
+    symbol,
+    price,
+    receivedAt: new Date().toISOString(),
+    timestamp: payload.timestamp || new Date().toISOString(),
+  };
+
+  const support = toNumber(payload.support);
+  const resistance = toNumber(payload.resistance);
+  const entry = toNumber(payload.entry);
+  const stop = toNumber(payload.stop);
+  if (support !== null) signal.support = support;
+  if (resistance !== null) signal.resistance = resistance;
+  if (entry !== null) signal.entry = entry;
+  if (stop !== null) signal.stop = stop;
+  if (payload.bias) signal.bias = String(payload.bias).trim().toLowerCase();
+  if (payload.timeframe) signal.timeframe = String(payload.timeframe).trim();
+  if (Array.isArray(payload.targets)) {
+    signal.targets = payload.targets.map(toNumber).filter((value) => value !== null);
+  } else if (payload.targets !== undefined && payload.targets !== null) {
+    const targets = String(payload.targets)
+      .split(",")
+      .map((value) => toNumber(value.trim()))
+      .filter((value) => value !== null);
+    if (targets.length) signal.targets = targets;
+  }
+
+  return { signal };
+}
+
+export async function saveSignal(signal, rawPayload) {
+  latestBySymbol.set(signal.symbol, signal);
+  latestBySymbol.set("__latest", signal);
+
+  if (!supabase) return { saved: false, storage: "memory" };
+
+  const { error } = await supabase.from("tradingview_signals").insert({
+    bias: signal.bias || null,
+    entry: signal.entry ?? null,
+    price: signal.price,
+    raw_payload: rawPayload,
+    resistance: signal.resistance ?? null,
+    stop: signal.stop ?? null,
+    support: signal.support ?? null,
+    symbol: signal.symbol,
+    targets: signal.targets || null,
+    timeframe: signal.timeframe || null,
+  });
+
+  if (error) return { saved: false, storage: "memory", error: error.message };
+  return { saved: true, storage: "supabase" };
+}
+
+export async function getLatestSignal(symbol = "") {
+  if (supabase) {
+    let query = supabase
+      .from("tradingview_signals")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (symbol) query = query.eq("symbol", symbol);
+    const { data, error } = await query;
+    if (!error && data?.[0]) {
+      const row = data[0];
+      return {
+        bias: row.bias,
+        created_at: row.created_at,
+        entry: row.entry,
+        price: Number(row.price),
+        resistance: row.resistance,
+        stop: row.stop,
+        support: row.support,
+        symbol: row.symbol,
+        targets: row.targets,
+        timeframe: row.timeframe,
+        timestamp: row.created_at,
+      };
+    }
+  }
+
+  return symbol ? latestBySymbol.get(symbol) || null : latestBySymbol.get("__latest") || null;
+}

@@ -1,89 +1,48 @@
-const latestBySymbol = globalThis.__tradePilotTradingViewAlerts || new Map();
-globalThis.__tradePilotTradingViewAlerts = latestBySymbol;
+import { getLatestSignal, normalizeSignal, saveSignal, setCors } from "./_tradingview-store.js";
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
-
-function toNumber(value) {
-  if (value === undefined || value === null || value === "") return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
-export default function handler(req, res) {
+export default async function handler(req, res) {
   setCors(res);
 
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
-  }
+  if (req.method === "OPTIONS") return res.status(204).end();
 
   if (req.method === "GET") {
     const symbol = String(req.query.symbol || "").trim().toUpperCase();
-    const alert = symbol ? latestBySymbol.get(symbol) : latestBySymbol.get("__latest");
+    const signal = await getLatestSignal(symbol);
     return res.status(200).json({
-      connected: Boolean(alert),
-      alert: alert || null,
-      message: alert ? "Latest TradingView webhook data." : "Waiting for TradingView webhook data.",
+      ok: true,
+      connected: Boolean(signal),
+      signal,
+      alert: signal,
+      message: signal ? "Latest TradingView signal." : "Waiting for TradingView alert data.",
     });
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed." });
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   let payload;
   try {
     payload = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
   } catch {
-    return res.status(400).json({ error: "TradingView webhook payload must be valid JSON." });
-  }
-  const symbol = String(payload.symbol || "").trim().toUpperCase();
-  const price = toNumber(payload.price);
-
-  if (!symbol || price === null) {
-    return res.status(400).json({
-      error: "TradingView webhook requires symbol and price.",
-      required: ["symbol", "price"],
-      optional: ["support", "resistance", "bias", "timeframe", "timestamp", "entry", "stop", "targets"],
-    });
+    return res.status(400).json({ ok: false, error: "Payload must be valid JSON" });
   }
 
-  const alert = {
-    symbol,
-    price,
-    receivedAt: new Date().toISOString(),
-    timestamp: payload.timestamp || new Date().toISOString(),
-  };
+  console.log("TradingView webhook received", JSON.stringify(payload));
 
-  const support = toNumber(payload.support);
-  const resistance = toNumber(payload.resistance);
-  if (support !== null) alert.support = support;
-  if (resistance !== null) alert.resistance = resistance;
-  if (payload.bias) alert.bias = String(payload.bias).trim().toLowerCase();
-  if (payload.timeframe) alert.timeframe = String(payload.timeframe).trim();
-  const entry = toNumber(payload.entry);
-  const stop = toNumber(payload.stop);
-  if (entry !== null) alert.entry = entry;
-  if (stop !== null) alert.stop = stop;
-  if (Array.isArray(payload.targets)) {
-    alert.targets = payload.targets.map(toNumber).filter((value) => value !== null);
-  } else if (payload.targets !== undefined && payload.targets !== null) {
-    const targets = String(payload.targets)
-      .split(",")
-      .map((value) => toNumber(value.trim()))
-      .filter((value) => value !== null);
-    if (targets.length) alert.targets = targets;
+  const { signal, error } = normalizeSignal(payload);
+  if (error) {
+    return res.status(400).json({ ok: false, error });
   }
 
-  latestBySymbol.set(symbol, alert);
-  latestBySymbol.set("__latest", alert);
+  const storage = await saveSignal(signal, payload);
+  if (storage.error) console.warn("TradingView signal database save failed", storage.error);
 
   return res.status(200).json({
-    accepted: true,
-    alert,
-    message: "TradingView webhook accepted.",
+    ok: true,
+    received: true,
+    symbol: signal.symbol,
+    price: signal.price,
+    storage: storage.storage,
   });
 }

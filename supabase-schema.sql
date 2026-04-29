@@ -116,6 +116,22 @@ create table if not exists public.subscriber_list (
   timestamp timestamptz default now()
 );
 
+create table if not exists public.tradingview_signals (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete set null,
+  symbol text not null,
+  price numeric not null,
+  timeframe text,
+  support numeric,
+  resistance numeric,
+  bias text,
+  entry numeric,
+  stop numeric,
+  targets jsonb,
+  raw_payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
 alter table public.profiles alter column account_type set default 'personal';
 
 alter table public.profiles enable row level security;
@@ -125,6 +141,7 @@ alter table public.trade_journal enable row level security;
 alter table public.broker_connections enable row level security;
 alter table public.watchlist enable row level security;
 alter table public.subscriber_list enable row level security;
+alter table public.tradingview_signals enable row level security;
 
 drop policy if exists "profiles are private" on public.profiles;
 drop policy if exists "settings are private" on public.trade_settings;
@@ -134,6 +151,7 @@ drop policy if exists "broker connections are private" on public.broker_connecti
 drop policy if exists "watchlist is private" on public.watchlist;
 drop policy if exists "subscribers can add themselves" on public.subscriber_list;
 drop policy if exists "subscribers can read own row" on public.subscriber_list;
+drop policy if exists "service role manages tradingview signals" on public.tradingview_signals;
 
 create policy "profiles are private" on public.profiles for all using (auth.uid() = id) with check (auth.uid() = id);
 create policy "settings are private" on public.trade_settings for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
@@ -143,3 +161,4 @@ create policy "broker connections are private" on public.broker_connections for 
 create policy "watchlist is private" on public.watchlist for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "subscribers can add themselves" on public.subscriber_list for insert with check (auth.uid() = user_id or user_id is null);
 create policy "subscribers can read own row" on public.subscriber_list for select using (auth.uid() = user_id);
+create policy "service role manages tradingview signals" on public.tradingview_signals for all using (auth.role() = 'service_role') with check (auth.role() = 'service_role');
