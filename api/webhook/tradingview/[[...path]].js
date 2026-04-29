@@ -1,16 +1,20 @@
-import { getLatestSignal, normalizeSignal, saveSignal, setCors } from "./_tradingview-store.js";
+import { getLatestSignal, normalizeSignal, saveSignal, setCors } from "../_tradingview-store.js";
+
+function isLatestRequest(req) {
+  const path = req.query.path;
+  return Array.isArray(path) && path[0] === "latest";
+}
 
 export default async function handler(req, res) {
   setCors(res);
 
   if (req.method === "OPTIONS") return res.status(204).end();
 
-  if (req.method === "GET") {
+  if (req.method === "GET" || isLatestRequest(req)) {
     const symbol = String(req.query.symbol || "").trim().toUpperCase();
     const signal = await getLatestSignal(symbol);
     return res.status(200).json({
       ok: true,
-      connected: Boolean(signal),
       signal,
       alert: signal,
       message: signal ? "Latest TradingView signal." : "Waiting for TradingView alert data.",
@@ -31,9 +35,7 @@ export default async function handler(req, res) {
   console.log("TradingView webhook received", JSON.stringify(payload));
 
   const { signal, error } = normalizeSignal(payload);
-  if (error) {
-    return res.status(400).json({ ok: false, error });
-  }
+  if (error) return res.status(400).json({ ok: false, error });
 
   const storage = await saveSignal(signal, payload);
   if (storage.error) console.warn("TradingView signal database save failed", storage.error);

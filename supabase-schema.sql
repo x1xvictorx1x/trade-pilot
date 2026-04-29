@@ -152,6 +152,8 @@ drop policy if exists "watchlist is private" on public.watchlist;
 drop policy if exists "subscribers can add themselves" on public.subscriber_list;
 drop policy if exists "subscribers can read own row" on public.subscriber_list;
 drop policy if exists "service role manages tradingview signals" on public.tradingview_signals;
+drop policy if exists "public can add tradingview signals" on public.tradingview_signals;
+drop policy if exists "public can read latest tradingview signals" on public.tradingview_signals;
 
 create policy "profiles are private" on public.profiles for all using (auth.uid() = id) with check (auth.uid() = id);
 create policy "settings are private" on public.trade_settings for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
@@ -162,3 +164,5 @@ create policy "watchlist is private" on public.watchlist for all using (auth.uid
 create policy "subscribers can add themselves" on public.subscriber_list for insert with check (auth.uid() = user_id or user_id is null);
 create policy "subscribers can read own row" on public.subscriber_list for select using (auth.uid() = user_id);
 create policy "service role manages tradingview signals" on public.tradingview_signals for all using (auth.role() = 'service_role') with check (auth.role() = 'service_role');
+create policy "public can add tradingview signals" on public.tradingview_signals for insert with check (user_id is null);
+create policy "public can read latest tradingview signals" on public.tradingview_signals for select using (user_id is null);
