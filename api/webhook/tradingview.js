@@ -47,7 +47,7 @@ export default function handler(req, res) {
     return res.status(400).json({
       error: "TradingView webhook requires symbol and price.",
       required: ["symbol", "price"],
-      optional: ["support", "resistance", "bias", "timeframe", "timestamp"],
+      optional: ["support", "resistance", "bias", "timeframe", "timestamp", "entry", "stop", "targets"],
     });
   }
 
@@ -64,6 +64,19 @@ export default function handler(req, res) {
   if (resistance !== null) alert.resistance = resistance;
   if (payload.bias) alert.bias = String(payload.bias).trim().toLowerCase();
   if (payload.timeframe) alert.timeframe = String(payload.timeframe).trim();
+  const entry = toNumber(payload.entry);
+  const stop = toNumber(payload.stop);
+  if (entry !== null) alert.entry = entry;
+  if (stop !== null) alert.stop = stop;
+  if (Array.isArray(payload.targets)) {
+    alert.targets = payload.targets.map(toNumber).filter((value) => value !== null);
+  } else if (payload.targets !== undefined && payload.targets !== null) {
+    const targets = String(payload.targets)
+      .split(",")
+      .map((value) => toNumber(value.trim()))
+      .filter((value) => value !== null);
+    if (targets.length) alert.targets = targets;
+  }
 
   latestBySymbol.set(symbol, alert);
   latestBySymbol.set("__latest", alert);

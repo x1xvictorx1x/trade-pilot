@@ -85,6 +85,15 @@ const marketDefaults = {
   QQQ: 560,
 };
 
+function normalizeFuturesSymbol(symbol = "") {
+  const clean = String(symbol).toUpperCase();
+  if (clean.includes("MNQ")) return "MNQ";
+  if (clean.includes("MES")) return "MES";
+  if (clean.includes("NQ")) return "NQ";
+  if (clean.includes("ES")) return "ES";
+  return clean || "MNQ";
+}
+
 const markets = Object.keys(marketDefaults);
 const marketSpecs = {
   MNQ: { displayName: "Micro Nasdaq 100", pointValue: 2, tickSize: 0.25 },
@@ -498,6 +507,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (dataSource === "TradingView Webhook") return;
     const base = marketDefaults[profile.mainMarket] ?? 27400;
     setPrice(base);
     setSupport(base - Math.max(10, base * 0.0013));
@@ -507,7 +517,7 @@ export default function App() {
     setPullbackSupport(base - Math.max(10, base * 0.0013));
     setBreakoutLevel(base + Math.max(10, base * 0.0018));
     setLastUpdated(`Market changed to ${profile.mainMarket}`);
-  }, [profile.mainMarket]);
+  }, [dataSource, profile.mainMarket]);
 
   useEffect(() => {
     if (!autoPrice) {
@@ -619,7 +629,7 @@ export default function App() {
           applyBrokerSnapshot(result.snapshot || result);
           setPriceStatus("");
         } catch (error) {
-          setPriceStatus(`${error.message || "Tradovate unavailable."} Use TradingView Webhook or Manual Mode as fallback.`);
+          setPriceStatus(`${error.message || "Tradovate unavailable."} Use TradingView Alerts or Manual Mode as fallback.`);
         }
       };
 
@@ -634,9 +644,9 @@ export default function App() {
         try {
           const response = await fetch(`/api/webhook/tradingview?symbol=${encodeURIComponent(profile.mainMarket)}`);
           const result = await response.json();
-          if (!response.ok) throw new Error(result.error || "TradingView webhook unavailable.");
+          if (!response.ok) throw new Error(result.error || "TradingView alerts unavailable.");
           if (!result.alert) {
-            setPriceStatus("Waiting for TradingView webhook data.");
+            setPriceStatus("Waiting for TradingView alert data.");
             return;
           }
           if (result.alert.timestamp === lastWebhookTimestamp) return;
@@ -644,7 +654,7 @@ export default function App() {
           applyAlert(result.alert);
           setPriceStatus("");
         } catch (error) {
-          setPriceStatus(error.message || "TradingView webhook unavailable.");
+          setPriceStatus(error.message || "TradingView alerts unavailable.");
         }
       };
 
@@ -959,23 +969,44 @@ export default function App() {
   };
 
   const applyAlert = (alert) => {
-    if (alert.symbol && alert.symbol !== profile.mainMarket) updateProfile("mainMarket", alert.symbol);
-    if (Number.isFinite(alert.price)) setPrice(alert.price);
+    const nextMarket = normalizeFuturesSymbol(alert.symbol || profile.mainMarket);
+    const nextPrice = Number(alert.price);
+    if (nextMarket && nextMarket !== profile.mainMarket) updateProfile("mainMarket", nextMarket);
+    if (Number.isFinite(nextPrice)) setPrice(nextPrice);
     if (alert.direction === "long" || alert.direction === "short") setDirection(alert.direction);
-    if (Number.isFinite(alert.support)) setSupport(alert.support);
-    if (Number.isFinite(alert.resistance)) setResistance(alert.resistance);
+    if (Number.isFinite(Number(alert.support))) setSupport(Number(alert.support));
+    if (Number.isFinite(Number(alert.resistance))) setResistance(Number(alert.resistance));
+    if (Number.isFinite(Number(alert.entry))) setEntry(Number(alert.entry));
+    if (Number.isFinite(Number(alert.stop)) && Number.isFinite(Number(alert.entry))) setRiskPoints(Math.abs(Number(alert.entry) - Number(alert.stop)));
     if (alert.timestamp) setLastUpdated(new Date(alert.timestamp).toLocaleTimeString());
     else setLastUpdated(new Date().toLocaleTimeString());
-    if (Number.isFinite(alert.price)) {
+    if (Number.isFinite(nextPrice)) {
       setQuote({
-        bid: Number((alert.price - 0.25).toFixed(2)),
-        ask: Number((alert.price + 0.25).toFixed(2)),
+        bid: Number((nextPrice - 0.25).toFixed(2)),
+        ask: Number((nextPrice + 0.25).toFixed(2)),
       });
     }
     if (alert.bias) setLevelBias(alert.bias);
+    if (Number.isFinite(Number(alert.entry)) && Number.isFinite(Number(alert.stop)) && alert.targets) {
+      const targets = Array.isArray(alert.targets) ? alert.targets.map(Number).filter(Number.isFinite) : [];
+      if (targets.length) {
+        setPlannedTrade({
+          contracts,
+          direction: alert.bias === "bearish" ? "short" : direction,
+          entry: Number(alert.entry),
+          runner: targets[2] ?? targets[targets.length - 1],
+          setupType: "TradingView Alert",
+          status: "planned",
+          stop: Number(alert.stop),
+          target: targets[targets.length - 1],
+          trim1: targets[0],
+          trim2: targets[1] ?? targets[0],
+        });
+      }
+    }
     setDataSource("TradingView Webhook");
     setAutoPrice(true);
-    setFastMessage(`TradingView webhook updated ${alert.symbol || profile.mainMarket} at ${Number(alert.price).toFixed(2)}.`);
+    setFastMessage(`TradingView signal received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
     setActivePage("dashboard");
   };
 
@@ -1096,14 +1127,14 @@ export default function App() {
     setBrokerConnection((current) => ({
       ...current,
       connected: false,
-      connectionStatus: "Waiting for webhook data",
+      connectionStatus: "Waiting for TradingView alert data",
       error: "",
       platform: "TradingView Webhook",
       source: "Webhook",
     }));
-    setFastMessage("Waiting for TradingView webhook data.");
+    setFastMessage("Waiting for TradingView alert data.");
     setPriceStatus("");
-    notify("Waiting for TradingView Webhook");
+    notify("Waiting for TradingView Alerts");
     setActivePage("connections");
   };
 
@@ -1386,17 +1417,22 @@ export default function App() {
           width: 100%;
           max-width: none;
           margin: 0;
-          padding: 24px 32px;
+          padding: 0;
           box-sizing: border-box;
         }
         .desktop-dashboard {
           display: grid;
-          grid-template-columns: 240px minmax(0, 1fr) 320px;
-          gap: 20px;
+          grid-template-columns: 240px minmax(0, 1fr) 330px;
+          gap: 18px;
           width: 100%;
-          min-height: calc(100vh - 80px);
+          min-height: 100vh;
+          padding: 18px;
+          box-sizing: border-box;
           align-items: start;
         }
+        .main-dashboard { min-width: 0; display: grid; gap: 18px; }
+        .chart-panel { min-height: 520px; }
+        .right-panel { min-width: 0; }
         .dashboard-grid {
           width: 100%;
           display: grid;
@@ -1407,12 +1443,13 @@ export default function App() {
         }
         .full-width-section { grid-column: 1 / -1; }
         @media (max-width: 900px) {
-          .desktop-dashboard { grid-template-columns: 1fr; }
+          .desktop-dashboard { grid-template-columns: 1fr; padding: 12px; }
           .left-sidebar, .right-panel { display: none !important; }
           .dashboard-grid { grid-template-columns: 1fr !important; }
           .app-container, .page-container, .dashboard-container { padding: 16px; }
           .home-feature-grid { grid-template-columns: 1fr !important; }
-          .tradepilot-chart-wrap { height: 280px !important; }
+          .chart-panel { min-height: 300px; }
+          .tradepilot-chart-wrap { height: 300px !important; }
         }
         .mobile-launch-button { display: none !important; }
         .mobile-menu-item { display: none !important; }
@@ -1645,6 +1682,7 @@ export default function App() {
             activePosition={activePosition}
             activateManualMode={activateManualMode}
             activateTradingViewMode={activateTradingViewMode}
+            applyAlert={applyAlert}
             brokerConnection={brokerConnection}
             dataSource={dataSource}
             discipline={discipline}
@@ -1808,7 +1846,7 @@ function DashboardFrame({
   return (
     <div className="desktop-dashboard">
       <DesktopSidebar activePage={activePage} setActivePage={setActivePage} setStreamerMode={setStreamerMode} />
-      <main style={styles.dashboardMain}>{children}</main>
+      <main className="main-dashboard" style={styles.dashboardMain}>{children}</main>
       <RightInsightsPanel
         brokerConnection={brokerConnection}
         discipline={discipline}
@@ -2153,7 +2191,7 @@ function AccountPage({ authMessage, isConfigured, layoutPrefs, onAuthOpen, sessi
         <p style={styles.cardLabel}>Free vs Pro Planning</p>
         <h2 style={styles.sectionTitle}>Pre-Release Access</h2>
         <PlanItem title="Free" text="Manual trade plan, saved profile, and basic journal." />
-        <PlanItem title="Pro Later" text="Live broker data, advanced chart, AI trade coach, analytics, TradingView webhook, and custom layouts." />
+        <PlanItem title="Pro Later" text="Live broker data, advanced chart, AI trade coach, analytics, TradingView Alerts, and custom layouts." />
         <PlanItem title="Payments" text="Not enabled yet." />
       </section>
       <section style={styles.card}>
@@ -2442,6 +2480,15 @@ function Dashboard({
   };
   const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
   const rewardRisk = getRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
+  const autoTradePlan = getAutoTradePlan({
+    accountSize: Number(profile.accountSize || 0),
+    contracts,
+    marketSpec,
+    maxRisk: Number(profile.maxRiskPerTrade || 0),
+    price,
+    resistance,
+    support,
+  });
   const chartData = useMemo(
     () => buildChartData({ price, entry, stop: engine.smartStop, support, resistance, trim1: engine.trim1, trim2: engine.trim2, runner: engine.runner }),
     [engine.runner, engine.smartStop, engine.trim1, engine.trim2, entry, price, resistance, support],
@@ -2546,6 +2593,7 @@ function Dashboard({
             <Metric label="Grade" value={`${tradeGrade.letter} ${tradeGrade.score}/100`} tone={tradeGrade.score >= 75 ? "good" : tradeGrade.score >= 55 ? "warn" : "bad"} />
           </div>
           <p style={styles.coachMessage}>{levelCoach.message}</p>
+          {autoTradePlan.noTrade ? <div style={styles.priceWarning}>{autoTradePlan.message}</div> : null}
           <p style={styles.muted}>{tradeGrade.reason}</p>
         </div> : null}
         <ManualLiveWorkflow
@@ -2591,6 +2639,11 @@ function Dashboard({
                 <Metric label="Reward/Risk" value={`${rewardRisk.ratio.toFixed(1)}R`} />
                 <Metric label="Trade Grade" tooltip={tooltipText.tradeScore} value={`${tradeGrade.letter} ${tradeGrade.score}/100`} />
               </div>
+              {!autoTradePlan.noTrade ? (
+                <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
+                  Auto plan: {autoTradePlan.direction.toUpperCase()} entry {autoTradePlan.entry.toFixed(2)}, stop {autoTradePlan.stop.toFixed(2)}, trims {autoTradePlan.trim1.toFixed(2)} / {autoTradePlan.trim2.toFixed(2)}, runner {autoTradePlan.runner.toFixed(2)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100.
+                </div>
+              ) : null}
               {missedEntry ? <div style={styles.missedEntry}>{missedEntry}</div> : null}
             </>
           ) : (
@@ -3012,8 +3065,8 @@ function ManualLiveWorkflow({
             style={{ ...styles.sourceButton, borderColor: dataSource === option ? "#38bdf8" : "#334155" }}
             type="button"
           >
-            <strong>{option}</strong>
-            <span>{option.includes("Tradovate") ? "Connect from Connections" : option === "TradingView Webhook" ? "Receive chart alerts" : "Works now"}</span>
+            <strong>{option === "TradingView Webhook" ? "Connect TradingView Alerts" : option}</strong>
+            <span>{option.includes("Tradovate") ? "Connect from Connections" : option === "TradingView Webhook" ? "Receive TradingView alerts" : "Works now"}</span>
           </button>
         ))}
       </div>
@@ -3031,7 +3084,7 @@ function ManualLiveWorkflow({
         <Field label="Account Size" type="number" value={accountSize} onChange={(value) => updateProfile("accountSize", value)} />
         <Field label="Daily P/L" type="number" value={dailyPnl} onChange={(value) => updateDiscipline("dailyPnl", value)} />
       </div>
-      <p style={{ ...styles.muted, marginTop: "12px" }}>TradingView can post to /api/webhook/tradingview. Tradovate prop/live stays read-only and falls back to manual if API access is unavailable.</p>
+      <p style={{ ...styles.muted, marginTop: "12px" }}>TradingView Alerts can post to /api/webhook/tradingview. Tradovate prop/live stays read-only and falls back to manual if API access is unavailable.</p>
     </section>
   );
 }
@@ -3310,7 +3363,7 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
 
   if (!clean.length) {
     return {
-      message: "Connect TradingView webhook or enter levels manually.",
+      message: "Add support/resistance manually or connect TradingView alerts.",
       middleZone: "",
       openRange: "",
       resistanceZone: formatOptionalPrice(fallback.resistance),
@@ -3447,6 +3500,44 @@ function getRewardRisk({ plan, pointValue }) {
     trim1Reward: rewardFor(plan.trim1 ?? plan.entry),
     trim2Reward: rewardFor(plan.trim2 ?? plan.entry),
     runnerReward,
+  };
+}
+
+function getAutoTradePlan({ accountSize, contracts, marketSpec, maxRisk, price, resistance, support }) {
+  const range = Math.max(1, resistance - support);
+  const lowerZone = support + range * 0.28;
+  const upperZone = resistance - range * 0.28;
+  if (price > lowerZone && price < upperZone) {
+    return {
+      noTrade: true,
+      message: "No trade. Price is mid-range. Wait for support, resistance, breakout, or retest.",
+    };
+  }
+
+  const isLong = price <= lowerZone;
+  const direction = isLong ? "long" : "short";
+  const entry = price;
+  const stop = isLong ? support - marketSpec.tickSize * 4 : resistance + marketSpec.tickSize * 4;
+  const riskPoints = Math.abs(entry - stop);
+  const trim1 = isLong ? entry + riskPoints : entry - riskPoints;
+  const trim2 = isLong ? entry + riskPoints * 2 : entry - riskPoints * 2;
+  const runner = isLong ? entry + riskPoints * 3 : entry - riskPoints * 3;
+  const riskDollars = riskPoints * marketSpec.pointValue * contracts;
+  const rewardDollars = Math.abs(runner - entry) * marketSpec.pointValue * contracts;
+  const score = Math.max(40, Math.min(96, Math.round(84 - Math.max(0, riskDollars - maxRisk) / Math.max(1, accountSize) * 1000)));
+
+  return {
+    contracts,
+    direction,
+    entry,
+    noTrade: false,
+    rewardRisk: rewardDollars / Math.max(1, riskDollars),
+    riskDollars,
+    runner,
+    score,
+    stop,
+    trim1,
+    trim2,
   };
 }
 
@@ -3762,7 +3853,7 @@ function getConnectionStatusLabel(connection) {
   if (connection.platform === "Tradovate Prop/Funded Read-Only") return "Prop/Funded Read-Only Connected";
   if (connection.platform === "Tradovate Live Read-Only") return "Live Read-Only Connected";
   if (connection.platform === "Tradovate Demo Read-Only") return "Demo Connected";
-  if (connection.platform === "TradingView Webhook") return "TradingView Connected";
+  if (connection.platform === "TradingView Webhook") return "TradingView Alerts Connected";
   return `${connection.platform} Connected`;
 }
 
@@ -3770,7 +3861,7 @@ function getConnectionStateMessage({ brokerConnection, dataSource, profile }) {
   const platform = brokerConnection?.platform || profile.fundedPlatform;
   if (platform === "Demo Broker" || dataSource === "Demo Broker") return "Demo Broker Connected - simulated data.";
   if (platform === "Manual Mode" || dataSource === "Manual Mode") return "Manual Mode Active - enter price and levels yourself.";
-  if (platform === "TradingView Webhook" || dataSource === "TradingView Webhook") return "Waiting for webhook data.";
+  if (platform === "TradingView Webhook" || dataSource === "TradingView Webhook") return "Waiting for TradingView alert data.";
   if (platform?.includes("Tradovate") || profile.fundedPlatform === "Tradovate") return "Tradovate API credentials are not configured yet. Add Vercel env vars first.";
   if (profile.accountType === "Funded/prop account") return "Funded account rules active. Broker data may still be manual unless API is connected.";
   return "Not connected. Choose a data source.";
@@ -3836,6 +3927,7 @@ function ConnectionsPage({
   activateManualMode,
   activateTradingViewMode,
   activePosition,
+  applyAlert,
   brokerConnection,
   dataSource,
   discipline,
@@ -3862,6 +3954,7 @@ function ConnectionsPage({
   const [brokerPlatform, setBrokerPlatform] = useState("Tradovate");
   const [brokerProvider, setBrokerProvider] = useState("Lucid Trading");
   const [hasTradovateApiAccess, setHasTradovateApiAccess] = useState(false);
+  const [tradingViewWizardOpen, setTradingViewWizardOpen] = useState(false);
   const [tradovateCredentials, setTradovateCredentials] = useState({
     appId: "trade-pilot",
     appVersion: "1.0",
@@ -3894,14 +3987,14 @@ function ConnectionsPage({
         "Normal broker login is not enough",
       ],
       security: isLucid
-        ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook."
-        : "Tradovate direct connection requires API credentials from Tradovate or your provider. Use Manual Mode or TradingView Webhook until enabled.",
+        ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts."
+        : "Tradovate direct connection requires API credentials from Tradovate or your provider. Use Manual Mode or TradingView Alerts until enabled.",
       tradingActionsEnabled: false,
     };
     setTradovateStatus(status);
     setTradovateDemoAuthStatus({
       connected: false,
-      error: isLucid ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook." : "API Access required. CID, SEC, and API password are required; normal login is not enough.",
+      error: isLucid ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts." : "API Access required. CID, SEC, and API password are required; normal login is not enough.",
       message: "API plan required",
     });
     notify?.("Tradovate API plan checked");
@@ -3913,8 +4006,8 @@ function ConnectionsPage({
 
   const connectUserTradovate = async () => {
     const missingCredentialsMessage = brokerProvider === "Lucid Trading"
-      ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook."
-      : "Missing API credentials. Use Manual Mode or TradingView Webhook until your provider enables API access.";
+      ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts."
+      : "Missing API credentials. Use Manual Mode or TradingView Alerts until your provider enables API access.";
     if (!hasTradovateApiAccess) {
       setTradovateDemoAuthStatus({ connected: false, error: missingCredentialsMessage, message: "API access required" });
       notify?.(missingCredentialsMessage);
@@ -3966,7 +4059,7 @@ function ConnectionsPage({
       notify?.("Tradovate Connected — Read-only mode active.");
       if (result.hasFunded) updateProfile("accountType", "Funded / Prop Firm Account");
     } catch (error) {
-      const message = error.message || "Tradovate API access is required for direct connection. Use Manual Mode or TradingView Webhook until enabled.";
+      const message = error.message || "Tradovate API access is required for direct connection. Use Manual Mode or TradingView Alerts until enabled.";
       setTradovateDemoAuthStatus({
         connected: false,
         error: message,
@@ -4005,9 +4098,35 @@ function ConnectionsPage({
       connected: false,
       error: "",
       manualFallback: true,
-      message: "TradingView Webhook setup active for Lucid. Live price, levels, bias, chart, and coach updates can come from webhook alerts.",
+      message: "TradingView Alerts setup active for Lucid. Live price, levels, bias, chart, and coach updates can come from alerts.",
     });
-    notify?.("TradingView Webhook setup active");
+    notify?.("TradingView Alerts setup active");
+  };
+
+  const openTradingViewWizard = () => {
+    setBrokerModalOpen(false);
+    activateTradingViewMode();
+    setTradingViewWizardOpen(true);
+  };
+
+  const sendTestTradingViewSignal = async (market = "NQ", timeframe = "5m") => {
+    const payload = {
+      symbol: market,
+      price: market.includes("ES") ? 6400.25 : 27500.25,
+      timeframe,
+      timestamp: "test",
+    };
+    try {
+      await fetch("/api/webhook/tradingview", {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+    } catch {
+      // Local dashboard still updates even if the deployed endpoint is unreachable.
+    }
+    applyAlert?.(payload);
+    notify?.("TradingView signal received.");
   };
 
   const disconnectUserTradovate = async () => {
@@ -4103,6 +4222,24 @@ function ConnectionsPage({
       <section style={styles.card}>
         <p style={styles.cardLabel}>Setup</p>
         <h2 style={styles.sectionTitle}>Choose a Connection Path</h2>
+        <div style={{ ...styles.sourceGrid, marginBottom: "16px" }}>
+          <button onClick={startDemoBroker} style={styles.sourceButton}>
+            <strong>Demo Mode</strong>
+            <span>Try simulated price, P/L, position, and chart data.</span>
+          </button>
+          <button onClick={activateManualMode} style={styles.sourceButton}>
+            <strong>Manual Mode</strong>
+            <span>Enter levels and P/L yourself.</span>
+          </button>
+          <button onClick={openTradingViewWizard} style={styles.sourceButton}>
+            <strong>Connect TradingView Alerts</strong>
+            <span>Set up alerts and send a test signal.</span>
+          </button>
+          <button onClick={() => setBrokerModalOpen(true)} style={styles.sourceButton}>
+            <strong>Connect Broker</strong>
+            <span>Advanced read-only broker connections.</span>
+          </button>
+        </div>
         <div style={styles.formGrid}>
           <SelectField label="Account Type" value={profile.accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
           <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
@@ -4115,10 +4252,10 @@ function ConnectionsPage({
             setBrokerModalOpen(true);
           }} style={styles.settingsButton}>Connect Broker</button>
           <button onClick={activateLucidManualMode} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
-          <button onClick={activateLucidTradingViewMode} style={styles.secondaryButton}>Set Up TradingView Webhook</button>
+          <button onClick={openTradingViewWizard} style={styles.secondaryButton}>Connect TradingView Alerts</button>
           <button onClick={activateManualMode} style={styles.dismissButton}>Use Manual Mode</button>
           <button onClick={startDemoBroker} style={styles.settingsButton}>Connect Demo Broker</button>
-          <button onClick={activateTradingViewMode} style={styles.dismissButton}>Use TradingView Webhook</button>
+          <button onClick={openTradingViewWizard} style={styles.dismissButton}>Connect TradingView Alerts</button>
           <button onClick={() => {
             setBrokerPlatform("Tradovate");
             setBrokerStep(4);
@@ -4145,7 +4282,7 @@ function ConnectionsPage({
         <div style={{ ...styles.coachPrompt, marginTop: "16px" }}>{connectionMessage}</div>
         {dataSource === "TradingView Webhook" ? (
           <div style={{ ...styles.subPanel, marginTop: "14px" }}>
-            <p style={styles.cardLabel}>Webhook</p>
+            <p style={styles.cardLabel}>Alert Message</p>
             <p style={styles.muted}>POST /api/webhook/tradingview. Required: symbol and price. Optional: support, resistance, bias, timeframe, timestamp.</p>
             <pre style={styles.sharePreview}>{JSON.stringify({
               symbol: "MNQ",
@@ -4185,7 +4322,7 @@ function ConnectionsPage({
         <h2 style={styles.sectionTitle}>Read-Only Platform Paths</h2>
         <div style={styles.sourceGrid}>
           <SourceOption title="Manual Funded Account" text="Track Lucid or other prop rules manually without broker API." active={isFunded && profile.fundedPlatform === "Manual Mode"} />
-          <SourceOption title="TradingView Webhook" text="Waits for alert payloads with symbol, price, support, resistance, and bias." active={dataSource === "TradingView Webhook"} />
+          <SourceOption title="Connect TradingView Alerts" text="Receives TradingView alerts with symbol, price, timeframe, support, resistance, and bias." active={dataSource === "TradingView Webhook"} />
           <SourceOption title="Tradovate API" text="Requires Tradovate API Access, API password, CID, and SEC." active={profile.fundedPlatform === "Tradovate"} />
           <SourceOption title="Demo Broker" text="Starts simulated MNQ price, position, account balance, and P/L immediately." active={brokerConnection.platform === "Demo Broker"} />
         </div>
@@ -4298,7 +4435,7 @@ function ConnectionsPage({
           <SourceOption title="Tradovate Demo API" text="Connect your own demo API credentials. Secrets are encrypted server-side." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "demo"} />
           <SourceOption title="Tradovate Prop/Funded API" text="Connect your own funded/eval API credentials. No trading actions are implemented." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "funded"} />
           <SourceOption title="Tradovate Live API" text="Connect your own live API credentials with order placement disabled." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "live"} />
-          <SourceOption title="TradingView Webhook" text="Accepts symbol, price, signal type, support, resistance, and timestamp." />
+          <SourceOption title="Connect TradingView Alerts" text="Accepts symbol and price, with optional timeframe, support, resistance, bias, entry, stop, and targets." />
           <SourceOption title="CSV Import" text="Reserved for trade-history review and coaching analytics." />
         </div>
       </section>
@@ -4306,10 +4443,10 @@ function ConnectionsPage({
       <section style={styles.card}>
         <p style={styles.cardLabel}>Phase 2</p>
         <h2 style={styles.sectionTitle}>Tradovate API Connection</h2>
-        <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Webhook or Manual Mode.</p>
+        <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Alerts or Manual Mode.</p>
         {brokerProvider === "Lucid Trading" || profile.fundedProvider === "Lucid Trading" ? (
           <div style={{ ...styles.priceWarning, marginTop: "12px" }}>
-            Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook.
+            Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts.
           </div>
         ) : null}
         <div style={{ ...styles.segmentGroup, marginTop: "14px" }}>
@@ -4329,7 +4466,7 @@ function ConnectionsPage({
             setBrokerModalOpen(true);
           }} style={styles.settingsButton}>Connect Tradovate</button>
           <button onClick={activateLucidManualMode} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
-          <button onClick={activateLucidTradingViewMode} style={styles.secondaryButton}>Set Up TradingView Webhook</button>
+          <button onClick={openTradingViewWizard} style={styles.secondaryButton}>Connect TradingView Alerts</button>
           <button onClick={checkTradovateReadOnly} style={styles.secondaryButton}>Check API Plan</button>
           <button onClick={disconnectUserTradovate} style={styles.secondaryButton}>Disconnect Tradovate</button>
         </div>
@@ -4338,9 +4475,9 @@ function ConnectionsPage({
         </p>
         <div style={{ ...styles.warningStack, marginTop: "14px" }}>
           <PlanItem title="Manual Funded Mode" text="Tracks daily loss, drawdown, max contracts, profit target, consistency rule, trade grade, and manual P/L without broker API access." />
-          <PlanItem title="TradingView Webhook" text="Feeds current price, support, resistance, bias, chart updates, and trade coach updates from alerts." />
+          <PlanItem title="Connect TradingView Alerts" text="Feeds current price, support, resistance, bias, chart updates, and trade coach updates from alerts." />
         </div>
-        <p style={{ ...styles.muted, marginTop: "12px" }}>If Tradovate API access is unavailable, use TradingView Webhook + Manual Mode. Trade Pilot will not block the dashboard.</p>
+        <p style={{ ...styles.muted, marginTop: "12px" }}>If Tradovate API access is unavailable, use TradingView Alerts + Manual Mode. Trade Pilot will not block the dashboard.</p>
         {tradovateStatus ? (
           <div style={{ ...styles.warningStack, marginTop: "16px" }}>
             <PlanItem title="Reads" text={(tradovateStatus.reads || tradovateStatus.capabilities || []).join(", ")} />
@@ -4379,7 +4516,7 @@ function ConnectionsPage({
           hasApiAccess={hasTradovateApiAccess}
           onAccountType={setTradovateAccountType}
           onActivateLucidManual={activateLucidManualMode}
-          onActivateTradingView={activateLucidTradingViewMode}
+          onActivateTradingView={openTradingViewWizard}
           onClose={() => setBrokerModalOpen(false)}
           onContinue={continueBrokerFlow}
           onCredential={updateTradovateCredential}
@@ -4390,7 +4527,120 @@ function ConnectionsPage({
           status={tradovateDemoAuthStatus}
         />
       ) : null}
+      {tradingViewWizardOpen ? (
+        <TradingViewAlertWizard
+          onClose={() => setTradingViewWizardOpen(false)}
+          onSendTest={sendTestTradingViewSignal}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function TradingViewAlertWizard({ onClose, onSendTest }) {
+  const [step, setStep] = useState(1);
+  const [market, setMarket] = useState("NQ");
+  const [timeframe, setTimeframe] = useState("5m");
+  const webhookUrl = "https://tradepilottool.com/api/webhook/tradingview";
+  const alertMessage = `{
+ "symbol": "{{ticker}}",
+ "price": {{close}},
+ "timeframe": "{{interval}}",
+ "timestamp": "{{timenow}}"
+}`;
+
+  const copyText = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Copy may be blocked in some browsers; visible text stays selectable.
+    }
+  };
+
+  return (
+    <div style={{ ...styles.modalBackdrop, zIndex: 60 }}>
+      <section style={styles.modal}>
+        <div style={styles.modalHeader}>
+          <div>
+            <p style={styles.cardLabel}>Connect TradingView Alerts</p>
+            <h2 style={styles.sectionTitle}>TradingView Setup</h2>
+          </div>
+          <button onClick={onClose} style={styles.dismissButton}>Close</button>
+        </div>
+        <div style={styles.segmentGroup}>
+          {[1, 2, 3, 4, 5].map((item) => (
+            <button key={item} onClick={() => setStep(item)} style={{ ...styles.segmentButton, background: step === item ? "#2563eb" : "#111827" }}>
+              Step {item}
+            </button>
+          ))}
+        </div>
+
+        {step === 1 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 1</p>
+            <h3 style={styles.sectionTitle}>Choose Market</h3>
+            <div style={styles.sourceGrid}>
+              {["NQ", "MNQ", "ES", "MES"].map((option) => (
+                <button key={option} onClick={() => setMarket(option)} style={{ ...styles.sourceButton, borderColor: market === option ? "#38bdf8" : "#334155" }}>
+                  <strong>{option}</strong>
+                  <span>{marketSpecs[option]?.displayName}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {step === 2 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 2</p>
+            <h3 style={styles.sectionTitle}>Choose Timeframe</h3>
+            <div style={styles.sourceGrid}>
+              {["1m", "5m", "15m"].map((option) => (
+                <button key={option} onClick={() => setTimeframe(option)} style={{ ...styles.sourceButton, borderColor: timeframe === option ? "#38bdf8" : "#334155" }}>
+                  <strong>{option}</strong>
+                  <span>TradingView alert timeframe</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {step === 3 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 3</p>
+            <h3 style={styles.sectionTitle}>Webhook URL</h3>
+            <pre style={styles.sharePreview}>{webhookUrl}</pre>
+            <button onClick={() => copyText(webhookUrl)} style={styles.settingsButton}>Copy URL</button>
+          </section>
+        ) : null}
+
+        {step === 4 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 4</p>
+            <h3 style={styles.sectionTitle}>Alert Message</h3>
+            <pre style={styles.sharePreview}>{alertMessage}</pre>
+            <button onClick={() => copyText(alertMessage)} style={styles.settingsButton}>Copy Alert Message</button>
+          </section>
+        ) : null}
+
+        {step === 5 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 5</p>
+            <h3 style={styles.sectionTitle}>Test and Open TradingView</h3>
+            <div style={styles.installBannerActions}>
+              <button onClick={() => onSendTest(market, timeframe)} style={styles.settingsButton}>Send Test Signal</button>
+              <button onClick={() => window.open("https://www.tradingview.com/chart/", "_blank", "noopener,noreferrer")} style={styles.secondaryButton}>Open TradingView</button>
+            </div>
+            <p style={{ ...styles.muted, marginTop: "12px" }}>The test signal updates the dashboard instantly with symbol and price only.</p>
+          </section>
+        ) : null}
+
+        <div style={{ ...styles.installBannerActions, marginTop: "18px" }}>
+          {step > 1 ? <button onClick={() => setStep((current) => current - 1)} style={styles.secondaryButton}>Back</button> : null}
+          {step < 5 ? <button onClick={() => setStep((current) => current + 1)} style={styles.settingsButton}>Continue</button> : null}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -4456,7 +4706,7 @@ function BrokerConnectModal({
                   onClick={() => onPlatform(platform)}
                   style={{ ...styles.sourceButton, borderColor: brokerPlatform === platform ? "#38bdf8" : "#334155" }}
                 >
-                  <strong>{platform}</strong>
+                  <strong>{platform === "TradingView Webhook" ? "Connect TradingView Alerts" : platform}</strong>
                   <span>{platform === "Tradovate" ? "Read-only API connection" : platform === "Manual Mode" || platform === "TradingView Webhook" ? "Works now" : "Coming soon"}</span>
                 </button>
               ))}
@@ -4504,7 +4754,7 @@ function BrokerConnectModal({
             </div>
             {brokerProvider === "Lucid Trading" ? (
               <div style={{ ...styles.priceWarning, marginTop: "14px" }}>
-                Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook.
+                Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts.
               </div>
             ) : null}
           </section>
@@ -4517,15 +4767,15 @@ function BrokerConnectModal({
             {brokerPlatform === "Tradovate" ? (
               <>
                 <h4 style={{ ...styles.sectionTitle, fontSize: "20px" }}>Tradovate API Connection</h4>
-                <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Webhook or Manual Mode.</p>
+                <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Alerts or Manual Mode.</p>
                 {brokerProvider === "Lucid Trading" ? (
                   <div style={{ ...styles.priceWarning, marginTop: "14px" }}>
-                    Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook.
+                    Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts.
                   </div>
                 ) : null}
                 <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
                   <button onClick={onActivateLucidManual} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
-                  <button onClick={onActivateTradingView} style={styles.secondaryButton}>Set Up TradingView Webhook</button>
+                  <button onClick={onActivateTradingView} style={styles.secondaryButton}>Connect TradingView Alerts</button>
                   <button onClick={() => onHasApiAccess(true)} style={hasApiAccess ? styles.settingsButton : styles.secondaryButton}>I Have Advanced API Credentials</button>
                 </div>
                 <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
@@ -4614,7 +4864,7 @@ function DataSourcePage({ applyAlert }) {
         <h2 style={styles.sectionTitle}>Read-Only Modes</h2>
         <div style={styles.sourceGrid}>
           <SourceOption title="Manual Mode" text="Use sliders and Fast Mode buttons during live execution." active />
-          <SourceOption title="TradingView Webhook" text="Webhook alerts can send symbol, price, timeframe, support, resistance, bias, and timestamp." />
+          <SourceOption title="Connect TradingView Alerts" text="Alerts can send symbol, price, timeframe, support, resistance, bias, and timestamp." />
           <SourceOption title="Market Data API" text="Uses the local read-only market server at 127.0.0.1:8787 for streaming prices." />
           <SourceOption title="Tradovate Prop/Funded Read-Only" text="Reads live prop account data when API access is enabled. No order placement." />
           <SourceOption title="CSV Upload" text="Planned manual trade-history import for review and coaching analytics." />
@@ -4638,9 +4888,9 @@ function DataSourcePage({ applyAlert }) {
       </section>
 
       <section style={styles.card}>
-        <p style={styles.cardLabel}>TradingView Webhook Mode</p>
+        <p style={styles.cardLabel}>Connect TradingView Alerts</p>
         <h2 style={styles.sectionTitle}>Local Preview</h2>
-        <p style={styles.muted}>Paste a sample alert payload to populate the dashboard.</p>
+        <p style={styles.muted}>Paste a sample alert message to populate the dashboard.</p>
         <textarea value={webhookText} onChange={(event) => setWebhookText(event.target.value)} style={styles.textArea} />
         <button onClick={applyWebhookPreview} style={styles.settingsButton}>Apply Alert Preview</button>
         <p style={{ ...styles.muted, marginTop: "12px" }}>{message}</p>
@@ -4984,7 +5234,7 @@ function SettingsPage({ applyAlert, profile, updateProfile }) {
         <PlanItem title="User Login" text="Reserved for future account identity and syncing." />
         <PlanItem title="Supabase Authentication" text="Can be added later without changing the local dashboard model." />
         <PlanItem title="Paid Subscriptions" text="Subscription gates can wrap premium pages and advanced analytics." />
-        <PlanItem title="TradingView Webhooks" text="The current preview payload is structured for later server-side webhook handling." />
+        <PlanItem title="TradingView Alerts" text="The current alert message is structured for server-side alert handling." />
         <PlanItem title="Broker Data Connections" text="Connections should remain read-only until safety, compliance, and user controls are complete." />
       </section>
     </main>
@@ -5230,7 +5480,7 @@ const styles = {
     boxSizing: "border-box",
     margin: 0,
     maxWidth: "none",
-    padding: "24px 32px",
+    padding: 0,
     width: "100%",
   },
   standaloneMain: {
@@ -5244,6 +5494,8 @@ const styles = {
     width: "100%",
   },
   dashboardMain: {
+    display: "grid",
+    gap: "18px",
     minWidth: 0,
     width: "100%",
   },
@@ -5330,17 +5582,20 @@ const styles = {
   },
   header: {
     alignItems: "center",
+    background: "rgba(2, 6, 23, .92)",
+    borderBottom: "1px solid #1e293b",
     display: "flex",
     gap: "18px",
-    justifyContent: "center",
-    marginBottom: "22px",
-    minHeight: "104px",
+    justifyContent: "space-between",
+    marginBottom: 0,
+    minHeight: "74px",
+    padding: "12px 18px",
     position: "relative",
     flexWrap: "wrap",
   },
   headerBrand: {
-    maxWidth: "720px",
-    textAlign: "center",
+    maxWidth: "760px",
+    textAlign: "left",
   },
   headerMeta: {
     color: "#cbd5e1",
@@ -5894,12 +6149,12 @@ const styles = {
     border: "1px solid #334155",
     borderRadius: "18px",
     marginBottom: "22px",
-    minHeight: "480px",
+    minHeight: "520px",
     padding: "22px",
     width: "100%",
   },
   chartWrap: {
-    height: "480px",
+    height: "520px",
     minWidth: 0,
   },
   chartNote: {
