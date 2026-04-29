@@ -3,6 +3,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -2556,28 +2557,6 @@ function Dashboard({
     resistance,
     support,
   });
-  const marketSpec = marketSpecs[profile.mainMarket] ?? marketSpecs.MNQ;
-  const visualPlan = plannedTrade ?? activePosition ?? {
-    contracts,
-    direction,
-    entry,
-    runner: engine.runner,
-    stop: engine.smartStop,
-    target: engine.runner,
-    trim1: engine.trim1,
-    trim2: engine.trim2,
-  };
-  const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
-  const rewardRisk = getRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
-  const autoTradePlan = getAutoTradePlan({
-    accountSize: Number(profile.accountSize || 0),
-    contracts,
-    marketSpec,
-    maxRisk: Number(profile.maxRiskPerTrade || 0),
-    price,
-    resistance,
-    support,
-  });
   const chartData = useMemo(
     () => buildChartData({ price, entry, stop: engine.smartStop, support, resistance, trim1: engine.trim1, trim2: engine.trim2, runner: engine.runner }),
     [engine.runner, engine.smartStop, engine.trim1, engine.trim2, entry, price, resistance, support],
@@ -2586,6 +2565,33 @@ function Dashboard({
     () => detectKeyLevelsFromCandles(chartDataToCandles(chartData), { entry, price, resistance, support }),
     [chartData, entry, price, resistance, support],
   );
+  const marketSpec = marketSpecs[profile.mainMarket] ?? marketSpecs.MNQ;
+  const autoTradePlan = getAutoTradePlan({
+    accountSize: Number(profile.accountSize || 0),
+    contracts,
+    dailyPnl: discipline.dailyPnl,
+    marketSpec,
+    maxContracts: Number(profile.maxContracts || contracts),
+    maxDailyLoss: Number(profile.maxDailyLoss || 0),
+    maxRisk: Number(profile.maxRiskPerTrade || 0),
+    price,
+    resistance,
+    support,
+    zoneDetection,
+  });
+  const visualPlan = plannedTrade ?? activePosition ?? (!autoTradePlan.noTrade ? autoTradePlan : {
+    contracts,
+    direction,
+    entry,
+    runner: engine.runner,
+    setupType: "Manual fallback",
+    stop: engine.smartStop,
+    target: engine.runner,
+    trim1: engine.trim1,
+    trim2: engine.trim2,
+  });
+  const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
+  const rewardRisk = getRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
   const tradeGrade = getTradeGrade({
     contracts: visualPlan.contracts ?? contracts,
     dailyPnl: discipline.dailyPnl,
@@ -2597,6 +2603,7 @@ function Dashboard({
     stop: visualPlan.stop,
     support,
     resistance,
+    zoneDetection,
   });
   const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
   const fundedWarnings = buildFundedRuleWarnings({
@@ -2609,9 +2616,9 @@ function Dashboard({
   });
   const simpleBias = engine.bias.includes("LONG") ? "LONG" : engine.bias.includes("SHORT") ? "SHORT" : "WAIT";
   const simpleAction = simpleBias === "LONG" ? "Look Long" : simpleBias === "SHORT" ? "Look Short" : "No trade";
-  const setupName = `${setupType} ${setupDirection}`;
-  const hasPlan = Boolean(plannedTrade || activePosition);
-  const liveCoach = getLiveCoachMessage({ activePosition, discipline, engine, price, profile, visualPlan });
+  const setupName = plannedTrade || activePosition ? `${setupType} ${setupDirection}` : "Auto Zone";
+  const hasPlan = Boolean(plannedTrade || activePosition || !autoTradePlan.noTrade);
+  const liveCoach = getLiveCoachMessage({ activePosition, autoTradePlan, discipline, engine, price, profile, tradeGrade, visualPlan });
   const riskStatus = engine.disciplineWarnings.some((warning) => warning.includes("Stop") || warning.includes("loss limit reached") || warning.includes("exceeded"))
     ? "Stop Trading"
     : engine.disciplineWarnings.some((warning) => warning.includes("Warning") || warning.includes("approaching") || warning.includes("High risk") || warning.includes("too large") || warning.includes("Contracts"))
@@ -2650,13 +2657,14 @@ function Dashboard({
         <TradeChartPanel
           chartData={chartData}
           currentPrice={price}
-          entry={entry}
-          runner={engine.runner}
-          stop={engine.smartStop}
-          support={support}
-          resistance={resistance}
-          trim1={engine.trim1}
-          trim2={engine.trim2}
+          entry={visualPlan.entry}
+          runner={visualPlan.runner ?? visualPlan.target}
+          stop={visualPlan.stop}
+          support={zoneDetection.supportLevel ?? support}
+          resistance={zoneDetection.resistanceLevel ?? resistance}
+          trim1={visualPlan.trim1}
+          trim2={visualPlan.trim2}
+          zoneDetection={zoneDetection}
         />
       </>
     );
@@ -2683,7 +2691,7 @@ function Dashboard({
           </div>
           <p style={styles.coachMessage}>{levelCoach.message}</p>
           {autoTradePlan.noTrade ? <div style={styles.priceWarning}>{autoTradePlan.message}</div> : null}
-          <p style={styles.muted}>{tradeGrade.reason}</p>
+          <p style={styles.muted}>{autoTradePlan.coachMessage || tradeGrade.reason}</p>
         </div> : null}
         <ManualLiveWorkflow
           accountSize={profile.accountSize}
@@ -2730,7 +2738,7 @@ function Dashboard({
               </div>
               {!autoTradePlan.noTrade ? (
                 <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
-                  Auto plan: {autoTradePlan.direction.toUpperCase()} entry {autoTradePlan.entry.toFixed(2)}, stop {autoTradePlan.stop.toFixed(2)}, trims {autoTradePlan.trim1.toFixed(2)} / {autoTradePlan.trim2.toFixed(2)}, runner {autoTradePlan.runner.toFixed(2)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100.
+                  Auto plan: {autoTradePlan.direction.toUpperCase()} entry {autoTradePlan.entry.toFixed(2)}, stop {autoTradePlan.stop.toFixed(2)}, trims {autoTradePlan.trim1.toFixed(2)} / {autoTradePlan.trim2.toFixed(2)}, runner {autoTradePlan.runner.toFixed(2)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100. {autoTradePlan.reason}
                 </div>
               ) : null}
               {missedEntry ? <div style={styles.missedEntry}>{missedEntry}</div> : null}
@@ -2761,13 +2769,14 @@ function Dashboard({
       {effectiveLayout.chart ? <TradeChartPanel
         chartData={chartData}
         currentPrice={price}
-        entry={entry}
-        runner={engine.runner}
-        stop={engine.smartStop}
-        support={support}
-        resistance={resistance}
-        trim1={engine.trim1}
-        trim2={engine.trim2}
+        entry={visualPlan.entry}
+        runner={visualPlan.runner ?? visualPlan.target}
+        stop={visualPlan.stop}
+        support={zoneDetection.supportLevel ?? support}
+        resistance={zoneDetection.resistanceLevel ?? resistance}
+        trim1={visualPlan.trim1}
+        trim2={visualPlan.trim2}
+        zoneDetection={zoneDetection}
       /> : null}
 
       <section style={styles.alphaMiddleGrid}>
@@ -3190,6 +3199,11 @@ function AutoZonePanel({ zoneDetection }) {
         <Metric label="Session High" value={formatOptionalPrice(zoneDetection.sessionHigh)} />
         <Metric label="Session Low" value={formatOptionalPrice(zoneDetection.sessionLow)} />
         <Metric label="Open Range" value={zoneDetection.openRange || "Pending"} />
+        <Metric label="Swing High" value={formatOptionalPrice(zoneDetection.recentHigh)} tone="warn" />
+        <Metric label="Swing Low" value={formatOptionalPrice(zoneDetection.pullbackSupport)} tone="good" />
+      </div>
+      <div style={{ ...styles.coachPrompt, marginTop: "12px" }}>
+        Rejection zones: highs {zoneDetection.repeatedRejectionHighs?.length ? zoneDetection.repeatedRejectionHighs.join(", ") : "none yet"} · lows {zoneDetection.repeatedRejectionLows?.length ? zoneDetection.repeatedRejectionLows.join(", ") : "none yet"}
       </div>
       <p style={{ ...styles.muted, marginTop: "12px" }}>{zoneDetection.message}</p>
     </section>
@@ -3479,16 +3493,24 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
     if (clean[index].low <= clean[index - 1].low && clean[index].low <= clean[index + 1].low) swingLows.push(clean[index].low);
   }
 
-  const supportLevel = averageNearest([fallback.support, priorLow, openRangeLow, ...swingLows].filter(Number.isFinite), fallback.price || clean.at(-1).close, "below");
-  const resistanceLevel = averageNearest([fallback.resistance, priorHigh, openRangeHigh, ...swingHighs].filter(Number.isFinite), fallback.price || clean.at(-1).close, "above");
+  const currentPrice = Number(fallback.price || clean.at(-1).close);
+  const rejectionPad = Math.max(1, (sessionHigh - sessionLow) * 0.018);
+  const rejectionHighs = findRepeatedRejectionLevels([...swingHighs, priorHigh, openRangeHigh, sessionHigh], rejectionPad);
+  const rejectionLows = findRepeatedRejectionLevels([...swingLows, priorLow, openRangeLow, sessionLow], rejectionPad);
+  const supportLevel = averageNearest([fallback.support, priorLow, openRangeLow, sessionLow, ...swingLows, ...rejectionLows].filter(Number.isFinite), currentPrice, "below");
+  const resistanceLevel = averageNearest([fallback.resistance, priorHigh, openRangeHigh, sessionHigh, ...swingHighs, ...rejectionHighs].filter(Number.isFinite), currentPrice, "above");
   const zonePad = Math.max(1, (sessionHigh - sessionLow) * 0.015);
   const middleLow = Number((supportLevel + (resistanceLevel - supportLevel) * 0.38).toFixed(2));
   const middleHigh = Number((supportLevel + (resistanceLevel - supportLevel) * 0.62).toFixed(2));
 
   return {
     breakoutLevel: resistanceLevel,
+    repeatedRejectionHighs,
+    repeatedRejectionLows,
     message: "Zones are estimated from recent swing highs/lows, repeated rejection areas, prior levels, session range, and opening range.",
     middleZone: `${middleLow.toFixed(2)} - ${middleHigh.toFixed(2)}`,
+    middleZoneHigh: middleHigh,
+    middleZoneLow: middleLow,
     openRange: `${openRangeLow.toFixed(2)} - ${openRangeHigh.toFixed(2)}`,
     openRangeHigh,
     openRangeLow,
@@ -3496,12 +3518,35 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
     priorLow,
     pullbackSupport: supportLevel,
     recentHigh: resistanceLevel,
+    resistanceLevel,
+    resistanceZoneHigh: Number((resistanceLevel + zonePad).toFixed(2)),
+    resistanceZoneLow: Number((resistanceLevel - zonePad).toFixed(2)),
     resistanceZone: `${(resistanceLevel - zonePad).toFixed(2)} - ${(resistanceLevel + zonePad).toFixed(2)}`,
     sessionHigh,
     sessionLow,
     source: "mock/manual candles",
+    supportLevel,
+    supportZoneHigh: Number((supportLevel + zonePad).toFixed(2)),
+    supportZoneLow: Number((supportLevel - zonePad).toFixed(2)),
     supportZone: `${(supportLevel - zonePad).toFixed(2)} - ${(supportLevel + zonePad).toFixed(2)}`,
   };
+}
+
+function findRepeatedRejectionLevels(levels = [], pad = 1) {
+  const clean = levels.filter(Number.isFinite).sort((a, b) => a - b);
+  const clusters = [];
+  clean.forEach((level) => {
+    const cluster = clusters.find((item) => Math.abs(item.average - level) <= pad);
+    if (cluster) {
+      cluster.values.push(level);
+      cluster.average = cluster.values.reduce((sum, value) => sum + value, 0) / cluster.values.length;
+    } else {
+      clusters.push({ average: level, values: [level] });
+    }
+  });
+  return clusters
+    .filter((cluster) => cluster.values.length >= 2)
+    .map((cluster) => Number(cluster.average.toFixed(2)));
 }
 
 function averageNearest(levels, price, side) {
@@ -3512,12 +3557,17 @@ function averageNearest(levels, price, side) {
   return Number((candidates.reduce((sum, level) => sum + level, 0) / Math.max(1, candidates.length)).toFixed(2));
 }
 
-function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss, price, rewardRisk, resistance, stop, support }) {
+function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss, price, rewardRisk, resistance, stop, support, zoneDetection = {} }) {
   const range = Math.max(1, Math.abs(resistance - support));
-  const nearSupport = Math.abs(entry - support) <= range * 0.2;
-  const nearResistance = Math.abs(entry - resistance) <= range * 0.2;
-  const middleEntry = entry > support + range * 0.35 && entry < resistance - range * 0.35;
+  const supportLevel = Number(zoneDetection.supportLevel ?? support);
+  const resistanceLevel = Number(zoneDetection.resistanceLevel ?? resistance);
+  const nearSupport = Math.abs(entry - supportLevel) <= range * 0.2;
+  const nearResistance = Math.abs(entry - resistanceLevel) <= range * 0.2;
+  const middleLow = Number(zoneDetection.middleZoneLow ?? support + range * 0.35);
+  const middleHigh = Number(zoneDetection.middleZoneHigh ?? resistance - range * 0.35);
+  const middleEntry = entry > middleLow && entry < middleHigh;
   const stopOutsideStructure = stop < support || stop > resistance;
+  const riskPoints = Math.abs(entry - stop);
   let score = 100;
   const reasons = [];
 
@@ -3528,6 +3578,10 @@ function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss,
   if (rewardRisk.ratio < 1.5) {
     score -= 18;
     reasons.push("risk/reward is thin");
+  }
+  if (riskPoints > range * 0.35) {
+    score -= 12;
+    reasons.push("stop size is wider than the setup");
   }
   if (!stopOutsideStructure) {
     score -= 14;
@@ -3556,7 +3610,7 @@ function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss,
     ? `${letter} grade: ${reasons[0]}.`
     : `${letter} grade: clean location, controlled risk, and plan is defined.`;
 
-  return { letter, reason, score: boundedScore };
+  return { letter, reason, score: boundedScore, reasons };
 }
 
 function formatOptionalPrice(value) {
@@ -3592,42 +3646,107 @@ function getRewardRisk({ plan, pointValue }) {
   };
 }
 
-function getAutoTradePlan({ accountSize, contracts, marketSpec, maxRisk, price, resistance, support }) {
-  const range = Math.max(1, resistance - support);
-  const lowerZone = support + range * 0.28;
-  const upperZone = resistance - range * 0.28;
-  if (price > lowerZone && price < upperZone) {
+function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxContracts, maxDailyLoss, maxRisk, price, resistance, support, zoneDetection = {} }) {
+  const supportLevel = Number(zoneDetection.supportLevel ?? support);
+  const resistanceLevel = Number(zoneDetection.resistanceLevel ?? resistance);
+  const supportZoneHigh = Number(zoneDetection.supportZoneHigh ?? supportLevel);
+  const resistanceZoneLow = Number(zoneDetection.resistanceZoneLow ?? resistanceLevel);
+  const range = Math.max(1, resistanceLevel - supportLevel);
+  const middleLow = Number(zoneDetection.middleZoneLow ?? supportLevel + range * 0.35);
+  const middleHigh = Number(zoneDetection.middleZoneHigh ?? resistanceLevel - range * 0.35);
+  const tick = Number(marketSpec.tickSize || 0.25);
+  const buffer = Math.max(tick * 8, range * 0.08);
+  const priceValue = Number(price);
+  const riskBudget = Math.max(1, Number(maxRisk || accountSize * 0.005 || 1));
+  const riskLocked = Number(dailyPnl) <= -Math.abs(Number(maxDailyLoss || 0)) * 0.8;
+  if (priceValue > middleLow && priceValue < middleHigh) {
     return {
       noTrade: true,
+      coachMessage: "No trade. Price is mid-range.",
       message: "No trade. Price is mid-range. Wait for support, resistance, breakout, or retest.",
+      reason: "Middle-zone entries usually offer poor location and unclear invalidation.",
+      score: 35,
     };
   }
 
-  const isLong = price <= lowerZone;
+  if (riskLocked) {
+    return {
+      noTrade: true,
+      coachMessage: "Risk too high. Lower contracts.",
+      message: "Daily loss protection is close. Stop trading or reduce size before taking another setup.",
+      reason: "Daily loss protection is close.",
+      score: 25,
+    };
+  }
+
+  const nearSupport = priceValue <= supportZoneHigh || Math.abs(priceValue - supportLevel) <= range * 0.18;
+  const nearResistance = priceValue >= resistanceZoneLow || Math.abs(priceValue - resistanceLevel) <= range * 0.18;
+  const isLong = nearSupport || (!nearResistance && priceValue > resistanceLevel);
   const direction = isLong ? "long" : "short";
-  const entry = price;
-  const stop = isLong ? support - marketSpec.tickSize * 4 : resistance + marketSpec.tickSize * 4;
+  const entry = roundToTick(isLong ? Math.max(priceValue, supportLevel) : Math.min(priceValue, resistanceLevel), tick);
+  const stop = roundToTick(isLong ? supportLevel - buffer : resistanceLevel + buffer, tick);
   const riskPoints = Math.abs(entry - stop);
-  const trim1 = isLong ? entry + riskPoints : entry - riskPoints;
-  const trim2 = isLong ? entry + riskPoints * 2 : entry - riskPoints * 2;
-  const runner = isLong ? entry + riskPoints * 3 : entry - riskPoints * 3;
+  const trim1 = roundToTick(isLong ? entry + riskPoints : entry - riskPoints, tick);
+  const trim2 = roundToTick(isLong ? Math.min(resistanceLevel, entry + riskPoints * 2) : Math.max(supportLevel, entry - riskPoints * 2), tick);
+  const runner = roundToTick(isLong ? Math.max(resistanceLevel, entry + riskPoints * 3) : Math.min(supportLevel, entry - riskPoints * 3), tick);
   const riskDollars = riskPoints * marketSpec.pointValue * contracts;
   const rewardDollars = Math.abs(runner - entry) * marketSpec.pointValue * contracts;
-  const score = Math.max(40, Math.min(96, Math.round(84 - Math.max(0, riskDollars - maxRisk) / Math.max(1, accountSize) * 1000)));
+  const rewardRisk = rewardDollars / Math.max(1, riskDollars);
+  const tooManyContracts = Number(contracts) > Number(maxContracts || contracts);
+  const accountRiskPercent = accountSize > 0 ? (riskDollars / accountSize) * 100 : 0;
+  let score = 88;
+  const reasons = [];
+  if (!nearSupport && !nearResistance) {
+    score -= 18;
+    reasons.push("wait for retest");
+  }
+  if (riskDollars > riskBudget) {
+    score -= 18;
+    reasons.push("risk too high");
+  }
+  if (rewardRisk < 1.8) {
+    score -= 14;
+    reasons.push("reward/risk is thin");
+  }
+  if (tooManyContracts) {
+    score -= 18;
+    reasons.push("lower contracts");
+  }
+  if (accountRiskPercent > 1) {
+    score -= 8;
+    reasons.push("account risk is elevated");
+  }
+  score = Math.max(30, Math.min(96, Math.round(score)));
+  const setupLocation = isLong ? "near support" : "near resistance";
+  const coachMessage = reasons.includes("risk too high")
+    ? "Risk too high. Lower contracts."
+    : reasons.includes("wait for retest")
+      ? "Wait for retest."
+      : isLong
+        ? "Potential long setup near support."
+        : "Potential short setup near resistance.";
 
   return {
     contracts,
+    coachMessage,
     direction,
     entry,
     noTrade: false,
-    rewardRisk: rewardDollars / Math.max(1, riskDollars),
+    reason: reasons.length ? reasons.join("; ") : `Clean ${setupLocation} with defined risk.`,
+    rewardRisk,
     riskDollars,
     runner,
     score,
+    setupType: "Auto zone plan",
     stop,
     trim1,
     trim2,
   };
+}
+
+function roundToTick(value, tick = 0.25) {
+  const size = Number(tick) || 0.25;
+  return Number((Math.round(Number(value) / size) * size).toFixed(2));
 }
 
 function TradeLadder({ currentPrice, plan }) {
@@ -3736,10 +3855,12 @@ function buildChartData({ price, entry, stop, support, resistance, trim1, trim2,
   });
 }
 
-function getLiveCoachMessage({ activePosition, discipline, engine, price, profile, visualPlan }) {
+function getLiveCoachMessage({ activePosition, autoTradePlan, discipline, engine, price, profile, tradeGrade, visualPlan }) {
   if (discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss)) return "Daily loss limit reached. Stop trading.";
+  if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message;
   if (!visualPlan?.entry || !visualPlan?.stop) return "No active trade plan. Define entry, stop, and targets first.";
   if ((activePosition?.contracts || visualPlan.contracts || 0) > profile.maxContracts) return "High risk size detected. Reduce contracts.";
+  if (tradeGrade?.score < 55) return "Risk too high. Lower contracts or wait for a cleaner level.";
 
   const isLong = (activePosition?.direction || visualPlan.direction) !== "short";
   const stopHit = isLong ? price <= visualPlan.stop : price >= visualPlan.stop;
@@ -3747,12 +3868,19 @@ function getLiveCoachMessage({ activePosition, discipline, engine, price, profil
 
   if (stopHit) return "Stop area reached. Respect your plan.";
   if (trim1Hit) return "Trim 1 reached. Consider taking partial profit.";
+  if (autoTradePlan?.coachMessage) return autoTradePlan.coachMessage;
   if (engine.bias.includes("WAIT")) return "Price is mid-range. Wait for support, resistance, or breakout.";
   return engine.autoCoaching[0] || "Hold plan. Let price reach a decision level.";
 }
 
-function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support, resistance, trim1, trim2 }) {
+function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support, resistance, trim1, trim2, zoneDetection = {} }) {
   const safeChartData = chartData?.length ? chartData : buildChartData({ price: currentPrice, entry, stop, support, resistance, trim1, trim2, runner });
+  const supportLow = Number(zoneDetection.supportZoneLow ?? support);
+  const supportHigh = Number(zoneDetection.supportZoneHigh ?? support);
+  const resistanceLow = Number(zoneDetection.resistanceZoneLow ?? resistance);
+  const resistanceHigh = Number(zoneDetection.resistanceZoneHigh ?? resistance);
+  const middleLow = Number(zoneDetection.middleZoneLow);
+  const middleHigh = Number(zoneDetection.middleZoneHigh);
   return (
     <section className="chart-panel" style={styles.chartPanel}>
       <div style={styles.sectionHeader}>
@@ -3769,6 +3897,15 @@ function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support
             <XAxis dataKey="label" hide />
             <YAxis domain={["dataMin - 12", "dataMax + 12"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={64} />
             <Tooltip contentStyle={{ background: "#020617", border: "1px solid #334155", borderRadius: "10px", color: "#f8fafc" }} />
+            {Number.isFinite(supportLow) && Number.isFinite(supportHigh) ? (
+              <ReferenceArea y1={supportLow} y2={supportHigh} fill="#14b8a6" fillOpacity={0.16} strokeOpacity={0} />
+            ) : null}
+            {Number.isFinite(resistanceLow) && Number.isFinite(resistanceHigh) ? (
+              <ReferenceArea y1={resistanceLow} y2={resistanceHigh} fill="#f97316" fillOpacity={0.14} strokeOpacity={0} />
+            ) : null}
+            {Number.isFinite(middleLow) && Number.isFinite(middleHigh) ? (
+              <ReferenceArea y1={middleLow} y2={middleHigh} fill="#64748b" fillOpacity={0.08} strokeOpacity={0} />
+            ) : null}
             <Line type="monotone" dataKey="close" stroke="#f8fafc" strokeWidth={3} dot={false} isAnimationActive={false} />
             <ReferenceLine y={currentPrice} label="Price" stroke="#facc15" strokeWidth={2} />
             <ReferenceLine y={entry} label="Entry" stroke="#3b82f6" strokeWidth={2} />
