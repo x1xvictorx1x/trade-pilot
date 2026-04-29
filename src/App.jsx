@@ -4348,19 +4348,40 @@ function ConnectionsPage({
       timeframe: "5",
       timestamp: new Date().toISOString(),
     };
+    const isLocalhost = typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+    const apiBase = isLocalhost ? "https://tradepilottool.com" : "";
+    const fetchJsonWithTimeout = async (url, options = {}) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(`${apiBase}${url}`, {
+          ...options,
+          signal: controller.signal,
+        });
+        const text = await response.text();
+        let result;
+        try {
+          result = text ? JSON.parse(text) : {};
+        } catch {
+          throw new Error("Webhook returned an unreadable response.");
+        }
+        return { response, result };
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    };
+
     try {
-      const response = await fetch("/api/webhook/tradingview", {
+      const { response, result } = await fetchJsonWithTimeout("/api/webhook/tradingview", {
         body: JSON.stringify(payload),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       });
-      const result = await response.json();
       console.log("test signal POST result", result);
       if (!response.ok || result.ok === false) throw new Error(result.error || "TradingView webhook error");
-      const latestResponse = await fetch("/api/webhook/tradingview/latest", {
+      const { response: latestResponse, result: latest } = await fetchJsonWithTimeout("/api/webhook/tradingview/latest", {
         headers: { Accept: "application/json" },
       });
-      const latest = await latestResponse.json();
       console.log("latest signal", latest);
       if (!latestResponse.ok || latest.ok === false) throw new Error(latest.error || "Latest TradingView signal unavailable");
       if (!latest.signal) throw new Error("Latest TradingView signal was empty");
@@ -4378,8 +4399,10 @@ function ConnectionsPage({
       notify?.("TradingView test signal received.", "success");
       return true;
     } catch (error) {
+      const message = error.name === "AbortError" ? "Test signal timed out. Check your connection and try again." : error.message || "TradingView webhook error";
+      console.log("test signal failed", message);
       setWebhookDebug({
-        error: error.message || "TradingView webhook error",
+        error: message,
         price: "",
         received: "No",
         symbol: payload.symbol,
@@ -4819,6 +4842,7 @@ function TradingViewAlertWizard({ onClose, onSendTest }) {
   const [market, setMarket] = useState("NQ");
   const [timeframe, setTimeframe] = useState("5m");
   const [sendingTest, setSendingTest] = useState(false);
+  const [testStatus, setTestStatus] = useState("");
   const webhookUrl = "https://tradepilottool.com/api/webhook/tradingview";
   const alertMessage = `{
  "symbol": "{{ticker}}",
@@ -4838,8 +4862,10 @@ function TradingViewAlertWizard({ onClose, onSendTest }) {
   const handleSendTest = async () => {
     if (sendingTest) return;
     setSendingTest(true);
+    setTestStatus("Sending test signal...");
     try {
-      await onSendTest(market, timeframe);
+      const ok = await onSendTest(market, timeframe);
+      setTestStatus(ok ? "TradingView test signal received." : "Test signal failed. Check the debug panel below Connections.");
     } finally {
       setSendingTest(false);
     }
@@ -4921,6 +4947,9 @@ function TradingViewAlertWizard({ onClose, onSendTest }) {
               </button>
               <button onClick={() => window.open("https://www.tradingview.com/chart/", "_blank", "noopener,noreferrer")} style={styles.secondaryButton}>Open TradingView</button>
             </div>
+            {testStatus ? (
+              <div style={{ ...styles.coachPrompt, marginTop: "12px" }}>{testStatus}</div>
+            ) : null}
             <p style={{ ...styles.muted, marginTop: "12px" }}>The test signal updates the dashboard instantly with symbol and price only.</p>
           </section>
         ) : null}
