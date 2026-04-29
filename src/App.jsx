@@ -4203,6 +4203,11 @@ function formatOptionalPrice(value) {
   return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "Pending";
 }
 
+function fmt(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "Pending";
+}
+
 function getMissedEntryMessage({ currentPrice, plan }) {
   if (!plan?.entry || !plan?.direction) return "";
   const threshold = 20;
