@@ -2579,7 +2579,7 @@ function Dashboard({
     support,
     zoneDetection,
   });
-  const visualPlan = plannedTrade ?? activePosition ?? (!autoTradePlan.noTrade ? autoTradePlan : {
+  const fallbackPlan = {
     contracts,
     direction,
     entry,
@@ -2589,7 +2589,8 @@ function Dashboard({
     target: engine.runner,
     trim1: engine.trim1,
     trim2: engine.trim2,
-  });
+  };
+  const visualPlan = normalizeTradePlan(plannedTrade ?? activePosition ?? (!autoTradePlan.noTrade ? autoTradePlan : fallbackPlan), fallbackPlan);
   const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
   const rewardRisk = getRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
   const tradeGrade = getTradeGrade({
@@ -3644,6 +3645,36 @@ function getRewardRisk({ plan, pointValue }) {
     trim2Reward: rewardFor(plan.trim2 ?? plan.entry),
     runnerReward,
   };
+}
+
+function normalizeTradePlan(plan = {}, fallback = {}) {
+  const direction = plan.direction === "short" ? "short" : "long";
+  const entry = safeNumber(plan.entry, fallback.entry, 0);
+  const stop = safeNumber(plan.stop, fallback.stop, direction === "long" ? entry - 10 : entry + 10);
+  const riskPoints = Math.max(1, Math.abs(entry - stop));
+  const trim1 = safeNumber(plan.trim1, fallback.trim1, direction === "long" ? entry + riskPoints * 1.25 : entry - riskPoints * 1.25);
+  const trim2 = safeNumber(plan.trim2, fallback.trim2, direction === "long" ? entry + riskPoints * 2 : entry - riskPoints * 2);
+  const runner = safeNumber(plan.runner, plan.target, fallback.runner, fallback.target, direction === "long" ? entry + riskPoints * 3 : entry - riskPoints * 3);
+  return {
+    ...fallback,
+    ...plan,
+    contracts: safeNumber(plan.contracts, fallback.contracts, 1),
+    direction,
+    entry,
+    runner,
+    stop,
+    target: safeNumber(plan.target, runner),
+    trim1,
+    trim2,
+  };
+}
+
+function safeNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return 0;
 }
 
 function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxContracts, maxDailyLoss, maxRisk, price, resistance, support, zoneDetection = {} }) {
