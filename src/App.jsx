@@ -257,6 +257,82 @@ const defaultLayout = {
   score: true,
   tradePlan: true,
   watchlist: true,
+  cardOrder: ["coach", "tradePlan", "chart", "risk", "propFirmRules", "journal", "watchlist", "alerts", "performanceStats"],
+};
+
+const dashboardCardOptions = [
+  ["coach", "Trade Coach"],
+  ["tradePlan", "Trade Plan"],
+  ["chart", "Chart"],
+  ["risk", "Risk Guard"],
+  ["propFirmRules", "Prop Firm Rules"],
+  ["journal", "Journal"],
+  ["watchlist", "Watchlist"],
+  ["alerts", "Alerts"],
+  ["performanceStats", "Performance Stats"],
+];
+
+const layoutModePresets = {
+  Simple: {
+    alerts: false,
+    cardOrder: ["coach", "tradePlan", "risk"],
+    chart: false,
+    coach: true,
+    journal: false,
+    performanceStats: false,
+    propFirmRules: false,
+    risk: true,
+    tradePlan: true,
+    watchlist: false,
+  },
+  Pro: {
+    alerts: true,
+    cardOrder: ["chart", "coach", "tradePlan", "risk", "watchlist", "alerts", "performanceStats"],
+    chart: true,
+    coach: true,
+    journal: false,
+    performanceStats: true,
+    propFirmRules: false,
+    risk: true,
+    tradePlan: true,
+    watchlist: true,
+  },
+  Streamer: {
+    alerts: false,
+    cardOrder: ["chart", "coach", "tradePlan", "risk"],
+    chart: true,
+    coach: true,
+    journal: false,
+    performanceStats: false,
+    propFirmRules: false,
+    risk: true,
+    tradePlan: true,
+    watchlist: false,
+  },
+  "Prop Firm": {
+    alerts: false,
+    cardOrder: ["propFirmRules", "risk", "tradePlan", "coach"],
+    chart: false,
+    coach: true,
+    journal: false,
+    performanceStats: false,
+    propFirmRules: true,
+    risk: true,
+    tradePlan: true,
+    watchlist: false,
+  },
+  "Journal Focus": {
+    alerts: false,
+    cardOrder: ["journal", "performanceStats", "tradePlan", "coach"],
+    chart: false,
+    coach: true,
+    journal: true,
+    performanceStats: true,
+    propFirmRules: false,
+    risk: false,
+    tradePlan: true,
+    watchlist: false,
+  },
 };
 
 function profileToDatabase(profile, user, streamerMode) {
@@ -1733,6 +1809,7 @@ export default function App() {
             journalEntries={journalEntries}
             layoutPrefs={layoutPrefs}
             lastUpdated={lastUpdated}
+            notify={notify}
             price={price}
             priceStatus={priceStatus}
             plannedTrade={plannedTrade}
@@ -2066,19 +2143,23 @@ function RightInsightsPanel({ brokerConnection, discipline, engine, journalEntri
   );
 }
 
-function CustomizeDashboardPanel({ layoutPrefs, setLayoutPrefs }) {
+function CustomizeDashboardPanel({ layoutPrefs, notify, setLayoutPrefs }) {
   const modeOptions = ["Simple", "Pro", "Streamer", "Prop Firm", "Journal Focus"];
-  const cardToggles = [
-    ["coach", "Trade Coach"],
-    ["tradePlan", "Trade Plan"],
-    ["chart", "Chart"],
-    ["risk", "Risk Guard"],
-    ["propFirmRules", "Prop Firm Rules"],
-    ["journal", "Journal"],
-    ["watchlist", "Watchlist"],
-    ["alerts", "Alerts"],
-    ["performanceStats", "Performance Stats"],
-  ];
+  const cardToggles = dashboardCardOptions;
+  const cardOrder = normalizeCardOrder(layoutPrefs.cardOrder);
+  const applyMode = (mode) => {
+    setLayoutPrefs((current) => ({ ...current, ...layoutModePresets[mode], mode }));
+    notify?.("Dashboard layout updated.", "success");
+  };
+  const moveCard = (key, direction) => {
+    const index = cardOrder.indexOf(key);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= cardOrder.length) return;
+    const nextOrder = [...cardOrder];
+    [nextOrder[index], nextOrder[nextIndex]] = [nextOrder[nextIndex], nextOrder[index]];
+    setLayoutPrefs((current) => ({ ...current, cardOrder: nextOrder }));
+    notify?.("Dashboard layout updated.", "success");
+  };
 
   return (
     <section style={styles.card}>
@@ -2088,7 +2169,7 @@ function CustomizeDashboardPanel({ layoutPrefs, setLayoutPrefs }) {
         label="Layout Mode"
         value={layoutPrefs.mode || "Pro"}
         options={modeOptions}
-        onChange={(value) => setLayoutPrefs((current) => ({ ...current, mode: value }))}
+        onChange={applyMode}
       />
       <div style={{ ...styles.formGrid, marginTop: "16px" }}>
         {cardToggles.map(([key, label]) => (
@@ -2096,11 +2177,46 @@ function CustomizeDashboardPanel({ layoutPrefs, setLayoutPrefs }) {
             <input
               type="checkbox"
               checked={layoutPrefs[key] !== false}
-              onChange={(event) => setLayoutPrefs((current) => ({ ...current, [key]: event.target.checked }))}
+              onChange={(event) => {
+                setLayoutPrefs((current) => ({ ...current, [key]: event.target.checked }));
+                notify?.("Dashboard layout updated.", "success");
+              }}
             />
             {label}
           </label>
         ))}
+      </div>
+      <div style={{ ...styles.warningStack, marginTop: "16px" }}>
+        {cardOrder.map((key, index) => {
+          const label = cardToggles.find(([value]) => value === key)?.[1] || key;
+          return (
+            <div
+              draggable
+              key={key}
+              onDragStart={(event) => event.dataTransfer.setData("text/plain", key)}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                const dragged = event.dataTransfer.getData("text/plain");
+                const from = cardOrder.indexOf(dragged);
+                const to = cardOrder.indexOf(key);
+                if (from < 0 || to < 0 || from === to) return;
+                const nextOrder = [...cardOrder];
+                nextOrder.splice(from, 1);
+                nextOrder.splice(to, 0, dragged);
+                setLayoutPrefs((current) => ({ ...current, cardOrder: nextOrder }));
+                notify?.("Dashboard layout updated.", "success");
+              }}
+              style={styles.draggableCardRow}
+            >
+              <span>{index + 1}. {label}</span>
+              <span style={styles.inlineActions}>
+                <button type="button" onClick={() => moveCard(key, -1)} style={styles.miniButton}>Up</button>
+                <button type="button" onClick={() => moveCard(key, 1)} style={styles.miniButton}>Down</button>
+              </span>
+            </div>
+          );
+        })}
       </div>
       <p style={{ ...styles.muted, marginTop: "12px" }}>Preferences save locally and sync to Supabase when signed in.</p>
     </section>
@@ -2430,65 +2546,14 @@ function AuthModal({ authMessage, initialMode, isConfigured, onClose, onSignedIn
 
 function getEffectiveLayout(layoutPrefs = {}) {
   const mode = layoutPrefs.mode || "Pro";
-  const modeDefaults = {
-    Simple: {
-      alerts: false,
-      chart: false,
-      coach: true,
-      journal: false,
-      performanceStats: false,
-      propFirmRules: false,
-      risk: true,
-      tradePlan: true,
-      watchlist: false,
-    },
-    Pro: {
-      alerts: true,
-      chart: true,
-      coach: true,
-      journal: true,
-      performanceStats: true,
-      propFirmRules: true,
-      risk: true,
-      tradePlan: true,
-      watchlist: true,
-    },
-    Streamer: {
-      alerts: false,
-      chart: true,
-      coach: true,
-      journal: false,
-      performanceStats: false,
-      propFirmRules: false,
-      risk: true,
-      tradePlan: true,
-      watchlist: false,
-    },
-    "Prop Firm": {
-      alerts: true,
-      chart: true,
-      coach: true,
-      journal: true,
-      performanceStats: true,
-      propFirmRules: true,
-      risk: true,
-      tradePlan: true,
-      watchlist: true,
-    },
-    "Journal Focus": {
-      alerts: true,
-      chart: false,
-      coach: true,
-      journal: true,
-      performanceStats: true,
-      propFirmRules: false,
-      risk: true,
-      tradePlan: true,
-      watchlist: false,
-    },
-  };
+  const preset = layoutModePresets[mode] || layoutModePresets.Pro;
+  return { ...defaultLayout, ...preset, ...layoutPrefs, cardOrder: normalizeCardOrder(layoutPrefs.cardOrder || preset.cardOrder) };
+}
 
-  return { ...defaultLayout, ...(modeDefaults[mode] || modeDefaults.Pro), ...layoutPrefs };
+function normalizeCardOrder(order = []) {
+  const known = dashboardCardOptions.map(([key]) => key);
+  const clean = Array.isArray(order) ? order.filter((key) => known.includes(key)) : [];
+  return [...clean, ...known.filter((key) => !clean.includes(key))];
 }
 
 function Dashboard({
@@ -2507,6 +2572,7 @@ function Dashboard({
   journalEntries,
   layoutPrefs,
   lastUpdated,
+  notify,
   price,
   priceStatus,
   plannedTrade,
@@ -2640,7 +2706,59 @@ function Dashboard({
     setJournalNote("");
   };
 
-  if (streamerMode) {
+  const cardOrder = normalizeCardOrder(effectiveLayout.cardOrder);
+  const dashboardCards = {
+    alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={zoneDetection} /> : null,
+    chart: effectiveLayout.chart ? <TradeChartPanel
+      chartData={chartData}
+      currentPrice={price}
+      entry={visualPlan.entry}
+      runner={visualPlan.runner ?? visualPlan.target}
+      stop={visualPlan.stop}
+      support={zoneDetection.supportLevel ?? support}
+      resistance={zoneDetection.resistanceLevel ?? resistance}
+      trim1={visualPlan.trim1}
+      trim2={visualPlan.trim2}
+      zoneDetection={zoneDetection}
+    /> : null,
+    coach: effectiveLayout.coach ? <div style={styles.coachCard}>
+      <p style={styles.cardLabel}>Trade Coach</p>
+      <div style={styles.coachGrid}>
+        <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={simpleBias === "WAIT" ? "warn" : "good"} />
+        <Metric label="Market" value={profile.mainMarket} />
+        <Metric label="Action" value={levelCoach.action === "WAIT" ? simpleAction : levelCoach.action} tone={simpleBias === "WAIT" ? "warn" : "good"} />
+        <Metric label="Grade" value={`${tradeGrade.letter} ${tradeGrade.score}/100`} tone={tradeGrade.score >= 75 ? "good" : tradeGrade.score >= 55 ? "warn" : "bad"} />
+      </div>
+      <p style={styles.coachMessage}>{levelCoach.message}</p>
+      {autoTradePlan.noTrade ? <div style={styles.priceWarning}>{autoTradePlan.message}</div> : null}
+      <p style={styles.muted}>{autoTradePlan.coachMessage || tradeGrade.reason}</p>
+    </div> : null,
+    journal: effectiveLayout.journal ? <section style={styles.card}>
+      <p style={styles.cardLabel}>Journal</p>
+      <h2 style={styles.sectionTitle}>Notes and Trade History</h2>
+      <form onSubmit={saveDashboardNote}>
+        <textarea
+          style={styles.textArea}
+          value={journalNote}
+          onChange={(event) => setJournalNote(event.target.value)}
+          placeholder="What did you see? What will you do next?"
+        />
+        <button style={styles.settingsButton}>Save Note</button>
+      </form>
+      <div style={{ ...styles.warningStack, marginTop: "14px" }}>
+        {(journalEntries.length ? journalEntries.slice(0, 4) : [{ id: "empty", stamp: new Date().toISOString(), note: "No journal entries yet." }]).map((item) => (
+          <PlanItem key={item.id || item.stamp} title={item.stamp ? new Date(item.stamp).toLocaleString() : "Journal"} text={item.note || "Saved trade note"} />
+        ))}
+      </div>
+    </section> : null,
+    performanceStats: effectiveLayout.performanceStats ? <PerformanceStatsCard discipline={discipline} journalEntries={journalEntries} tradeGrade={tradeGrade} /> : null,
+    propFirmRules: effectiveLayout.propFirmRules ? <PropFirmRulesCard fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} /> : null,
+    risk: effectiveLayout.risk ? <RiskGuardCard discipline={discipline} fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} riskStatus={riskStatus} /> : null,
+    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard autoTradePlan={autoTradePlan} hasPlan={hasPlan} missedEntry={missedEntry} profile={profile} rewardRisk={rewardRisk} setupName={setupName} tradeGrade={tradeGrade} visualPlan={visualPlan} /> : null,
+    watchlist: effectiveLayout.watchlist ? <WatchlistCard price={price} profile={profile} watchlist={watchlist} /> : null,
+  };
+
+  if (streamerMode || effectiveLayout.mode === "Streamer") {
     return (
       <>
         <LivestreamDashboard
@@ -2679,8 +2797,19 @@ function Dashboard({
         <span style={styles.muted}>Layout: {layoutPrefs.mode || "Pro"}</span>
       </section>
       {customizeOpen ? (
-        <CustomizeDashboardPanel layoutPrefs={layoutPrefs} setLayoutPrefs={setLayoutPrefs} />
+        <CustomizeDashboardPanel layoutPrefs={layoutPrefs} notify={notify} setLayoutPrefs={setLayoutPrefs} />
       ) : null}
+      <section
+        className={`dashboard-card-board mode-${String(effectiveLayout.mode || "Pro").toLowerCase().replace(/\s+/g, "-")}`}
+        style={styles.dashboardCardBoard}
+      >
+        {cardOrder.map((key) => dashboardCards[key] ? (
+          <div key={key} style={{ ...styles.dashboardCardSlot, gridColumn: key === "chart" || (effectiveLayout.mode === "Streamer" && key === "coach") ? "1 / -1" : undefined }}>
+            {dashboardCards[key]}
+          </div>
+        ) : null)}
+      </section>
+      {false ? <>
       <section className="dashboard-grid" style={styles.dashboardGrid}>
         {effectiveLayout.coach ? <div style={styles.coachCard}>
           <p style={styles.cardLabel}>Trade Coach</p>
@@ -2823,6 +2952,7 @@ function Dashboard({
         {effectiveLayout.alerts ? <AutoZonePanel zoneDetection={zoneDetection} /> : null}
         {effectiveLayout.propFirmRules ? <FundedManualPanel profile={profile} updateProfile={updateProfile} /> : null}
       </section>
+      </> : null}
 
       <button onClick={() => setAdvancedOpen((value) => !value)} style={styles.advancedToggle}>
         Advanced Tools {advancedOpen ? "Hide" : "Show"}
@@ -3214,6 +3344,116 @@ function AutoZonePanel({ zoneDetection }) {
         Rejection zones: highs {repeatedRejectionHighs.length ? repeatedRejectionHighs.join(", ") : "none yet"} · lows {repeatedRejectionLows.length ? repeatedRejectionLows.join(", ") : "none yet"}
       </div>
       <p style={{ ...styles.muted, marginTop: "12px" }}>{zoneDetection.message}</p>
+    </section>
+  );
+}
+
+function TradePlanCard({ autoTradePlan, hasPlan, missedEntry, profile, rewardRisk, setupName, tradeGrade, visualPlan }) {
+  return (
+    <section style={styles.tradePlanHero}>
+      <p style={styles.cardLabel}>Trade Plan</p>
+      <h2 style={styles.tradePlanTitle}>{hasPlan ? `${setupName} Plan` : "No valid trade yet"}</h2>
+      {hasPlan ? (
+        <>
+          <div style={styles.planMetricGrid}>
+            <Metric label="Entry" tooltip={tooltipText.entry} value={visualPlan.entry.toFixed(2)} />
+            <Metric label="Stop" tooltip={tooltipText.stopLoss} value={visualPlan.stop.toFixed(2)} tone="bad" />
+            <Metric label="Trim 1" tooltip={tooltipText.trim1} value={visualPlan.trim1.toFixed(2)} tone="good" />
+            <Metric label="Trim 2" tooltip={tooltipText.trim2} value={visualPlan.trim2.toFixed(2)} tone="good" />
+            <Metric label="Runner" tooltip={tooltipText.runner} value={(visualPlan.runner ?? visualPlan.target).toFixed(2)} tone="good" />
+            <Metric label="Risk" value={`$${rewardRisk.risk.toFixed(2)}`} tone={rewardRisk.risk > profile.maxRiskPerTrade ? "bad" : "neutral"} />
+            <Metric label="Reward/Risk" value={`${rewardRisk.ratio.toFixed(1)}R`} />
+            <Metric label="Trade Grade" tooltip={tooltipText.tradeScore} value={`${tradeGrade.letter} ${tradeGrade.score}/100`} />
+          </div>
+          {!autoTradePlan.noTrade ? (
+            <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
+              Auto plan: {autoTradePlan.direction.toUpperCase()} entry {autoTradePlan.entry.toFixed(2)}, stop {autoTradePlan.stop.toFixed(2)}, trims {autoTradePlan.trim1.toFixed(2)} / {autoTradePlan.trim2.toFixed(2)}, runner {autoTradePlan.runner.toFixed(2)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100. {autoTradePlan.reason}
+            </div>
+          ) : null}
+          {missedEntry ? <div style={styles.missedEntry}>{missedEntry}</div> : null}
+        </>
+      ) : (
+        <p style={styles.emptyPlan}>No valid trade yet. Wait for price to reach support, resistance, breakout, or retest.</p>
+      )}
+    </section>
+  );
+}
+
+function RiskGuardCard({ discipline, fundedMetrics, fundedWarnings, profile, riskStatus }) {
+  return (
+    <section style={styles.rulesCard}>
+      <div>
+        <p style={styles.cardLabel}>Risk Guard</p>
+        <h2 style={styles.sectionTitle}>Stay inside your limits</h2>
+      </div>
+      <div>
+        <div style={styles.rulesGrid}>
+          <Metric label="Max Trades" value={String(profile.maxTradesPerDay)} />
+          <Metric label="Max Daily Loss" value={`$${profile.maxDailyLoss.toFixed(2)}`} />
+          <Metric label="Current P/L" value={`$${discipline.dailyPnl.toFixed(2)}`} tone={discipline.dailyPnl >= 0 ? "good" : "bad"} />
+          <Metric label="Risk Status" value={riskStatus} tone={riskStatus === "Good" ? "good" : riskStatus === "Warning" ? "warn" : "bad"} />
+          <Metric label="Daily Risk Left" value={`$${fundedMetrics.dailyRiskRemaining.toFixed(2)}`} tone={fundedMetrics.dailyRiskRemaining > 100 ? "good" : "warn"} />
+          <Metric label="Drawdown Left" value={`$${fundedMetrics.drawdownRemaining.toFixed(2)}`} tone={fundedMetrics.drawdownRemaining > 500 ? "good" : "warn"} />
+        </div>
+        <div style={{ ...styles.warningStack, marginTop: "14px" }}>
+          {(fundedWarnings.length ? fundedWarnings : ["Inside funded-account guardrails."]).map((warning) => (
+            <div key={warning} style={warning.includes("Inside") ? styles.coachPrompt : styles.warningBox}>{warning}</div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PropFirmRulesCard({ fundedMetrics, fundedWarnings, profile }) {
+  return (
+    <section style={styles.card}>
+      <p style={styles.cardLabel}>Prop Firm Rules</p>
+      <h2 style={styles.sectionTitle}>{profile.fundedProvider || "Funded Account"}</h2>
+      <div style={styles.metricGrid}>
+        <Metric label="Daily Loss Left" value={`$${fundedMetrics.dailyRiskRemaining.toFixed(2)}`} tone={fundedMetrics.dailyRiskRemaining > 100 ? "good" : "warn"} />
+        <Metric label="Drawdown Left" value={`$${fundedMetrics.drawdownRemaining.toFixed(2)}`} tone={fundedMetrics.drawdownRemaining > 500 ? "good" : "warn"} />
+        <Metric label="Max Contracts" value={String(profile.maxContracts)} />
+        <Metric label="Consistency Rule" value={`${profile.consistencyRuleTarget}%`} />
+      </div>
+      <div style={{ ...styles.warningStack, marginTop: "14px" }}>
+        {(fundedWarnings.length ? fundedWarnings : ["Protect payout. Stay inside rule limits."]).map((warning) => (
+          <div key={warning} style={warning.includes("Protect") ? styles.coachPrompt : styles.warningBox}>{warning}</div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function WatchlistCard({ price, profile, watchlist }) {
+  const items = watchlist.length ? watchlist : [{ id: "current", symbol: profile.mainMarket, notes: "Current market" }];
+  return (
+    <section style={styles.card}>
+      <p style={styles.cardLabel}>Watchlist</p>
+      <h2 style={styles.sectionTitle}>Markets</h2>
+      <div style={styles.warningStack}>
+        {items.slice(0, 6).map((item) => (
+          <PlanItem key={item.id || item.symbol} title={item.symbol} text={item.symbol === profile.mainMarket ? `Current price ${Number(price).toFixed(2)}` : item.notes || "Watching"} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PerformanceStatsCard({ discipline, journalEntries, tradeGrade }) {
+  const analytics = getJournalAnalytics(journalEntries, discipline);
+  return (
+    <section style={styles.card}>
+      <p style={styles.cardLabel}>Performance Stats</p>
+      <h2 style={styles.sectionTitle}>Execution Snapshot</h2>
+      <div style={styles.metricGrid}>
+        <Metric label="Trade Grade" value={`${tradeGrade.letter} ${tradeGrade.score}/100`} tone={tradeGrade.score >= 75 ? "good" : tradeGrade.score >= 55 ? "warn" : "bad"} />
+        <Metric label="Total Trades" value={String(analytics.totalTrades)} />
+        <Metric label="Win Rate" value={`${analytics.winRate}%`} />
+        <Metric label="Profit Factor" value={analytics.profitFactor.toFixed(2)} />
+        <Metric label="Best Day" value={`$${analytics.bestDay.toFixed(2)}`} tone="good" />
+        <Metric label="Worst Day" value={`$${analytics.worstDay.toFixed(2)}`} tone="bad" />
+      </div>
     </section>
   );
 }
@@ -6430,6 +6670,40 @@ const styles = {
     alignItems: "start",
     marginBottom: "24px",
     width: "100%",
+  },
+  dashboardCardBoard: {
+    alignItems: "start",
+    display: "grid",
+    gap: "22px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 420px), 1fr))",
+    marginBottom: "22px",
+    width: "100%",
+  },
+  dashboardCardSlot: {
+    minWidth: 0,
+  },
+  draggableCardRow: {
+    alignItems: "center",
+    background: "#0f172a",
+    border: "1px solid #334155",
+    borderRadius: "12px",
+    color: "#e5e7eb",
+    cursor: "grab",
+    display: "flex",
+    fontWeight: 800,
+    justifyContent: "space-between",
+    gap: "12px",
+    padding: "10px 12px",
+  },
+  miniButton: {
+    background: "#1f2937",
+    border: "1px solid #334155",
+    borderRadius: "9px",
+    color: "#ffffff",
+    cursor: "pointer",
+    fontSize: "12px",
+    fontWeight: 800,
+    padding: "7px 9px",
   },
   rulesCard: {
     background: "rgba(15, 23, 42, .76)",
