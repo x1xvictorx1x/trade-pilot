@@ -688,7 +688,7 @@ export default function App() {
           if (signalTime === lastWebhookTimestamp) return;
           lastWebhookTimestamp = signalTime;
           applyAlert(result.signal);
-          setPriceStatus("");
+          setPriceStatus("TradingView signal received");
           notify("TradingView signal received.", "success");
         } catch (error) {
           setWebhookDebug((current) => ({
@@ -1042,6 +1042,7 @@ export default function App() {
   const applyAlert = (alert) => {
     const nextMarket = normalizeFuturesSymbol(alert.symbol || profile.mainMarket);
     const nextPrice = Number(alert.price);
+    const signalTime = alert.created_at || alert.receivedAt || alert.timestamp || new Date().toISOString();
     if (nextMarket && nextMarket !== profile.mainMarket) updateProfile("mainMarket", nextMarket);
     if (Number.isFinite(nextPrice)) setPrice(nextPrice);
     if (alert.direction === "long" || alert.direction === "short") setDirection(alert.direction);
@@ -1049,7 +1050,7 @@ export default function App() {
     if (Number.isFinite(Number(alert.resistance))) setResistance(Number(alert.resistance));
     if (Number.isFinite(Number(alert.entry))) setEntry(Number(alert.entry));
     if (Number.isFinite(Number(alert.stop)) && Number.isFinite(Number(alert.entry))) setRiskPoints(Math.abs(Number(alert.entry) - Number(alert.stop)));
-    if (alert.timestamp) setLastUpdated(new Date(alert.timestamp).toLocaleTimeString());
+    if (signalTime) setLastUpdated(new Date(signalTime).toLocaleTimeString());
     else setLastUpdated(new Date().toLocaleTimeString());
     if (Number.isFinite(nextPrice)) {
       setQuote({
@@ -1075,8 +1076,23 @@ export default function App() {
         });
       }
     }
+    setBrokerConnection((current) => ({
+      ...current,
+      connected: true,
+      connectionStatus: "TradingView signal received",
+      error: "",
+      lastSignalAt: signalTime,
+      platform: "TradingView Webhook",
+      price: Number.isFinite(nextPrice) ? nextPrice : current.price,
+      quote: Number.isFinite(nextPrice)
+        ? { bid: Number((nextPrice - 0.25).toFixed(2)), price: nextPrice, ask: Number((nextPrice + 0.25).toFixed(2)) }
+        : current.quote,
+      source: "TradingView Alerts",
+      updatedAt: signalTime,
+    }));
     setDataSource("TradingView Webhook");
     setAutoPrice(true);
+    setPriceStatus("TradingView signal received");
     setFastMessage(`TradingView signal received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
     if (activePage !== "connections") setActivePage("dashboard");
   };
@@ -3934,7 +3950,11 @@ function getConnectionStateMessage({ brokerConnection, dataSource, profile }) {
   const platform = brokerConnection?.platform || profile.fundedPlatform;
   if (platform === "Demo Broker" || dataSource === "Demo Broker") return "Demo Broker Connected - simulated data.";
   if (platform === "Manual Mode" || dataSource === "Manual Mode") return "Manual Mode Active - enter price and levels yourself.";
-  if (platform === "TradingView Webhook" || dataSource === "TradingView Webhook") return "Waiting for TradingView alert data.";
+  if (platform === "TradingView Webhook" || dataSource === "TradingView Webhook") {
+    return brokerConnection?.connectionStatus === "TradingView signal received"
+      ? "TradingView signal received"
+      : "Waiting for TradingView alert data.";
+  }
   if (platform?.includes("Tradovate") || profile.fundedPlatform === "Tradovate") return "Tradovate API credentials are not configured yet. Add Vercel env vars first.";
   if (profile.accountType === "Funded/prop account") return "Funded account rules active. Broker data may still be manual unless API is connected.";
   return "Not connected. Choose a data source.";
@@ -4186,10 +4206,10 @@ function ConnectionsPage({
 
   const sendTestTradingViewSignal = async (market = "NQ", timeframe = "5m") => {
     const payload = {
-      symbol: market,
-      price: market.includes("ES") ? 6400.25 : 27500.25,
-      timeframe,
-      timestamp: "test",
+      symbol: "NQ1!",
+      price: 27444.25,
+      timeframe: "5",
+      timestamp: new Date().toISOString(),
     };
     try {
       const response = await fetch("/api/webhook/tradingview", {
@@ -4198,14 +4218,28 @@ function ConnectionsPage({
         method: "POST",
       });
       const result = await response.json();
+      console.log("test signal POST result", result);
       if (!response.ok || result.ok === false) throw new Error(result.error || "TradingView webhook error");
+      const latestResponse = await fetch("/api/webhook/tradingview/latest", {
+        headers: { Accept: "application/json" },
+      });
+      const latest = await latestResponse.json();
+      console.log("latest signal", latest);
+      if (!latestResponse.ok || latest.ok === false) throw new Error(latest.error || "Latest TradingView signal unavailable");
+      if (!latest.signal) throw new Error("Latest TradingView signal was empty");
       setWebhookDebug({
         error: "",
-        price: String(payload.price),
+        price: String(latest.signal.price ?? payload.price),
         received: "Yes",
-        symbol: payload.symbol,
+        symbol: latest.signal.symbol || payload.symbol,
         updated: new Date().toLocaleTimeString(),
       });
+      applyAlert?.(latest.signal);
+      setPriceStatus("TradingView signal received");
+      setTradingViewWizardOpen(false);
+      setActivePage("dashboard");
+      notify?.("TradingView test signal received.", "success");
+      return true;
     } catch (error) {
       setWebhookDebug({
         error: error.message || "TradingView webhook error",
@@ -4214,12 +4248,10 @@ function ConnectionsPage({
         symbol: payload.symbol,
         updated: new Date().toLocaleTimeString(),
       });
-      notify?.(error.message || "TradingView webhook error", "failure");
+      setPriceStatus("Test signal failed.");
+      notify?.("Test signal failed.", "failure");
+      return false;
     }
-    applyAlert?.(payload);
-    setTradingViewWizardOpen(false);
-    setActivePage("dashboard");
-    notify?.("TradingView signal received.", "success");
   };
 
   const disconnectUserTradovate = async () => {
@@ -4649,6 +4681,7 @@ function TradingViewAlertWizard({ onClose, onSendTest }) {
   const [step, setStep] = useState(1);
   const [market, setMarket] = useState("NQ");
   const [timeframe, setTimeframe] = useState("5m");
+  const [sendingTest, setSendingTest] = useState(false);
   const webhookUrl = "https://tradepilottool.com/api/webhook/tradingview";
   const alertMessage = `{
  "symbol": "{{ticker}}",
@@ -4662,6 +4695,16 @@ function TradingViewAlertWizard({ onClose, onSendTest }) {
       await navigator.clipboard.writeText(text);
     } catch {
       // Copy may be blocked in some browsers; visible text stays selectable.
+    }
+  };
+
+  const handleSendTest = async () => {
+    if (sendingTest) return;
+    setSendingTest(true);
+    try {
+      await onSendTest(market, timeframe);
+    } finally {
+      setSendingTest(false);
     }
   };
 
@@ -4736,7 +4779,9 @@ function TradingViewAlertWizard({ onClose, onSendTest }) {
             <p style={styles.cardLabel}>Step 5</p>
             <h3 style={styles.sectionTitle}>Test and Open TradingView</h3>
             <div style={styles.installBannerActions}>
-              <button onClick={() => onSendTest(market, timeframe)} style={styles.settingsButton}>Send Test Signal</button>
+              <button disabled={sendingTest} onClick={handleSendTest} style={{ ...styles.settingsButton, opacity: sendingTest ? 0.7 : 1 }}>
+                {sendingTest ? "Sending..." : "Send Test Signal"}
+              </button>
               <button onClick={() => window.open("https://www.tradingview.com/chart/", "_blank", "noopener,noreferrer")} style={styles.secondaryButton}>Open TradingView</button>
             </div>
             <p style={{ ...styles.muted, marginTop: "12px" }}>The test signal updates the dashboard instantly with symbol and price only.</p>
