@@ -25,6 +25,7 @@ const journalStorageKey = "tradePilotJournal";
 const layoutStorageKey = "tradePilotLayout";
 const connectionSettingsStorageKey = "tradePilotConnectionSettings";
 const watchlistStorageKey = "tradePilotWatchlist";
+const installDismissedStorageKey = "tradePilotInstallDismissed";
 
 const defaultProfile = {
   traderName: "",
@@ -393,7 +394,7 @@ export default function App() {
   const [fastMessage, setFastMessage] = useState("Ready for manual execution.");
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [installPrompt, setInstallPrompt] = useState(null);
-  const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
+  const [installBannerDismissed, setInstallBannerDismissed] = useState(() => localStorage.getItem(installDismissedStorageKey) === "true");
   const [feedbackItems, setFeedbackItems] = useState(() => loadList(feedbackStorageKey));
   const [supportMessages, setSupportMessages] = useState(() => loadList(supportStorageKey));
   const [streamerMode, setStreamerMode] = useState(() => localStorage.getItem(streamerModeStorageKey) === "true");
@@ -602,6 +603,12 @@ export default function App() {
     installPrompt.prompt();
     await installPrompt.userChoice;
     setInstallPrompt(null);
+    setInstallBannerDismissed(true);
+    localStorage.setItem(installDismissedStorageKey, "true");
+  };
+
+  const dismissInstallBanner = () => {
+    localStorage.setItem(installDismissedStorageKey, "true");
     setInstallBannerDismissed(true);
   };
 
@@ -1560,6 +1567,7 @@ export default function App() {
         body,
         #root {
           width: 100% !important;
+          max-width: 100% !important;
           min-width: 100% !important;
           min-height: 100vh !important;
           margin: 0 !important;
@@ -1574,27 +1582,32 @@ export default function App() {
           align-items: unset !important;
         }
         main { max-width: none !important; }
+        *, *::before, *::after { box-sizing: border-box; }
+        img, svg, canvas, video { max-width: 100%; }
         .app-shell { width: 100%; min-height: 100vh; overflow-x: hidden; background: #05070d; }
         .app-container,
         .page-container,
         .dashboard-container {
           width: 100%;
-          max-width: none;
+          max-width: 100%;
           margin: 0;
           padding: 0;
           box-sizing: border-box;
+          overflow-x: hidden;
         }
         .desktop-dashboard {
           display: grid;
           grid-template-columns: 240px minmax(0, 1fr) 330px;
           gap: 18px;
           width: 100%;
+          max-width: 100%;
           min-height: 100vh;
           padding: 18px;
           box-sizing: border-box;
           align-items: start;
+          overflow-x: hidden;
         }
-        .main-dashboard { min-width: 0; display: grid; gap: 18px; }
+        .main-dashboard { min-width: 0; max-width: 100%; display: grid; gap: 18px; }
         .chart-panel { min-height: 520px; }
         .right-panel { min-width: 0; }
         .dashboard-grid {
@@ -1627,7 +1640,59 @@ export default function App() {
           .tradepilot-title { font-size: 34px !important; }
           .tradepilot-header { align-items: center !important; padding-top: 8px !important; }
           .tradepilot-top-actions { position: static !important; width: 100%; justify-content: center !important; }
-          .tradepilot-more-menu { left: 16px !important; right: 16px !important; top: calc(100% + 8px) !important; }
+          .tradepilot-subtitle,
+          .tradepilot-positioning,
+          .tradepilot-header-meta,
+          .tradepilot-auth-actions { display: none !important; }
+          .tradepilot-title { font-size: 24px !important; line-height: 1 !important; margin: 0 !important; }
+          .tradepilot-header { align-items: center !important; display: flex !important; gap: 10px !important; justify-content: space-between !important; padding: 10px 12px !important; }
+          .tradepilot-top-actions { margin-left: auto !important; position: static !important; width: auto !important; justify-content: flex-end !important; gap: 8px !important; }
+          .mobile-drawer {
+            background: #05070d !important;
+            border-left: 1px solid #1e3a5f !important;
+            border-radius: 0 !important;
+            box-shadow: -18px 0 44px rgba(0, 0, 0, .45) !important;
+            display: grid !important;
+            gap: 10px !important;
+            height: 100vh !important;
+            left: auto !important;
+            max-width: 100vw !important;
+            overflow-y: auto !important;
+            padding: 18px !important;
+            position: fixed !important;
+            right: 0 !important;
+            top: 0 !important;
+            transform: translateX(0) !important;
+            width: min(85vw, 360px) !important;
+            z-index: 9999 !important;
+          }
+          .mobile-drawer.closed { transform: translateX(100%) !important; }
+          .mobile-overlay {
+            background: rgba(0, 0, 0, .6) !important;
+            border: 0 !important;
+            cursor: pointer;
+            inset: 0 !important;
+            padding: 0 !important;
+            position: fixed !important;
+            z-index: 9998 !important;
+          }
+          .mobile-menu-item { display: block !important; width: 100% !important; }
+          .dashboard-card-board { display: flex !important; flex-direction: column !important; max-width: 100% !important; width: 100% !important; }
+          .dashboard-card-slot { max-width: 100% !important; min-width: 0 !important; width: 100% !important; }
+          .card-coach { order: 2; }
+          .card-tradePlan { order: 3; }
+          .card-chart { order: 4; }
+          .card-risk { order: 5; }
+          .card-journal { order: 6; }
+          .card-performanceStats { order: 7; }
+          .card-alerts, .card-watchlist, .card-propFirmRules { order: 8; }
+          .onboarding-card { max-width: 100% !important; width: 100% !important; }
+          .onboarding-card button { width: 100% !important; }
+          .install-banner { max-width: 100% !important; width: 100% !important; }
+          .install-banner button { flex: 1 1 100%; }
+          .mobile-status-bar { display: grid !important; }
+          .mobile-status-bar > div { min-width: 0; }
+          .mobile-status-bar strong { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
           .tradepilot-feedback { align-items: center; display: flex; font-size: 0 !important; height: 38px; justify-content: center; padding: 0 !important; width: 38px; }
           .tradepilot-feedback::after { content: "?"; font-size: 16px; }
           .home-title { font-size: 42px !important; }
@@ -1638,13 +1703,13 @@ export default function App() {
           <div style={styles.headerBrand}>
             <p style={styles.eyebrow}>Trade Pilot Alpha</p>
             <h1 className="tradepilot-title" style={styles.title}>Trade Pilot</h1>
-            <p style={styles.subtitle}>
+            <p className="tradepilot-subtitle" style={styles.subtitle}>
               Plan trades. Manage risk. Avoid emotional entries.
             </p>
-            <p style={styles.positioningText}>
+            <p className="tradepilot-positioning" style={styles.positioningText}>
               Trade Pilot is an execution assistant for futures traders.
             </p>
-            <div style={styles.headerMeta}>
+            <div className="tradepilot-header-meta" style={styles.headerMeta}>
               <span>{profile.mainMarket}</span>
               <span>{getConnectionStatusLabel(brokerConnection)}</span>
               <span>{session?.user ? session.user.email : "Guest workspace"}</span>
@@ -1652,7 +1717,7 @@ export default function App() {
           </div>
 
           <div className="tradepilot-top-actions" style={styles.topActions}>
-            <div style={styles.authActions}>
+            <div className="tradepilot-auth-actions" style={styles.authActions}>
               {session?.user ? (
                 <>
                   <span style={styles.accountPill}>{session.user.user_metadata?.name || session.user.email}</span>
@@ -1705,7 +1770,15 @@ export default function App() {
                     <span style={styles.menuBar} />
                   </button>
                   {moreMenuOpen ? (
-                    <div className="tradepilot-more-menu" style={styles.moreMenu}>
+                    <button
+                      aria-label="Close mobile menu"
+                      className="mobile-overlay"
+                      onClick={() => setMoreMenuOpen(false)}
+                      style={styles.mobileOverlay}
+                    />
+                  ) : null}
+                  {moreMenuOpen ? (
+                    <div className="tradepilot-more-menu mobile-drawer" style={styles.moreMenu}>
                       {navigationTabs.map((tab) => (
                         <button
                           className="mobile-menu-item"
@@ -1721,6 +1794,7 @@ export default function App() {
                       ))}
                       {moreTabs.map((tab) => (
                         <button
+                          className="mobile-menu-item"
                           key={tab}
                           onClick={() => {
                             setActivePage(tab.toLowerCase());
@@ -1739,6 +1813,18 @@ export default function App() {
                         />
                         Streamer Mode
                       </label>
+                      {session?.user ? (
+                        <button
+                          className="mobile-menu-item"
+                          onClick={() => {
+                            signOut();
+                            setMoreMenuOpen(false);
+                          }}
+                          style={styles.moreMenuItem}
+                        >
+                          Log Out
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -1771,7 +1857,7 @@ export default function App() {
         {!streamerMode && activePage !== "home" && !installBannerDismissed ? (
           <InstallBanner
             canInstall={Boolean(installPrompt)}
-            onDismiss={() => setInstallBannerDismissed(true)}
+            onDismiss={dismissInstallBanner}
             onInstall={installApp}
             onInstructions={() => setActivePage("install")}
           />
@@ -2273,7 +2359,7 @@ function FeatureCard({ title, text }) {
 
 function OnboardingCard({ onDone }) {
   return (
-    <section style={styles.onboardingCard}>
+    <section className="onboarding-card" style={styles.onboardingCard}>
       <div>
         <p style={styles.cardLabel}>First Login</p>
         <h2 style={styles.sectionTitle}>Set up your workspace</h2>
@@ -2290,7 +2376,7 @@ function OnboardingCard({ onDone }) {
 
 function InstallBanner({ canInstall, onDismiss, onInstall, onInstructions }) {
   return (
-    <section style={styles.installBanner}>
+    <section className="install-banner" style={styles.installBanner}>
       <div>
         <strong>Install Trade Pilot</strong>
         <p style={styles.installBannerText}>Add it to your home screen for a faster app-like experience.</p>
@@ -2792,6 +2878,20 @@ function Dashboard({
   return (
     <>
       <PageTitle title="Dashboard" subtitle="Plan trades and manage risk." />
+      <section className="mobile-status-bar" style={styles.mobileStatusBar}>
+        <div>
+          <span style={styles.cardLabel}>Market</span>
+          <strong>{profile.mainMarket}</strong>
+        </div>
+        <div>
+          <span style={styles.cardLabel}>Price</span>
+          <strong>{fmt(price)}</strong>
+        </div>
+        <div>
+          <span style={styles.cardLabel}>Status</span>
+          <strong>{dataSource === "TradingView Webhook" ? "TradingView" : getConnectionStatusLabel(brokerConnection)}</strong>
+        </div>
+      </section>
       <section style={styles.dashboardToolbar}>
         <button onClick={() => setCustomizeOpen((open) => !open)} style={styles.settingsButton}>Customize Dashboard</button>
         <span style={styles.muted}>Layout: {layoutPrefs.mode || "Pro"}</span>
@@ -2804,7 +2904,11 @@ function Dashboard({
         style={styles.dashboardCardBoard}
       >
         {cardOrder.map((key) => dashboardCards[key] ? (
-          <div key={key} style={{ ...styles.dashboardCardSlot, gridColumn: key === "chart" || (effectiveLayout.mode === "Streamer" && key === "coach") ? "1 / -1" : undefined }}>
+          <div
+            className={`dashboard-card-slot card-${key}`}
+            key={key}
+            style={{ ...styles.dashboardCardSlot, gridColumn: key === "chart" || (effectiveLayout.mode === "Streamer" && key === "coach") ? "1 / -1" : undefined }}
+          >
             {dashboardCards[key]}
           </div>
         ) : null)}
@@ -6319,6 +6423,15 @@ const styles = {
     top: "calc(100% + 8px)",
     zIndex: 40,
   },
+  mobileOverlay: {
+    background: "rgba(0,0,0,.6)",
+    border: "none",
+    cursor: "pointer",
+    inset: 0,
+    padding: 0,
+    position: "fixed",
+    zIndex: 9998,
+  },
   moreMenuItem: {
     background: "transparent",
     border: "none",
@@ -6384,7 +6497,9 @@ const styles = {
     gap: "14px",
     gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
     marginBottom: "16px",
+    maxWidth: "100%",
     padding: "18px",
+    width: "100%",
   },
   onboardingSteps: {
     color: "#e5e7eb",
@@ -6401,8 +6516,10 @@ const styles = {
     gap: "14px",
     justifyContent: "space-between",
     marginBottom: "16px",
+    maxWidth: "100%",
     padding: "14px",
     flexWrap: "wrap",
+    width: "100%",
   },
   installBannerText: {
     color: "#a1a1aa",
@@ -6671,6 +6788,17 @@ const styles = {
     marginBottom: "24px",
     width: "100%",
   },
+  mobileStatusBar: {
+    background: "rgba(15, 23, 42, .9)",
+    border: "1px solid #243b55",
+    borderRadius: "14px",
+    display: "none",
+    gap: "10px",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    marginBottom: "14px",
+    padding: "12px",
+    width: "100%",
+  },
   dashboardCardBoard: {
     alignItems: "start",
     display: "grid",
@@ -6680,7 +6808,9 @@ const styles = {
     width: "100%",
   },
   dashboardCardSlot: {
+    maxWidth: "100%",
     minWidth: 0,
+    width: "100%",
   },
   draggableCardRow: {
     alignItems: "center",

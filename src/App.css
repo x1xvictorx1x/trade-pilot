@@ -1,17 +1,20 @@
 .app-shell {
   width: 100%;
+  max-width: 100%;
   min-height: 100vh;
   background: #05070d;
+  overflow-x: hidden;
 }
 
 .app-container,
 .page-container,
 .dashboard-container {
   width: 100%;
-  max-width: none;
+  max-width: 100%;
   margin: 0;
   padding: 24px 32px;
   box-sizing: border-box;
+  overflow-x: hidden;
 }
 
 .desktop-dashboard {
@@ -19,8 +22,20 @@
   grid-template-columns: 240px minmax(0, 1fr) 320px;
   gap: 20px;
   width: 100%;
+  max-width: 100%;
   min-height: calc(100vh - 80px);
   align-items: start;
+  overflow-x: hidden;
+}
+
+.desktop-dashboard > *,
+.main-dashboard,
+.right-panel,
+.left-sidebar,
+.dashboard-card-slot,
+.dashboard-card-slot > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .dashboard-grid {
@@ -53,6 +68,8 @@
 
   .desktop-dashboard {
     grid-template-columns: 1fr;
+    max-width: 100vw;
+    overflow-x: hidden;
   }
 
   .left-sidebar,
