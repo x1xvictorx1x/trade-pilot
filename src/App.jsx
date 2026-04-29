@@ -77,8 +77,8 @@ const pointValues = {
 };
 
 const marketDefaults = {
-  MNQ: 27500,
-  NQ: 27500,
+  MNQ: 27289,
+  NQ: 27289,
   ES: 6400,
   MES: 6400,
   YM: 47000,
@@ -926,6 +926,37 @@ export default function App() {
       refreshTradovateSnapshot();
       const timer = setInterval(refreshTradovateSnapshot, 5000);
       return () => clearInterval(timer);
+    }
+
+    if (dataSource === "Market Data API" && !canUseLocalMarketServer) {
+      let cancelled = false;
+      const refreshServerQuote = async () => {
+        try {
+          const response = await fetch(`/api/market/quote?symbol=${encodeURIComponent(profile.mainMarket)}`);
+          const result = await response.json();
+          if (!response.ok || result.ok === false) throw new Error(result.error || "Market quote unavailable.");
+          if (cancelled) return;
+          const nextPrice = Number(result.price);
+          if (!Number.isFinite(nextPrice)) throw new Error("Market quote missing price.");
+          setPrice(nextPrice);
+          setQuote({
+            bid: Number(result.bid ?? nextPrice - 0.25),
+            ask: Number(result.ask ?? nextPrice + 0.25),
+          });
+          setLastUpdated(result.timestamp ? new Date(result.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString());
+          setPriceStatus(result.delayed ? "Using delayed futures quote. For exact live chart price, connect TradingView Alerts." : "");
+        } catch (error) {
+          if (cancelled) return;
+          setPriceStatus(`${error.message || "Market quote unavailable."} Connect TradingView Alerts for your exact live price.`);
+        }
+      };
+
+      refreshServerQuote();
+      const timer = setInterval(refreshServerQuote, 10000);
+      return () => {
+        cancelled = true;
+        clearInterval(timer);
+      };
     }
 
     if (dataSource === "TradingView Webhook") {
