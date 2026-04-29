@@ -515,7 +515,10 @@ export default function App() {
   const [workspace, setWorkspace] = useState(() => loadMigratedWorkspace());
   const [profile, setProfile] = useState(() => loadProfile());
   const [discipline, setDiscipline] = useState(() => loadDiscipline());
-  const [activePosition, setActivePosition] = useState(() => workspace.tradePlan || loadActivePosition());
+  const [activePosition, setActivePosition] = useState(() => {
+    const savedPlan = workspace.tradePlan || loadActivePosition();
+    return savedPlan?.status === "active" || savedPlan?.status === "managing_trade" ? savedPlan : null;
+  });
   const [plannedTrade, setPlannedTrade] = useState(() => workspace.tradePlan || loadActivePosition());
   const [activePage, setActivePage] = useState("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -580,7 +583,7 @@ export default function App() {
   const [recentHigh, setRecentHigh] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 50);
   const [pullbackSupport, setPullbackSupport] = useState((marketDefaults[profile.mainMarket] ?? 27400) - 35);
   const [breakoutLevel, setBreakoutLevel] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 50);
-  const [levelBias, setLevelBias] = useState("bullish");
+  const [levelBias, setLevelBias] = useState("neutral");
   const previousDataSourceRef = useRef(dataSource);
 
   useEffect(() => {
@@ -600,7 +603,7 @@ export default function App() {
   }, [activePosition]);
 
   useEffect(() => {
-    if (plannedTrade) setActivePosition(plannedTrade);
+    if (plannedTrade?.status === "active" || plannedTrade?.status === "managing_trade") setActivePosition(plannedTrade);
   }, [plannedTrade]);
 
   useEffect(() => {
@@ -803,6 +806,18 @@ export default function App() {
     setPriceStatus(validation.reason);
     setFastMessage("Plan reset. Generate a new plan from current data.");
   }, [plannedTrade]);
+
+  useEffect(() => {
+    if (!plannedTrade) return;
+    const activeBias = normalizeActiveBias(levelBias);
+    if (activeBias === "neutral") return;
+    if (planDirectionMatchesBias(plannedTrade, activeBias)) return;
+    setPlannedTrade(null);
+    setActivePosition(null);
+    setPriceStatus("Bias conflict detected. Plan is outdated.");
+    setFastMessage("Bias conflict detected. Plan is outdated.");
+    notify("Bias conflict detected. Plan reset.", "failure");
+  }, [levelBias, plannedTrade]);
 
   useEffect(() => {
     if (!autoPrice) {
@@ -1344,13 +1359,14 @@ export default function App() {
     const hasResistance = Number.isFinite(Number(alert.resistance));
     const hasEntry = Number.isFinite(Number(alert.entry));
     const hasStop = Number.isFinite(Number(alert.stop));
+    const alertBias = normalizeActiveBias(alert.bias);
     if (nextMarket && nextMarket !== profile.mainMarket) updateProfile("mainMarket", nextMarket);
     if (Number.isFinite(nextPrice)) setPrice(nextPrice);
     const nextDirection = alert.direction === "long" || alert.direction === "short"
       ? alert.direction
-      : alert.bias === "bearish"
+      : alertBias === "bearish"
         ? "short"
-        : alert.bias === "bullish"
+        : alertBias === "bullish"
           ? "long"
           : direction;
     setDirection(nextDirection);
@@ -1373,7 +1389,18 @@ export default function App() {
         ask: Number((nextPrice + 0.25).toFixed(2)),
       });
     }
-    if (alert.bias) setLevelBias(alert.bias);
+    if (alertBias !== "neutral") {
+      setLevelBias(alertBias);
+    } else if (Number.isFinite(nextPrice) && hasSupport && hasResistance) {
+      const nextSupport = Number(alert.support);
+      const nextResistance = Number(alert.resistance);
+      const range = Math.max(1, nextResistance - nextSupport);
+      if (Math.abs(nextPrice - nextResistance) <= range * 0.22) setLevelBias("bearish");
+      else if (Math.abs(nextPrice - nextSupport) <= range * 0.22) setLevelBias("bullish");
+      else setLevelBias("neutral");
+    } else {
+      setLevelBias("neutral");
+    }
     if (hasEntry && hasStop && alert.targets) {
       const targets = Array.isArray(alert.targets) ? alert.targets.map(Number).filter(Number.isFinite) : [];
       if (targets.length) {
@@ -2971,8 +2998,10 @@ function Dashboard({
     [chartData, entry, price, resistance, support],
   );
   const marketSpec = marketSpecs[profile.mainMarket] ?? marketSpecs.MNQ;
+  const activeBias = normalizeActiveBias(levelBias);
   const autoTradePlan = getAutoTradePlan({
     accountSize: Number(profile.accountSize || 0),
+    activeBias,
     contracts,
     dailyPnl: discipline.dailyPnl,
     marketSpec,
@@ -2995,7 +3024,20 @@ function Dashboard({
     trim1: engine.trim1,
     trim2: engine.trim2,
   };
-  const visualPlan = normalizeTradePlan(plannedTrade ?? activePosition ?? (!autoTradePlan.noTrade ? autoTradePlan : fallbackPlan), fallbackPlan);
+  const activeTradePlan = buildActiveTradePlan({
+    activeBias,
+    activePosition,
+    autoTradePlan,
+    fallbackPlan,
+    lastUpdated,
+    plannedTrade,
+    price,
+    source: dataSource,
+  });
+  const activePlanValidation = activeTradePlan.direction === "none"
+    ? { valid: false, reason: activeTradePlan.message || "No trade. Wait for confirmation." }
+    : validateTradePlan(activeTradePlan);
+  const visualPlan = activeTradePlan.direction === "none" ? normalizeTradePlan(fallbackPlan, fallbackPlan) : activeTradePlan;
   const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
   const rewardRisk = calculateRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
   const tradeGrade = getTradeGrade({
@@ -3011,6 +3053,9 @@ function Dashboard({
     resistance,
     zoneDetection,
   });
+  const displayTradeGrade = activeTradePlan.direction === "none" || activePlanValidation.valid === false
+    ? { letter: "No Trade", reason: activePlanValidation.reason || "Waiting for valid setup.", score: 0 }
+    : tradeGrade;
   const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
   const fundedWarnings = buildFundedRuleWarnings({
     brokerConnection: {
@@ -3020,11 +3065,11 @@ function Dashboard({
     discipline,
     profile,
   });
-  const simpleBias = engine.bias.includes("LONG") ? "LONG" : engine.bias.includes("SHORT") ? "SHORT" : "WAIT";
-  const simpleAction = simpleBias === "LONG" ? "Look Long" : simpleBias === "SHORT" ? "Look Short" : "No trade";
-  const setupName = plannedTrade || activePosition ? `${setupType} ${setupDirection}` : "Auto Zone";
-  const hasPlan = Boolean(plannedTrade || activePosition || !autoTradePlan.noTrade);
-  const liveCoach = getLiveCoachMessage({ activePosition, autoTradePlan, discipline, engine, price, profile, tradeGrade, visualPlan });
+  const simpleBias = activeBias === "bullish" ? "BULLISH" : activeBias === "bearish" ? "BEARISH" : "NEUTRAL";
+  const setupName = activeTradePlan.source || (plannedTrade || activePosition ? `${setupType} ${setupDirection}` : "Auto Zone");
+  const hasPlan = activeTradePlan.direction !== "none" && activePlanValidation.valid && !rewardRisk.invalid;
+  const coachDecision = getCoachDecision({ activeBias, activePosition, activeTradePlan, price, resistance, support, validation: activePlanValidation });
+  const liveCoach = getLiveCoachMessage({ activeBias, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, tradeGrade: displayTradeGrade, visualPlan });
   const riskStatus = engine.disciplineWarnings.some((warning) => warning.includes("Stop") || warning.includes("loss limit reached") || warning.includes("exceeded"))
     ? "Stop Trading"
     : engine.disciplineWarnings.some((warning) => warning.includes("Warning") || warning.includes("approaching") || warning.includes("High risk") || warning.includes("too large") || warning.includes("Contracts"))
@@ -3051,26 +3096,27 @@ function Dashboard({
     chart: effectiveLayout.chart ? <TradeChartPanel
       chartData={chartData}
       currentPrice={price}
-      entry={visualPlan.entry}
-      runner={visualPlan.runner ?? visualPlan.target}
-      stop={visualPlan.stop}
+      entry={hasPlan ? visualPlan.entry : undefined}
+      runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
+      stop={hasPlan ? visualPlan.stop : undefined}
       support={zoneDetection.supportLevel ?? support}
       resistance={zoneDetection.resistanceLevel ?? resistance}
-      trim1={visualPlan.trim1}
-      trim2={visualPlan.trim2}
+      trim1={hasPlan ? visualPlan.trim1 : undefined}
+      trim2={hasPlan ? visualPlan.trim2 : undefined}
       zoneDetection={zoneDetection}
     /> : null,
     coach: effectiveLayout.coach ? <div style={styles.coachCard}>
       <p style={styles.cardLabel}>Trade Coach</p>
       <div style={styles.coachGrid}>
-        <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={simpleBias === "WAIT" ? "warn" : "good"} />
+        <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={activeBias === "neutral" ? "warn" : "good"} />
         <Metric label="Market" value={profile.mainMarket} />
-        <Metric label="Action" value={levelCoach.action === "WAIT" ? simpleAction : levelCoach.action} tone={simpleBias === "WAIT" ? "warn" : "good"} />
-        <Metric label="Grade" value={`${tradeGrade.letter} ${tradeGrade.score}/100`} tone={tradeGrade.score >= 75 ? "good" : tradeGrade.score >= 55 ? "warn" : "bad"} />
+        <Metric label="Action" value={coachDecision.action} tone={coachDecision.action === "WAIT" || coachDecision.action === "NO TRADE" ? "warn" : "good"} />
+        <Metric label="Grade" value={`${displayTradeGrade.letter} ${displayTradeGrade.score}/100`} tone={displayTradeGrade.score >= 75 ? "good" : displayTradeGrade.score >= 55 ? "warn" : "bad"} />
       </div>
-      <p style={styles.coachMessage}>{levelCoach.message}</p>
+      <p style={styles.coachMessage}>{coachDecision.message}</p>
+      {!activePlanValidation.valid && activeTradePlan.direction !== "none" ? <div style={styles.priceWarning}>{activePlanValidation.reason}</div> : null}
       {autoTradePlan.noTrade ? <div style={styles.priceWarning}>{autoTradePlan.message}</div> : null}
-      <p style={styles.muted}>{autoTradePlan.coachMessage || tradeGrade.reason}</p>
+      <p style={styles.muted}>{activeTradePlan.direction === "none" ? "Waiting for valid setup." : autoTradePlan.coachMessage || displayTradeGrade.reason}</p>
     </div> : null,
     journal: effectiveLayout.journal ? <section style={styles.card}>
       <p style={styles.cardLabel}>Journal</p>
@@ -3090,10 +3136,10 @@ function Dashboard({
         ))}
       </div>
     </section> : null,
-    performanceStats: effectiveLayout.performanceStats ? <PerformanceStatsCard discipline={discipline} journalEntries={safeJournalEntries} tradeGrade={tradeGrade} /> : null,
+    performanceStats: effectiveLayout.performanceStats ? <PerformanceStatsCard discipline={discipline} journalEntries={safeJournalEntries} tradeGrade={displayTradeGrade} /> : null,
     propFirmRules: effectiveLayout.propFirmRules ? <PropFirmRulesCard fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} /> : null,
     risk: effectiveLayout.risk ? <RiskGuardCard discipline={discipline} fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} riskStatus={riskStatus} /> : null,
-    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard autoTradePlan={autoTradePlan} hasPlan={hasPlan} missedEntry={missedEntry} profile={profile} rewardRisk={rewardRisk} setupName={setupName} tradeGrade={tradeGrade} visualPlan={visualPlan} /> : null,
+    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard activeBias={activeBias} activeTradePlan={activeTradePlan} autoTradePlan={autoTradePlan} hasPlan={hasPlan} missedEntry={missedEntry} planValidation={activePlanValidation} profile={profile} rewardRisk={rewardRisk} setupName={setupName} tradeGrade={displayTradeGrade} visualPlan={visualPlan} /> : null,
     watchlist: effectiveLayout.watchlist ? <WatchlistCard price={price} profile={profile} watchlist={safeWatchlist} /> : null,
   };
 
@@ -3108,20 +3154,20 @@ function Dashboard({
           price={price}
           profile={profile}
           riskStatus={riskStatus}
-          visualPlan={visualPlan}
+          visualPlan={hasPlan ? visualPlan : activeTradePlan}
           coachMessage={liveCoach}
-          tradeGrade={tradeGrade}
+          tradeGrade={displayTradeGrade}
         />
         <TradeChartPanel
           chartData={chartData}
           currentPrice={price}
-          entry={visualPlan.entry}
-          runner={visualPlan.runner ?? visualPlan.target}
-          stop={visualPlan.stop}
+          entry={hasPlan ? visualPlan.entry : undefined}
+          runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
+          stop={hasPlan ? visualPlan.stop : undefined}
           support={zoneDetection.supportLevel ?? support}
           resistance={zoneDetection.resistanceLevel ?? resistance}
-          trim1={visualPlan.trim1}
-          trim2={visualPlan.trim2}
+          trim1={hasPlan ? visualPlan.trim1 : undefined}
+          trim2={hasPlan ? visualPlan.trim2 : undefined}
           zoneDetection={zoneDetection}
         />
       </>
@@ -3171,12 +3217,12 @@ function Dashboard({
         {effectiveLayout.coach ? <div style={styles.coachCard}>
           <p style={styles.cardLabel}>Trade Coach</p>
           <div style={styles.coachGrid}>
-            <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={simpleBias === "WAIT" ? "warn" : "good"} />
+            <Metric label="Bias" tooltip={tooltipText.marketBias} value={simpleBias} tone={activeBias === "neutral" ? "warn" : "good"} />
             <Metric label="Market" value={profile.mainMarket} />
-            <Metric label="Action" value={levelCoach.action === "WAIT" ? simpleAction : levelCoach.action} tone={simpleBias === "WAIT" ? "warn" : "good"} />
+            <Metric label="Action" value={coachDecision.action} tone={coachDecision.action === "WAIT" || coachDecision.action === "NO TRADE" ? "warn" : "good"} />
             <Metric label="Grade" value={`${tradeGrade.letter} ${tradeGrade.score}/100`} tone={tradeGrade.score >= 75 ? "good" : tradeGrade.score >= 55 ? "warn" : "bad"} />
           </div>
-          <p style={styles.coachMessage}>{levelCoach.message}</p>
+          <p style={styles.coachMessage}>{coachDecision.message}</p>
           {autoTradePlan.noTrade ? <div style={styles.priceWarning}>{autoTradePlan.message}</div> : null}
           <p style={styles.muted}>{autoTradePlan.coachMessage || tradeGrade.reason}</p>
         </div> : null}
@@ -3705,18 +3751,35 @@ function AutoZonePanel({ zoneDetection }) {
   );
 }
 
-function TradePlanCard({ autoTradePlan, hasPlan, missedEntry, profile, rewardRisk, setupName, tradeGrade, visualPlan }) {
+function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, missedEntry, planValidation, profile, rewardRisk, setupName, tradeGrade, visualPlan }) {
+  const planSource = activeTradePlan?.source || "Auto Zone";
+  const planStatus = activeTradePlan?.status === "managing_trade"
+    ? "Managing trade"
+    : activeTradePlan?.status === "waiting_for_entry"
+      ? "Waiting for entry"
+      : activeTradePlan?.direction === "none"
+        ? "Waiting for confirmation"
+        : "Planned";
+  const planDate = activeTradePlan?.lastUpdated ? new Date(activeTradePlan.lastUpdated) : null;
+  const planUpdated = planDate && Number.isFinite(planDate.getTime()) ? planDate.toLocaleTimeString() : activeTradePlan?.lastUpdated || "Just now";
   return (
     <section style={styles.tradePlanHero}>
       <p style={styles.cardLabel}>Trade Plan</p>
       <h2 style={styles.tradePlanTitle}>{hasPlan ? `${setupName} Plan` : "No valid trade yet"}</h2>
+      <div style={{ ...styles.metricGrid, marginBottom: "14px" }}>
+        <Metric label="Bias" value={normalizeActiveBias(activeBias)} tone={normalizeActiveBias(activeBias) === "neutral" ? "warn" : "good"} />
+        <Metric label="Direction" value={activeTradePlan?.direction === "none" ? "None" : activeTradePlan?.direction || "None"} />
+        <Metric label="Source" value={planSource} />
+        <Metric label="Status" value={planStatus} />
+        <Metric label="Last updated" value={planUpdated} />
+      </div>
       {hasPlan ? (
         <>
           <div style={styles.planMetricGrid}>
             <Metric label="Entry" tooltip={tooltipText.entry} value={visualPlan.entry.toFixed(2)} />
             <Metric label="Stop" tooltip={tooltipText.stopLoss} value={visualPlan.stop.toFixed(2)} tone="bad" />
-            <Metric label="Trim 1" tooltip={tooltipText.trim1} value={visualPlan.trim1.toFixed(2)} tone="good" />
-            <Metric label="Trim 2" tooltip={tooltipText.trim2} value={visualPlan.trim2.toFixed(2)} tone="good" />
+            <Metric label="TP1" tooltip={tooltipText.trim1} value={visualPlan.trim1.toFixed(2)} tone="good" />
+            <Metric label="TP2" tooltip={tooltipText.trim2} value={visualPlan.trim2.toFixed(2)} tone="good" />
             <Metric label="Runner" tooltip={tooltipText.runner} value={(visualPlan.runner ?? visualPlan.target).toFixed(2)} tone="good" />
             <Metric label="Risk" value={`$${rewardRisk.risk.toFixed(2)}`} tone={rewardRisk.risk > profile.maxRiskPerTrade ? "bad" : "neutral"} />
             <Metric label="Reward/Risk" value={`${rewardRisk.ratio.toFixed(1)}R`} />
@@ -3727,11 +3790,11 @@ function TradePlanCard({ autoTradePlan, hasPlan, missedEntry, profile, rewardRis
               Auto plan: {autoTradePlan.direction.toUpperCase()} entry {autoTradePlan.entry.toFixed(2)}, stop {autoTradePlan.stop.toFixed(2)}, trims {autoTradePlan.trim1.toFixed(2)} / {autoTradePlan.trim2.toFixed(2)}, runner {autoTradePlan.runner.toFixed(2)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100. {autoTradePlan.reason}
             </div>
           ) : null}
-          {rewardRisk.invalid ? <div style={styles.priceWarning}>{rewardRisk.reason || "Invalid plan: targets are on the wrong side of entry."}</div> : null}
+          {rewardRisk.invalid || !planValidation?.valid ? <div style={styles.priceWarning}>{planValidation?.reason || rewardRisk.reason || "Invalid plan: targets are on the wrong side of entry."}</div> : null}
           {missedEntry ? <div style={styles.missedEntry}>{missedEntry}</div> : null}
         </>
       ) : (
-        <p style={styles.emptyPlan}>No valid trade yet. Wait for price to reach support, resistance, breakout, or retest.</p>
+        <p style={styles.emptyPlan}>{activeTradePlan?.message || "No trade. Wait for confirmation."}</p>
       )}
     </section>
   );
@@ -3972,8 +4035,9 @@ function analyzeKeyLevels({ breakoutLevel, currentPrice, direction, marketBias, 
   const nearResistance = Math.abs(currentPrice - recentHigh) <= tolerance || Math.abs(currentPrice - resistance) <= tolerance;
   const nearBreakout = Math.abs(currentPrice - breakoutLevel) <= tolerance;
   const inMiddle = currentPrice > middleLow && currentPrice < middleHigh;
-  const bullish = marketBias === "bullish" || direction === "long";
-  const bearish = marketBias === "bearish" || direction === "short";
+  const normalizedBias = normalizeActiveBias(marketBias);
+  const bullish = normalizedBias === "bullish";
+  const bearish = normalizedBias === "bearish";
 
   let marketState = "Chop / no trade";
   let action = "WAIT";
@@ -4010,7 +4074,17 @@ function analyzeKeyLevels({ breakoutLevel, currentPrice, direction, marketBias, 
       target1: pullbackSupport.toFixed(2),
       target2: `${(pullbackSupport - 10).toFixed(2)} or next structure below`,
     };
-  } else if (nearBreakout || currentPrice > breakoutLevel) {
+  } else if (bearish && (nearBreakout || currentPrice >= breakoutLevel)) {
+    marketState = "High-of-day resistance";
+    action = "LOOK FOR SHORT";
+    message = "Price is testing high-of-day resistance with bearish bias. Wait for rejection confirmation.";
+    plan = {
+      entry: `Rejection below high: ${(breakoutLevel - 1).toFixed(2)}`,
+      stop: `Above rejection high near ${(breakoutLevel + 5).toFixed(2)}`,
+      target1: pullbackSupport.toFixed(2),
+      target2: `${(pullbackSupport - 10).toFixed(2)} or next structure below`,
+    };
+  } else if (bullish && (nearBreakout || currentPrice > breakoutLevel)) {
     marketState = "Breakout attempt";
     action = "BREAKOUT: WAIT FOR RETEST";
     message = "Breakout attempt. Wait for the level to break and retest before entering.";
@@ -4339,6 +4413,151 @@ function validateTradePlan(plan = {}) {
   };
 }
 
+function normalizeActiveBias(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized.includes("bear") || normalized.includes("short")) return "bearish";
+  if (normalized.includes("bull") || normalized.includes("long")) return "bullish";
+  return "neutral";
+}
+
+function directionFromBias(activeBias) {
+  const bias = normalizeActiveBias(activeBias);
+  if (bias === "bearish") return "short";
+  if (bias === "bullish") return "long";
+  return "none";
+}
+
+function planDirectionMatchesBias(plan, activeBias) {
+  const expectedDirection = directionFromBias(activeBias);
+  if (expectedDirection === "none") return false;
+  return plan?.direction === expectedDirection;
+}
+
+function getPlanSourceLabel(source) {
+  if (!source) return "Auto Zone";
+  if (source === "TradingView Webhook") return "TradingView Alert";
+  return source;
+}
+
+function buildNoTradePlan({ activeBias = "neutral", lastUpdated = "", message = "No trade. Wait for confirmation.", source = "Coach" } = {}) {
+  return {
+    bias: normalizeActiveBias(activeBias),
+    direction: "none",
+    invalid: false,
+    lastUpdated,
+    message,
+    noTrade: true,
+    source,
+    status: "waiting_for_confirmation",
+  };
+}
+
+function withActivePlanMetadata(plan, { activeBias, fallbackPlan, lastUpdated, source, status } = {}) {
+  if (!plan || plan.noTrade || directionFromBias(activeBias) === "none") {
+    return buildNoTradePlan({ activeBias, lastUpdated, source });
+  }
+  const expectedDirection = directionFromBias(activeBias);
+  const normalized = normalizeTradePlan({ ...plan, direction: expectedDirection }, { ...fallbackPlan, direction: expectedDirection });
+  const validation = validateTradePlan(normalized);
+  return {
+    ...normalized,
+    bias: normalizeActiveBias(activeBias),
+    invalid: !validation.valid,
+    invalidReason: validation.reason,
+    lastUpdated: lastUpdated || plan.lastUpdated || new Date().toISOString(),
+    source: getPlanSourceLabel(plan.source || plan.sourceMode || source),
+    status: status || plan.status || "waiting_for_entry",
+    tp1: normalized.trim1,
+    tp2: normalized.trim2,
+  };
+}
+
+function buildActiveTradePlan({ activeBias, activePosition, autoTradePlan, fallbackPlan, lastUpdated, plannedTrade, price, source }) {
+  const bias = normalizeActiveBias(activeBias);
+  const expectedDirection = directionFromBias(bias);
+  if (expectedDirection === "none") {
+    return buildNoTradePlan({
+      activeBias: bias,
+      lastUpdated,
+      message: "No trade. Wait for confirmation.",
+      source: source || "Coach",
+    });
+  }
+
+  const candidates = [activePosition, plannedTrade, autoTradePlan].filter(Boolean);
+  const matchedCandidate = candidates.find((candidate) => !candidate.noTrade && planDirectionMatchesBias(candidate, bias) && validateTradePlan(candidate).valid);
+  const selected = matchedCandidate || (!autoTradePlan?.noTrade ? autoTradePlan : null);
+  if (!selected) {
+    return buildNoTradePlan({
+      activeBias: bias,
+      lastUpdated,
+      message: "Waiting for valid setup.",
+      source: source || "Coach",
+    });
+  }
+
+  const status = activePosition?.status === "active" || activePosition?.status === "managing_trade"
+    ? "managing_trade"
+    : Number.isFinite(Number(price)) && Number.isFinite(Number(selected.entry)) && (
+      expectedDirection === "long" ? Number(price) >= Number(selected.entry) : Number(price) <= Number(selected.entry)
+    )
+      ? "managing_trade"
+      : "waiting_for_entry";
+
+  return withActivePlanMetadata(selected, {
+    activeBias: bias,
+    fallbackPlan,
+    lastUpdated,
+    source,
+    status,
+  });
+}
+
+function getCoachDecision({ activeBias, activePosition, activeTradePlan, price, support, resistance, validation }) {
+  const bias = normalizeActiveBias(activeBias);
+  if (validation && !validation.valid && activeTradePlan?.direction !== "none") {
+    return { action: "NO TRADE", message: validation.reason || "Invalid plan: targets are on the wrong side of entry." };
+  }
+  if (activeTradePlan?.status === "managing_trade" || activePosition) {
+    return { action: "MANAGE TRADE", message: getTargetProgressMessage({ activePosition, plan: activeTradePlan, price }) };
+  }
+  if (bias === "neutral" || activeTradePlan?.direction === "none") {
+    return { action: "WAIT", message: "Price is between levels. Wait for support, resistance, breakout, or retest." };
+  }
+  const priceValue = Number(price);
+  const supportValue = Number(support);
+  const resistanceValue = Number(resistance);
+  const range = Math.max(1, Math.abs((Number.isFinite(resistanceValue) ? resistanceValue : priceValue + 10) - (Number.isFinite(supportValue) ? supportValue : priceValue - 10)));
+  const nearSupport = Number.isFinite(priceValue) && Number.isFinite(supportValue) && Math.abs(priceValue - supportValue) <= range * 0.22;
+  const nearResistance = Number.isFinite(priceValue) && Number.isFinite(resistanceValue) && Math.abs(priceValue - resistanceValue) <= range * 0.22;
+  if (bias === "bearish") {
+    return {
+      action: "LOOK SHORT",
+      message: nearResistance ? "Price is rejecting resistance. Watch for short confirmation." : "Bearish bias active. Plan ready. Waiting for entry.",
+    };
+  }
+  return {
+    action: "LOOK LONG",
+    message: nearSupport ? "Price is near support. Watch for bounce confirmation." : "Bullish bias active. Plan ready. Waiting for entry.",
+  };
+}
+
+function getTargetProgressMessage({ activePosition, plan, price }) {
+  if (!plan || plan.direction === "none") return "Waiting for valid setup.";
+  const direction = plan.direction === "short" ? "short" : "long";
+  const priceValue = Number(price);
+  const entry = Number(plan.entry);
+  const tp1 = Number(plan.tp1 ?? plan.trim1);
+  const tp2 = Number(plan.tp2 ?? plan.trim2);
+  const runner = Number(plan.runner ?? plan.target);
+  const managing = activePosition || plan.status === "managing_trade" || (Number.isFinite(priceValue) && Number.isFinite(entry) && (direction === "long" ? priceValue >= entry : priceValue <= entry));
+  if (!managing) return "Plan ready. Waiting for entry.";
+  const hit = (target) => Number.isFinite(priceValue) && Number.isFinite(target) && (direction === "long" ? priceValue >= target : priceValue <= target);
+  if (hit(tp2)) return "TP2 reached. Manage runner.";
+  if (hit(tp1)) return `TP1 reached. Consider trimming. Next target: TP2 at ${fmt(tp2)}.`;
+  return Number.isFinite(tp1) ? `Next target: TP1 at ${fmt(tp1)}.` : "Manage trade. Respect your plan.";
+}
+
 function safeNumber(...values) {
   for (const value of values) {
     const number = Number(value);
@@ -4347,7 +4566,7 @@ function safeNumber(...values) {
   return 0;
 }
 
-function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxContracts, maxDailyLoss, maxRisk, price, resistance, support, zoneDetection = {} }) {
+function getAutoTradePlan({ accountSize, activeBias = "neutral", contracts, dailyPnl, marketSpec, maxContracts, maxDailyLoss, maxRisk, price, resistance, support, zoneDetection = {} }) {
   let supportLevel = Number(zoneDetection.supportLevel ?? support);
   let resistanceLevel = Number(zoneDetection.resistanceLevel ?? resistance);
   if (!Number.isFinite(supportLevel) || !Number.isFinite(resistanceLevel) || supportLevel >= resistanceLevel) {
@@ -4365,6 +4584,16 @@ function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxCon
   const priceValue = Number(price);
   const riskBudget = Math.max(1, Number(maxRisk || accountSize * 0.005 || 1));
   const riskLocked = Number(dailyPnl) <= -Math.abs(Number(maxDailyLoss || 0)) * 0.8;
+  const normalizedBias = normalizeActiveBias(activeBias);
+  if (normalizedBias === "neutral") {
+    return {
+      noTrade: true,
+      coachMessage: "No trade. Wait for confirmation.",
+      message: "No trade. Wait for confirmation.",
+      reason: "Bias is neutral. Do not force a long or short plan.",
+      score: 35,
+    };
+  }
   if (priceValue > middleLow && priceValue < middleHigh) {
     return {
       noTrade: true,
@@ -4387,7 +4616,7 @@ function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxCon
 
   const nearSupport = priceValue <= supportZoneHigh || Math.abs(priceValue - supportLevel) <= range * 0.18;
   const nearResistance = priceValue >= resistanceZoneLow || Math.abs(priceValue - resistanceLevel) <= range * 0.18;
-  const isLong = nearSupport || (!nearResistance && priceValue > resistanceLevel);
+  const isLong = normalizedBias === "bullish";
   const direction = isLong ? "long" : "short";
   const entry = roundToTick(priceValue, tick);
   const preferredStopPoints = marketSpec.pointValue >= 20 ? 12 : 16;
@@ -4407,7 +4636,7 @@ function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxCon
   const accountRiskPercent = accountSize > 0 ? (riskDollars / accountSize) * 100 : 0;
   let score = 88;
   const reasons = [];
-  if (!nearSupport && !nearResistance) {
+  if ((isLong && !nearSupport) || (!isLong && !nearResistance)) {
     score -= 18;
     reasons.push("wait for retest");
   }
@@ -4566,23 +4795,19 @@ function buildChartData({ price, entry, stop, support, resistance, trim1, trim2,
   });
 }
 
-function getLiveCoachMessage({ activePosition, autoTradePlan, discipline, engine, price, profile, tradeGrade, visualPlan }) {
+function getLiveCoachMessage({ activeBias, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, tradeGrade, visualPlan }) {
   if (discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss)) return "Daily loss limit reached. Stop trading.";
   if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message;
-  if (!visualPlan?.entry || !visualPlan?.stop) return "No active trade plan. Define entry, stop, and targets first.";
+  if (normalizeActiveBias(activeBias) === "neutral" || activeTradePlan?.direction === "none") return "Waiting for valid setup.";
+  if (!visualPlan?.entry || !visualPlan?.stop) return "Plan outdated. Regenerate from current market data.";
   if (tradeGrade?.letter === "Invalid") return "Invalid plan: targets are on the wrong side of entry.";
   if ((activePosition?.contracts || visualPlan.contracts || 0) > profile.maxContracts) return "High risk size detected. Reduce contracts.";
   if (tradeGrade?.score < 55) return "Risk too high. Lower contracts or wait for a cleaner level.";
 
-  const isLong = (activePosition?.direction || visualPlan.direction) !== "short";
+  const isLong = (activePosition?.direction || activeTradePlan?.direction || visualPlan.direction) !== "short";
   const stopHit = isLong ? price <= visualPlan.stop : price >= visualPlan.stop;
-  const trim1Hit = isLong ? price >= visualPlan.trim1 : price <= visualPlan.trim1;
-
   if (stopHit) return "Stop area reached. Respect your plan.";
-  if (trim1Hit) return "Trim 1 reached. Consider taking partial profit.";
-  if (autoTradePlan?.coachMessage) return autoTradePlan.coachMessage;
-  if (engine.bias.includes("WAIT")) return "Price is mid-range. Wait for support, resistance, or breakout.";
-  return engine.autoCoaching[0] || "Hold plan. Let price reach a decision level.";
+  return getTargetProgressMessage({ activePosition, plan: activeTradePlan || visualPlan, price }) || engine.autoCoaching[0] || "Hold plan. Let price reach a decision level.";
 }
 
 function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support, resistance, trim1, trim2, zoneDetection = {} }) {
