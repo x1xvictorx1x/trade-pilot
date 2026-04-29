@@ -3654,7 +3654,7 @@ function ProductUpgradePanel({ brokerConnection, discipline, journalEntries, pro
       </section>
 
       <section style={styles.card}>
-        <p style={styles.cardLabel}>Tradovate Read-Only</p>
+        <p style={styles.cardLabel}>Tradovate API Connection</p>
         <h2 style={styles.sectionTitle}>Broker Planning</h2>
         <div style={styles.metricGrid}>
           <Metric label="Connection" value={brokerConnection.connectionStatus || "Not Connected"} />
@@ -3834,6 +3834,7 @@ function ConnectionsPage({
   const [brokerStep, setBrokerStep] = useState(1);
   const [brokerPlatform, setBrokerPlatform] = useState("Tradovate");
   const [brokerProvider, setBrokerProvider] = useState("Lucid Trading");
+  const [hasTradovateApiAccess, setHasTradovateApiAccess] = useState(false);
   const [tradovateCredentials, setTradovateCredentials] = useState({
     appId: "trade-pilot",
     appVersion: "1.0",
@@ -3854,16 +3855,26 @@ function ConnectionsPage({
   const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
 
   const checkTradovateReadOnly = async () => {
-    try {
-      const response = await fetch(`${marketServerUrl}/api/tradovate/read-only/status`);
-      setTradovateStatus(await response.json());
-    } catch {
-      setTradovateStatus({
-        connected: false,
-        provider: "Tradovate",
-        security: "Start the local market server to inspect read-only readiness.",
-      });
-    }
+    const status = {
+      connected: false,
+      provider: "Tradovate API",
+      reads: [
+        "API Access required",
+        "CID required",
+        "SEC required",
+        "API password required",
+        "Normal broker login is not enough",
+      ],
+      security: "Tradovate direct connection requires API credentials from Tradovate or your provider. Use Manual Mode or TradingView Webhook until enabled.",
+      tradingActionsEnabled: false,
+    };
+    setTradovateStatus(status);
+    setTradovateDemoAuthStatus({
+      connected: false,
+      error: "API Access required. CID, SEC, and API password are required; normal login is not enough.",
+      message: "API plan required",
+    });
+    notify?.("Tradovate API plan checked");
   };
 
   const updateTradovateCredential = (key, value) => {
@@ -3871,6 +3882,13 @@ function ConnectionsPage({
   };
 
   const connectUserTradovate = async () => {
+    const missingCredentialsMessage = "Missing API credentials. Use Manual Mode or TradingView Webhook until your provider enables API access.";
+    if (!hasTradovateApiAccess) {
+      setTradovateDemoAuthStatus({ connected: false, error: missingCredentialsMessage, message: "API access required" });
+      notify?.(missingCredentialsMessage);
+      return;
+    }
+
     if (!session?.access_token) {
       setTradovateDemoAuthStatus({
         connected: false,
@@ -3884,9 +3902,8 @@ function ConnectionsPage({
 
     const missing = ["username", "password", "cid", "sec"].filter((key) => !String(tradovateCredentials[key] || "").trim());
     if (missing.length) {
-      const message = "Missing Tradovate API fields: username, password, cid, sec.";
-      setTradovateDemoAuthStatus({ connected: false, error: message, message: "Failed" });
-      notify?.(message);
+      setTradovateDemoAuthStatus({ connected: false, error: missingCredentialsMessage, message: "Failed" });
+      notify?.(missingCredentialsMessage);
       return;
     }
 
@@ -3925,6 +3942,23 @@ function ConnectionsPage({
       });
       notify?.("Tradovate connection failed");
     }
+  };
+
+  const activateLucidManualMode = () => {
+    setBrokerModalOpen(false);
+    activateManualMode();
+    setBrokerProvider("Lucid Trading");
+    setBrokerPlatform("Manual Mode");
+    updateProfile("accountType", "Funded / Prop Firm Account");
+    updateProfile("fundedProvider", "Lucid Trading");
+    updateProfile("fundedPlatform", "Manual Mode");
+    setTradovateDemoAuthStatus({
+      connected: false,
+      error: "",
+      manualFallback: true,
+      message: "Lucid Manual Mode active. Funded rules are enabled without broker API.",
+    });
+    notify?.("Lucid Manual Mode active");
   };
 
   const disconnectUserTradovate = async () => {
@@ -4028,6 +4062,7 @@ function ConnectionsPage({
         </div>
         <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
           <button onClick={() => setBrokerModalOpen(true)} style={styles.settingsButton}>Connect Broker</button>
+          <button onClick={activateLucidManualMode} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
           <button onClick={activateManualMode} style={styles.dismissButton}>Use Manual Mode</button>
           <button onClick={startDemoBroker} style={styles.settingsButton}>Connect Demo Broker</button>
           <button onClick={activateTradingViewMode} style={styles.dismissButton}>Use TradingView Webhook</button>
@@ -4038,7 +4073,7 @@ function ConnectionsPage({
           }} style={styles.secondaryButton}>Connect Tradovate</button>
         </div>
         {tradovateDemoAuthStatus ? (
-          <div style={{ ...(tradovateDemoAuthStatus.connected ? styles.coachPrompt : styles.priceWarning), marginTop: "14px" }}>
+          <div style={{ ...(tradovateDemoAuthStatus.connected || tradovateDemoAuthStatus.manualFallback ? styles.coachPrompt : styles.priceWarning), marginTop: "14px" }}>
             <strong>Tradovate: {tradovateDemoAuthStatus.message}</strong>
             {tradovateDemoAuthStatus.error ? <p style={{ margin: "6px 0 0" }}>{tradovateDemoAuthStatus.error}</p> : null}
             {tradovateDemoAuthStatus.connected ? (
@@ -4100,12 +4135,10 @@ function ConnectionsPage({
         <p style={styles.cardLabel}>Connection Modes</p>
         <h2 style={styles.sectionTitle}>Read-Only Platform Paths</h2>
         <div style={styles.sourceGrid}>
-          <SourceOption title="Manual Mode" text="Manually enter P/L, drawdown, and account stats." active={profile.fundedPlatform === "Manual Mode"} />
-          <SourceOption title="Demo Broker Mode" text="Starts simulated MNQ price, position, account balance, and P/L immediately." active={brokerConnection.platform === "Demo Broker"} />
+          <SourceOption title="Manual Funded Account" text="Track Lucid or other prop rules manually without broker API." active={isFunded && profile.fundedPlatform === "Manual Mode"} />
           <SourceOption title="TradingView Webhook" text="Waits for alert payloads with symbol, price, support, resistance, and bias." active={dataSource === "TradingView Webhook"} />
-          <SourceOption title="CSV Import" text="Upload trade reports from supported platforms as a fallback." active={profile.fundedPlatform === "CSV Import"} />
-          <SourceOption title="Tradovate Read-Only Coming Soon" text="Direct connection requires API access. Use Manual Mode or TradingView Webhook for now." active={profile.fundedPlatform === "Tradovate"} />
-          <SourceOption title="Rithmic Coming Soon" text="Prepared for future read-only platform support." active={profile.fundedPlatform === "Rithmic"} />
+          <SourceOption title="Tradovate API" text="Requires Tradovate API Access, API password, CID, and SEC." active={profile.fundedPlatform === "Tradovate"} />
+          <SourceOption title="Demo Broker" text="Starts simulated MNQ price, position, account balance, and P/L immediately." active={brokerConnection.platform === "Demo Broker"} />
         </div>
       </section>
 
@@ -4213,9 +4246,9 @@ function ConnectionsPage({
         <div style={styles.sourceGrid}>
           <SourceOption title="Manual Mode" text="Use dashboard inputs, sliders, and Fast Mode without external broker data." active={dataSource === "Manual Mode"} />
           <SourceOption title="Demo / Simulated Broker" text="Connects to the local demo stream for safe testing." active={brokerConnection.platform === "Demo Broker"} />
-          <SourceOption title="Tradovate Demo Read-Only" text="Connect your own demo API credentials. Secrets are encrypted server-side." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "demo"} />
-          <SourceOption title="Tradovate Prop/Funded Read-Only" text="Connect your own funded/eval API credentials. No trading actions are implemented." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "funded"} />
-          <SourceOption title="Tradovate Live Read-Only" text="Connect your own live API credentials with order placement disabled." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "live"} />
+          <SourceOption title="Tradovate Demo API" text="Connect your own demo API credentials. Secrets are encrypted server-side." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "demo"} />
+          <SourceOption title="Tradovate Prop/Funded API" text="Connect your own funded/eval API credentials. No trading actions are implemented." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "funded"} />
+          <SourceOption title="Tradovate Live API" text="Connect your own live API credentials with order placement disabled." active={dataSource === "Tradovate Read-Only" && brokerConnection.accountType === "live"} />
           <SourceOption title="TradingView Webhook" text="Accepts symbol, price, signal type, support, resistance, and timestamp." />
           <SourceOption title="CSV Import" text="Reserved for trade-history review and coaching analytics." />
         </div>
@@ -4223,8 +4256,13 @@ function ConnectionsPage({
 
       <section style={styles.card}>
         <p style={styles.cardLabel}>Phase 2</p>
-        <h2 style={styles.sectionTitle}>Tradovate Read-Only</h2>
-        <p style={styles.muted}>Use your dedicated Tradovate API password. Broker credentials, API keys, accessToken, and mdAccessToken stay on the backend only.</p>
+        <h2 style={styles.sectionTitle}>Tradovate API Connection</h2>
+        <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Webhook or Manual Mode.</p>
+        {brokerProvider === "Lucid Trading" || profile.fundedProvider === "Lucid Trading" ? (
+          <div style={{ ...styles.priceWarning, marginTop: "12px" }}>
+            Lucid Trading accounts may not support direct API access unless Lucid/Tradovate provides API credentials. Use TradingView Webhook + Manual Funded Rules for now.
+          </div>
+        ) : null}
         <div style={{ ...styles.segmentGroup, marginTop: "14px" }}>
           {[
             ["demo", "Demo"],
@@ -4240,6 +4278,7 @@ function ConnectionsPage({
             setBrokerStep(4);
             setBrokerModalOpen(true);
           }} style={styles.settingsButton}>Connect Tradovate</button>
+          <button onClick={activateLucidManualMode} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
           <button onClick={checkTradovateReadOnly} style={styles.secondaryButton}>Check API Plan</button>
           <button onClick={disconnectUserTradovate} style={styles.secondaryButton}>Disconnect Tradovate</button>
         </div>
@@ -4282,10 +4321,13 @@ function ConnectionsPage({
           brokerProvider={brokerProvider}
           brokerStep={brokerStep}
           credentials={tradovateCredentials}
+          hasApiAccess={hasTradovateApiAccess}
           onAccountType={setTradovateAccountType}
+          onActivateLucidManual={activateLucidManualMode}
           onClose={() => setBrokerModalOpen(false)}
           onContinue={continueBrokerFlow}
           onCredential={updateTradovateCredential}
+          onHasApiAccess={setHasTradovateApiAccess}
           onPlatform={setBrokerPlatform}
           onProvider={setBrokerProvider}
           onStep={setBrokerStep}
@@ -4302,10 +4344,13 @@ function BrokerConnectModal({
   brokerProvider,
   brokerStep,
   credentials,
+  hasApiAccess,
   onAccountType,
+  onActivateLucidManual,
   onClose,
   onContinue,
   onCredential,
+  onHasApiAccess,
   onPlatform,
   onProvider,
   onStep,
@@ -4318,7 +4363,7 @@ function BrokerConnectModal({
     ["prop", "Funded / Eval"],
     ["funded-live", "Funded Live"],
   ];
-  const providerOptions = ["Lucid Trading", "Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other"];
+  const providerOptions = ["Lucid Trading", "Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Other"];
   const nextLabel = brokerStep < 4 ? "Continue" : brokerPlatform === "Tradovate" ? "Connect Tradovate" : "Activate";
 
   return (
@@ -4397,6 +4442,11 @@ function BrokerConnectModal({
                 </button>
               ))}
             </div>
+            {brokerProvider === "Lucid Trading" ? (
+              <div style={{ ...styles.priceWarning, marginTop: "14px" }}>
+                Lucid Trading accounts may not support direct API access unless Lucid/Tradovate provides API credentials. Use TradingView Webhook + Manual Funded Rules for now.
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -4406,17 +4456,32 @@ function BrokerConnectModal({
             <h3 style={styles.sectionTitle}>Connect</h3>
             {brokerPlatform === "Tradovate" ? (
               <>
-                <p style={styles.muted}>OAuth popup is planned. For alpha, use secure read-only API credentials. Secrets are encrypted server-side and tokens never return to the browser.</p>
-                <div style={{ ...styles.formGrid, marginTop: "16px" }}>
-                  <Field label="Username" value={credentials.username} onChange={(value) => onCredential("username", value)} />
-                  <Field label="API Password" type="password" value={credentials.password} onChange={(value) => onCredential("password", value)} />
-                  <Field label="CID" value={credentials.cid} onChange={(value) => onCredential("cid", value)} />
-                  <Field label="SEC" type="password" value={credentials.sec} onChange={(value) => onCredential("sec", value)} />
-                  <Field label="App ID" value={credentials.appId} onChange={(value) => onCredential("appId", value)} />
-                  <Field label="App Version" value={credentials.appVersion} onChange={(value) => onCredential("appVersion", value)} />
-                  <Field label="Device ID" value={credentials.deviceId} onChange={(value) => onCredential("deviceId", value)} />
-                  <SelectField label="Environment" value={credentials.environment} options={["demo", "live"]} onChange={(value) => onCredential("environment", value)} />
+                <h4 style={{ ...styles.sectionTitle, fontSize: "20px" }}>Tradovate API Connection</h4>
+                <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Webhook or Manual Mode.</p>
+                {brokerProvider === "Lucid Trading" ? (
+                  <div style={{ ...styles.priceWarning, marginTop: "14px" }}>
+                    Lucid Trading accounts may not support direct API access unless Lucid/Tradovate provides API credentials. Use TradingView Webhook + Manual Funded Rules for now.
+                  </div>
+                ) : null}
+                <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
+                  <button onClick={() => onHasApiAccess(true)} style={hasApiAccess ? styles.settingsButton : styles.secondaryButton}>I have Tradovate API access</button>
+                  <button onClick={onActivateLucidManual} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
                 </div>
+                <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
+                  API Access required. CID required. SEC required. API password required. Normal login is not enough.
+                </div>
+                {hasApiAccess ? (
+                  <div style={{ ...styles.formGrid, marginTop: "16px" }}>
+                    <Field label="Username" value={credentials.username} onChange={(value) => onCredential("username", value)} />
+                    <Field label="API Password" type="password" value={credentials.password} onChange={(value) => onCredential("password", value)} />
+                    <Field label="CID" value={credentials.cid} onChange={(value) => onCredential("cid", value)} />
+                    <Field label="SEC" type="password" value={credentials.sec} onChange={(value) => onCredential("sec", value)} />
+                    <Field label="App ID" value={credentials.appId} onChange={(value) => onCredential("appId", value)} />
+                    <Field label="App Version" value={credentials.appVersion} onChange={(value) => onCredential("appVersion", value)} />
+                    <Field label="Device ID" value={credentials.deviceId} onChange={(value) => onCredential("deviceId", value)} />
+                    <SelectField label="Environment" value={credentials.environment} options={["demo", "live"]} onChange={(value) => onCredential("environment", value)} />
+                  </div>
+                ) : null}
               </>
             ) : (
               <p style={styles.muted}>
