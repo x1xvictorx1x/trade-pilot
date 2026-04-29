@@ -454,6 +454,7 @@ export default function App() {
   const [pullbackSupport, setPullbackSupport] = useState((marketDefaults[profile.mainMarket] ?? 27400) - 35);
   const [breakoutLevel, setBreakoutLevel] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 50);
   const [levelBias, setLevelBias] = useState("bullish");
+  const previousDataSourceRef = useRef(dataSource);
 
   useEffect(() => {
     localStorage.setItem(profileStorageKey, JSON.stringify(profile));
@@ -626,6 +627,31 @@ export default function App() {
   }, [dataSource, profile.mainMarket]);
 
   useEffect(() => {
+    const previousSource = previousDataSourceRef.current;
+    if (previousSource === dataSource) return;
+    previousDataSourceRef.current = dataSource;
+    setPlannedTrade((current) => {
+      if (!current || current.sourceMode === dataSource) return current;
+      setFastMessage("Plan reset. Generate a new plan from current data.");
+      return null;
+    });
+    setActivePosition((current) => {
+      if (!current || current.sourceMode === dataSource) return current;
+      return null;
+    });
+  }, [dataSource]);
+
+  useEffect(() => {
+    if (!plannedTrade) return;
+    const validation = validateTradePlan(plannedTrade);
+    if (validation.valid) return;
+    setPlannedTrade(null);
+    setActivePosition(null);
+    setPriceStatus(validation.reason);
+    setFastMessage("Plan reset. Generate a new plan from current data.");
+  }, [plannedTrade]);
+
+  useEffect(() => {
     if (!autoPrice) {
       setDataSource("Manual Mode");
       setPriceStatus("");
@@ -663,26 +689,31 @@ export default function App() {
         const trim2 = brokerPosition.direction === "long" ? brokerPosition.entry + profile.trim2Points : brokerPosition.entry - profile.trim2Points;
         const runner = brokerPosition.direction === "long" ? brokerPosition.entry + profile.runnerPoints : brokerPosition.entry - profile.runnerPoints;
 
-        setDirection(brokerPosition.direction);
-        setEntry(brokerPosition.entry);
-        setContracts(brokerPosition.contracts);
-        setActivePosition({
+        const brokerPlan = normalizeTradePlan({
           ...brokerPosition,
+          sourceMode: dataSource,
           stop: brokerPosition.stop ?? fallbackStop,
           target: brokerPosition.target ?? runner,
           trim1,
           trim2,
           runner,
+        }, {
+          contracts: brokerPosition.contracts,
+          direction: brokerPosition.direction,
+          entry: brokerPosition.entry,
+          stop: brokerPosition.stop ?? fallbackStop,
+        });
+        setDirection(brokerPlan.direction);
+        setEntry(brokerPlan.entry);
+        setContracts(brokerPlan.contracts);
+        setActivePosition({
+          ...brokerPlan,
+          status: "active",
         });
         setPlannedTrade({
-          ...brokerPosition,
+          ...brokerPlan,
           setupType: "Broker Connection",
           status: "active",
-          stop: brokerPosition.stop ?? fallbackStop,
-          target: brokerPosition.target ?? runner,
-          trim1,
-          trim2,
-          runner,
         });
         setFastMessage(`${snapshot.platform} synced an active ${brokerPosition.direction} position.`);
       } else if (snapshot.connected && !snapshot.position) {
@@ -993,25 +1024,13 @@ export default function App() {
   const startFastTrade = (nextDirection) => {
     const nextEntry = price;
     const stop = getSmartStop({ direction: nextDirection, entry: nextEntry, resistance, riskPoints, support }).smartStop;
-    const trim1 = nextDirection === "long" ? nextEntry + profile.trim1Points : nextEntry - profile.trim1Points;
-    const trim2 = nextDirection === "long" ? nextEntry + profile.trim2Points : nextEntry - profile.trim2Points;
-    const runner = nextDirection === "long" ? nextEntry + profile.runnerPoints : nextEntry - profile.runnerPoints;
-
-    setDirection(nextDirection);
-    setEntry(nextEntry);
-    setActivePosition({
-      direction: nextDirection,
-      entry: nextEntry,
-      contracts,
-      stop,
-      target: runner,
-      trim1,
-      trim2,
-      runner,
-      status: "active",
-      lastAction: `${nextDirection === "long" ? "Long" : "Short"} loaded from Fast Mode`,
-    });
-    setPlannedTrade({
+    const trim1Points = Math.max(1, Math.abs(Number(profile.trim1Points) || 1));
+    const trim2Points = Math.max(trim1Points + 0.25, Math.abs(Number(profile.trim2Points) || trim1Points * 2));
+    const runnerPoints = Math.max(trim2Points + 0.25, Math.abs(Number(profile.runnerPoints) || trim2Points * 1.5));
+    const trim1 = nextDirection === "long" ? nextEntry + trim1Points : nextEntry - trim1Points;
+    const trim2 = nextDirection === "long" ? nextEntry + trim2Points : nextEntry - trim2Points;
+    const runner = nextDirection === "long" ? nextEntry + runnerPoints : nextEntry - runnerPoints;
+    const nextPlan = normalizeTradePlan({
       direction: nextDirection,
       entry: nextEntry,
       contracts,
@@ -1021,9 +1040,18 @@ export default function App() {
       trim2,
       runner,
       setupType: "Fast Mode",
+      sourceMode: dataSource,
       status: "planned",
       lastAction: `${nextDirection === "long" ? "Long" : "Short"} loaded from Fast Mode`,
     });
+
+    setDirection(nextDirection);
+    setEntry(nextEntry);
+    setActivePosition({
+      ...nextPlan,
+      status: "active",
+    });
+    setPlannedTrade(nextPlan);
     setDiscipline((current) => ({ ...current, tradesTaken: current.tradesTaken + 1 }));
     setFastMessage(`${nextDirection === "long" ? "Long" : "Short"} loaded. Entry, stop, trims, and runner are ready.`);
   };
@@ -1079,14 +1107,15 @@ export default function App() {
     setDirection(nextDirection);
     setEntry(plan.entry);
     setRiskPoints(nextRisk);
-    setPlannedTrade({
+    setPlannedTrade(normalizeTradePlan({
       ...plan,
       contracts,
+      sourceMode: dataSource,
       target: plan.runner,
       setupType,
       status: "planned",
       lastAction: `${setupType} plan generated`,
-    });
+    }));
     setFastMessage(`${setupType} plan loaded. Review the ladder and risk/reward before acting.`);
   };
 
@@ -1127,13 +1156,31 @@ export default function App() {
     const nextMarket = normalizeFuturesSymbol(alert.symbol || profile.mainMarket);
     const nextPrice = Number(alert.price);
     const signalTime = alert.created_at || alert.receivedAt || alert.timestamp || new Date().toISOString();
+    const hasSupport = Number.isFinite(Number(alert.support));
+    const hasResistance = Number.isFinite(Number(alert.resistance));
+    const hasEntry = Number.isFinite(Number(alert.entry));
+    const hasStop = Number.isFinite(Number(alert.stop));
     if (nextMarket && nextMarket !== profile.mainMarket) updateProfile("mainMarket", nextMarket);
     if (Number.isFinite(nextPrice)) setPrice(nextPrice);
-    if (alert.direction === "long" || alert.direction === "short") setDirection(alert.direction);
-    if (Number.isFinite(Number(alert.support))) setSupport(Number(alert.support));
-    if (Number.isFinite(Number(alert.resistance))) setResistance(Number(alert.resistance));
-    if (Number.isFinite(Number(alert.entry))) setEntry(Number(alert.entry));
-    if (Number.isFinite(Number(alert.stop)) && Number.isFinite(Number(alert.entry))) setRiskPoints(Math.abs(Number(alert.entry) - Number(alert.stop)));
+    const nextDirection = alert.direction === "long" || alert.direction === "short"
+      ? alert.direction
+      : alert.bias === "bearish"
+        ? "short"
+        : alert.bias === "bullish"
+          ? "long"
+          : direction;
+    setDirection(nextDirection);
+    if (hasSupport) setSupport(Number(alert.support));
+    if (hasResistance) setResistance(Number(alert.resistance));
+    if (!hasSupport && !hasResistance && dataSource !== "Manual Mode" && Number.isFinite(nextPrice)) {
+      const pad = Math.max(8, Math.abs(nextPrice) * 0.0015);
+      setSupport(Number((nextPrice - pad).toFixed(2)));
+      setResistance(Number((nextPrice + pad).toFixed(2)));
+      setFastMessage("TradingView price received. Add levels to generate a stronger plan.");
+    }
+    if (hasEntry) setEntry(Number(alert.entry));
+    else if (Number.isFinite(nextPrice)) setEntry(nextPrice);
+    if (hasStop && hasEntry) setRiskPoints(Math.abs(Number(alert.entry) - Number(alert.stop)));
     if (signalTime) setLastUpdated(new Date(signalTime).toLocaleTimeString());
     else setLastUpdated(new Date().toLocaleTimeString());
     if (Number.isFinite(nextPrice)) {
@@ -1143,21 +1190,28 @@ export default function App() {
       });
     }
     if (alert.bias) setLevelBias(alert.bias);
-    if (Number.isFinite(Number(alert.entry)) && Number.isFinite(Number(alert.stop)) && alert.targets) {
+    if (hasEntry && hasStop && alert.targets) {
       const targets = Array.isArray(alert.targets) ? alert.targets.map(Number).filter(Number.isFinite) : [];
       if (targets.length) {
-        setPlannedTrade({
+        const tvPlan = normalizeTradePlan({
           contracts,
-          direction: alert.bias === "bearish" ? "short" : direction,
+          direction: nextDirection,
           entry: Number(alert.entry),
           runner: targets[2] ?? targets[targets.length - 1],
           setupType: "TradingView Alert",
+          sourceMode: "TradingView Webhook",
           status: "planned",
           stop: Number(alert.stop),
           target: targets[targets.length - 1],
           trim1: targets[0],
           trim2: targets[1] ?? targets[0],
+        }, {
+          contracts,
+          direction: nextDirection,
+          entry: Number(alert.entry),
+          stop: Number(alert.stop),
         });
+        setPlannedTrade(tvPlan);
       }
     }
     setBrokerConnection((current) => ({
@@ -1177,7 +1231,9 @@ export default function App() {
     setDataSource("TradingView Webhook");
     setAutoPrice(true);
     setPriceStatus("TradingView signal received");
-    setFastMessage(`TradingView signal received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
+    setFastMessage(!hasSupport && !hasResistance
+      ? `TradingView price received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}. Add levels to generate plan.`
+      : `TradingView signal received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
     if (activePage !== "connections") setActivePage("dashboard");
   };
 
@@ -1205,17 +1261,24 @@ export default function App() {
       return [demoItem, ...current.filter((item) => item.id !== demoItem.id && item.symbol !== symbol)].slice(0, 8);
     });
     if (snapshot.position) {
-      setActivePosition(snapshot.position);
-      setPlannedTrade({
+      const demoPlan = normalizeTradePlan({
         ...snapshot.position,
         runner: snapshot.position.target ?? snapshot.position.entry + profile.runnerPoints,
+        sourceMode: "Demo Broker",
         setupType: "Demo Broker",
         status: "active",
         stop: snapshot.position.stop ?? snapshot.position.entry - profile.defaultRiskPoints,
         target: snapshot.position.target ?? snapshot.position.entry + profile.runnerPoints,
         trim1: snapshot.position.trim1 ?? snapshot.position.entry + profile.trim1Points,
         trim2: snapshot.position.trim2 ?? snapshot.position.entry + profile.trim2Points,
+      }, {
+        contracts,
+        direction,
+        entry: snapshot.position.entry,
+        stop: snapshot.position.entry - profile.defaultRiskPoints,
       });
+      setActivePosition(demoPlan);
+      setPlannedTrade(demoPlan);
     }
     setLastUpdated(new Date(snapshot.timestamp || snapshot.updatedAt || Date.now()).toLocaleTimeString());
     setFastMessage("Demo Broker Connected - simulated data is powering the dashboard.");
@@ -2744,7 +2807,7 @@ function Dashboard({
   };
   const visualPlan = normalizeTradePlan(plannedTrade ?? activePosition ?? (!autoTradePlan.noTrade ? autoTradePlan : fallbackPlan), fallbackPlan);
   const missedEntry = getMissedEntryMessage({ currentPrice: price, plan: visualPlan });
-  const rewardRisk = getRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
+  const rewardRisk = calculateRewardRisk({ plan: visualPlan, pointValue: marketSpec.pointValue });
   const tradeGrade = getTradeGrade({
     contracts: visualPlan.contracts ?? contracts,
     dailyPnl: discipline.dailyPnl,
@@ -3474,6 +3537,7 @@ function TradePlanCard({ autoTradePlan, hasPlan, missedEntry, profile, rewardRis
               Auto plan: {autoTradePlan.direction.toUpperCase()} entry {autoTradePlan.entry.toFixed(2)}, stop {autoTradePlan.stop.toFixed(2)}, trims {autoTradePlan.trim1.toFixed(2)} / {autoTradePlan.trim2.toFixed(2)}, runner {autoTradePlan.runner.toFixed(2)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100. {autoTradePlan.reason}
             </div>
           ) : null}
+          {rewardRisk.invalid ? <div style={styles.priceWarning}>{rewardRisk.reason || "Invalid plan: targets are on the wrong side of entry."}</div> : null}
           {missedEntry ? <div style={styles.missedEntry}>{missedEntry}</div> : null}
         </>
       ) : (
@@ -3589,9 +3653,12 @@ function calculateTrade({ activePosition, contracts, direction, discipline, entr
   const shortTrigger = price < support;
   const directionAligned = (isLong && longTrigger) || (!isLong && shortTrigger);
   const distanceFromEntry = Math.abs(price - entry);
-  const trim1 = isLong ? entry + profile.trim1Points : entry - profile.trim1Points;
-  const trim2 = isLong ? entry + profile.trim2Points : entry - profile.trim2Points;
-  const runner = isLong ? entry + profile.runnerPoints : entry - profile.runnerPoints;
+  const trim1Points = Math.max(1, Math.abs(Number(profile.trim1Points) || 1));
+  const trim2Points = Math.max(trim1Points + 0.25, Math.abs(Number(profile.trim2Points) || trim1Points * 2));
+  const runnerPoints = Math.max(trim2Points + 0.25, Math.abs(Number(profile.runnerPoints) || trim2Points * 1.5));
+  const trim1 = isLong ? entry + trim1Points : entry - trim1Points;
+  const trim2 = isLong ? entry + trim2Points : entry - trim2Points;
+  const runner = isLong ? entry + runnerPoints : entry - runnerPoints;
   const rewardPoints = Math.abs(trim2 - entry);
   const rewardRisk = riskPoints > 0 ? rewardPoints / riskPoints : 0;
   const { smartStop, stopReason } = getSmartStop({ direction, entry, resistance, riskPoints, support });
@@ -3910,6 +3977,14 @@ function averageNearest(levels, price, side) {
 }
 
 function getTradeGrade({ contracts, dailyPnl, entry, maxContracts, maxDailyLoss, price, rewardRisk, resistance, stop, support, zoneDetection = {} }) {
+  if (rewardRisk?.invalid || rewardRisk?.runnerReward <= 0 || rewardRisk?.ratio <= 0) {
+    return {
+      letter: "Invalid",
+      reason: rewardRisk?.reason || "Invalid plan: targets are on the wrong side of entry.",
+      score: 0,
+      reasons: [rewardRisk?.reason || "targets are on the wrong side of entry"],
+    };
+  }
   const range = Math.max(1, Math.abs(resistance - support));
   const supportLevel = Number(zoneDetection.supportLevel ?? support);
   const resistanceLevel = Number(zoneDetection.resistanceLevel ?? resistance);
@@ -3980,32 +4055,62 @@ function getMissedEntryMessage({ currentPrice, plan }) {
 
 function getRewardRisk({ plan, pointValue }) {
   if (!plan?.entry || !plan?.stop) {
-    return { ratio: 0, risk: 0, trim1Reward: 0, trim2Reward: 0, runnerReward: 0 };
+    return { invalid: true, ratio: 0, reason: "Missing entry or stop.", risk: 0, trim1Reward: 0, trim2Reward: 0, runnerReward: 0 };
   }
 
   const contracts = plan.contracts || 1;
-  const riskPoints = Math.abs(plan.entry - plan.stop);
+  const direction = plan.direction === "short" ? "short" : "long";
+  const validation = validateTradePlan(plan);
+  const riskPoints = direction === "long" ? plan.entry - plan.stop : plan.stop - plan.entry;
   const risk = riskPoints * pointValue * contracts;
-  const rewardFor = (target) => Math.abs(target - plan.entry) * pointValue * contracts;
+  const rewardFor = (target) => {
+    const rewardPoints = direction === "long" ? Number(target) - plan.entry : plan.entry - Number(target);
+    return rewardPoints * pointValue * contracts;
+  };
   const runnerReward = rewardFor(plan.runner ?? plan.target ?? plan.entry);
 
   return {
-    ratio: risk > 0 ? runnerReward / risk : 0,
-    risk,
+    invalid: !validation.valid,
+    ratio: risk > 0 && runnerReward > 0 ? runnerReward / risk : 0,
+    reason: validation.reason,
+    risk: Math.max(0, risk),
     trim1Reward: rewardFor(plan.trim1 ?? plan.entry),
     trim2Reward: rewardFor(plan.trim2 ?? plan.entry),
     runnerReward,
   };
 }
 
+function calculateRewardRisk(args) {
+  return getRewardRisk(args);
+}
+
 function normalizeTradePlan(plan = {}, fallback = {}) {
   const direction = plan.direction === "short" ? "short" : "long";
   const entry = safeNumber(plan.entry, fallback.entry, 0);
-  const stop = safeNumber(plan.stop, fallback.stop, direction === "long" ? entry - 10 : entry + 10);
+  const rawStop = safeNumber(plan.stop, fallback.stop, direction === "long" ? entry - 10 : entry + 10);
+  const stop = direction === "long" && rawStop < entry
+    ? rawStop
+    : direction === "short" && rawStop > entry
+      ? rawStop
+      : direction === "long"
+        ? entry - Math.max(1, Math.abs(rawStop - entry) || 10)
+        : entry + Math.max(1, Math.abs(rawStop - entry) || 10);
   const riskPoints = Math.max(1, Math.abs(entry - stop));
-  const trim1 = safeNumber(plan.trim1, fallback.trim1, direction === "long" ? entry + riskPoints * 1.25 : entry - riskPoints * 1.25);
-  const trim2 = safeNumber(plan.trim2, fallback.trim2, direction === "long" ? entry + riskPoints * 2 : entry - riskPoints * 2);
-  const runner = safeNumber(plan.runner, plan.target, fallback.runner, fallback.target, direction === "long" ? entry + riskPoints * 3 : entry - riskPoints * 3);
+  const safeTarget = (value, multiplier) => {
+    const number = Number(value);
+    const fallbackTarget = direction === "long" ? entry + riskPoints * multiplier : entry - riskPoints * multiplier;
+    if (!Number.isFinite(number)) return fallbackTarget;
+    return direction === "long" && number > entry ? number : direction === "short" && number < entry ? number : fallbackTarget;
+  };
+  const trim1 = safeTarget(plan.trim1 ?? fallback.trim1, 1.25);
+  const trim2Candidate = safeTarget(plan.trim2 ?? fallback.trim2, 2);
+  const trim2 = direction === "long"
+    ? Math.max(trim2Candidate, trim1 + riskPoints * 0.25)
+    : Math.min(trim2Candidate, trim1 - riskPoints * 0.25);
+  const runnerCandidate = safeTarget(plan.runner ?? plan.target ?? fallback.runner ?? fallback.target, 3);
+  const runner = direction === "long"
+    ? Math.max(runnerCandidate, trim2 + riskPoints * 0.25)
+    : Math.min(runnerCandidate, trim2 - riskPoints * 0.25);
   return {
     ...fallback,
     ...plan,
@@ -4014,9 +4119,28 @@ function normalizeTradePlan(plan = {}, fallback = {}) {
     entry,
     runner,
     stop,
-    target: safeNumber(plan.target, runner),
+    target: runner,
     trim1,
     trim2,
+  };
+}
+
+function validateTradePlan(plan = {}) {
+  const direction = plan.direction === "short" ? "short" : "long";
+  const entry = Number(plan.entry);
+  const stop = Number(plan.stop);
+  const trim1 = Number(plan.trim1);
+  const trim2 = Number(plan.trim2);
+  const runner = Number(plan.runner ?? plan.target);
+  if (![entry, stop, trim1, trim2, runner].every(Number.isFinite)) {
+    return { valid: false, reason: "Invalid plan: entry, stop, and targets must be defined." };
+  }
+  const valid = direction === "long"
+    ? stop < entry && trim1 > entry && trim2 > trim1 && runner > trim2
+    : stop > entry && trim1 < entry && trim2 < trim1 && runner < trim2;
+  return {
+    valid,
+    reason: valid ? "" : "Invalid plan: targets are on the wrong side of entry.",
   };
 }
 
@@ -4029,8 +4153,14 @@ function safeNumber(...values) {
 }
 
 function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxContracts, maxDailyLoss, maxRisk, price, resistance, support, zoneDetection = {} }) {
-  const supportLevel = Number(zoneDetection.supportLevel ?? support);
-  const resistanceLevel = Number(zoneDetection.resistanceLevel ?? resistance);
+  let supportLevel = Number(zoneDetection.supportLevel ?? support);
+  let resistanceLevel = Number(zoneDetection.resistanceLevel ?? resistance);
+  if (!Number.isFinite(supportLevel) || !Number.isFinite(resistanceLevel) || supportLevel >= resistanceLevel) {
+    const priceValue = Number(price) || 0;
+    const pad = Math.max(8, Math.abs(priceValue) * 0.0015);
+    supportLevel = Number.isFinite(supportLevel) && supportLevel < priceValue ? supportLevel : priceValue - pad;
+    resistanceLevel = Number.isFinite(resistanceLevel) && resistanceLevel > priceValue ? resistanceLevel : priceValue + pad;
+  }
   const supportZoneHigh = Number(zoneDetection.supportZoneHigh ?? supportLevel);
   const resistanceZoneLow = Number(zoneDetection.resistanceZoneLow ?? resistanceLevel);
   const range = Math.max(1, resistanceLevel - supportLevel);
@@ -4068,9 +4198,9 @@ function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxCon
   const preferredStopPoints = marketSpec.pointValue >= 20 ? 12 : 16;
   const maxBudgetStopPoints = riskBudget / Math.max(1, marketSpec.pointValue * Number(contracts || 1));
   const stopPoints = roundToTick(Math.max(tick * 8, Math.min(preferredStopPoints, maxBudgetStopPoints || preferredStopPoints, range * 0.22)), tick);
-  const structureStop = isLong ? supportLevel - tick * 4 : resistanceLevel + tick * 4;
+  const structureStop = isLong ? Math.min(supportLevel - tick * 4, entry - tick) : Math.max(resistanceLevel + tick * 4, entry + tick);
   const budgetStop = isLong ? entry - stopPoints : entry + stopPoints;
-  const stop = roundToTick(isLong ? Math.max(structureStop, budgetStop) : Math.min(structureStop, budgetStop), tick);
+  const stop = roundToTick(isLong ? Math.min(entry - tick, Math.max(structureStop, budgetStop)) : Math.max(entry + tick, Math.min(structureStop, budgetStop)), tick);
   const riskPoints = Math.abs(entry - stop);
   const trim1 = roundToTick(isLong ? entry + riskPoints * 1.25 : entry - riskPoints * 1.25, tick);
   const trim2 = roundToTick(isLong ? entry + riskPoints * 2 : entry - riskPoints * 2, tick);
@@ -4245,6 +4375,7 @@ function getLiveCoachMessage({ activePosition, autoTradePlan, discipline, engine
   if (discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss)) return "Daily loss limit reached. Stop trading.";
   if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message;
   if (!visualPlan?.entry || !visualPlan?.stop) return "No active trade plan. Define entry, stop, and targets first.";
+  if (tradeGrade?.letter === "Invalid") return "Invalid plan: targets are on the wrong side of entry.";
   if ((activePosition?.contracts || visualPlan.contracts || 0) > profile.maxContracts) return "High risk size detected. Reduce contracts.";
   if (tradeGrade?.score < 55) return "Risk too high. Lower contracts or wait for a cleaner level.";
 
@@ -4444,9 +4575,11 @@ function getEquityCurvePoints(journalEntries = [], discipline = {}) {
 
 function getSmartStop({ direction, entry, resistance, riskPoints, support }) {
   const isLong = direction === "long";
-  const structureStop = isLong ? support - 1 : resistance + 1;
-  const fallbackStop = isLong ? entry - riskPoints : entry + riskPoints;
-  const useStructureStop = Math.abs(entry - structureStop) <= riskPoints * 1.5;
+  const risk = Math.max(1, Math.abs(Number(riskPoints) || 1));
+  const structureStop = isLong ? Math.min(Number(support) - 1, entry - 0.25) : Math.max(Number(resistance) + 1, entry + 0.25);
+  const fallbackStop = isLong ? entry - risk : entry + risk;
+  const structureOnCorrectSide = isLong ? structureStop < entry : structureStop > entry;
+  const useStructureStop = structureOnCorrectSide && Math.abs(entry - structureStop) <= risk * 1.5;
 
   return {
     smartStop: useStructureStop ? structureStop : fallbackStop,
