@@ -3855,6 +3855,7 @@ function ConnectionsPage({
   const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
 
   const checkTradovateReadOnly = async () => {
+    const isLucid = brokerProvider === "Lucid Trading" || profile.fundedProvider === "Lucid Trading";
     const status = {
       connected: false,
       provider: "Tradovate API",
@@ -3865,13 +3866,15 @@ function ConnectionsPage({
         "API password required",
         "Normal broker login is not enough",
       ],
-      security: "Tradovate direct connection requires API credentials from Tradovate or your provider. Use Manual Mode or TradingView Webhook until enabled.",
+      security: isLucid
+        ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook."
+        : "Tradovate direct connection requires API credentials from Tradovate or your provider. Use Manual Mode or TradingView Webhook until enabled.",
       tradingActionsEnabled: false,
     };
     setTradovateStatus(status);
     setTradovateDemoAuthStatus({
       connected: false,
-      error: "API Access required. CID, SEC, and API password are required; normal login is not enough.",
+      error: isLucid ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook." : "API Access required. CID, SEC, and API password are required; normal login is not enough.",
       message: "API plan required",
     });
     notify?.("Tradovate API plan checked");
@@ -3882,7 +3885,9 @@ function ConnectionsPage({
   };
 
   const connectUserTradovate = async () => {
-    const missingCredentialsMessage = "Missing API credentials. Use Manual Mode or TradingView Webhook until your provider enables API access.";
+    const missingCredentialsMessage = brokerProvider === "Lucid Trading"
+      ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook."
+      : "Missing API credentials. Use Manual Mode or TradingView Webhook until your provider enables API access.";
     if (!hasTradovateApiAccess) {
       setTradovateDemoAuthStatus({ connected: false, error: missingCredentialsMessage, message: "API access required" });
       notify?.(missingCredentialsMessage);
@@ -3959,6 +3964,23 @@ function ConnectionsPage({
       message: "Lucid Manual Mode active. Funded rules are enabled without broker API.",
     });
     notify?.("Lucid Manual Mode active");
+  };
+
+  const activateLucidTradingViewMode = () => {
+    setBrokerModalOpen(false);
+    activateTradingViewMode();
+    setBrokerProvider("Lucid Trading");
+    setBrokerPlatform("TradingView Webhook");
+    updateProfile("accountType", "Funded / Prop Firm Account");
+    updateProfile("fundedProvider", "Lucid Trading");
+    updateProfile("fundedPlatform", "TradingView Webhook");
+    setTradovateDemoAuthStatus({
+      connected: false,
+      error: "",
+      manualFallback: true,
+      message: "TradingView Webhook setup active for Lucid. Live price, levels, bias, chart, and coach updates can come from webhook alerts.",
+    });
+    notify?.("TradingView Webhook setup active");
   };
 
   const disconnectUserTradovate = async () => {
@@ -4061,14 +4083,19 @@ function ConnectionsPage({
           {isFunded ? <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} /> : null}
         </div>
         <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
-          <button onClick={() => setBrokerModalOpen(true)} style={styles.settingsButton}>Connect Broker</button>
+          <button onClick={() => {
+            if (brokerProvider === "Lucid Trading" || profile.fundedProvider === "Lucid Trading") setHasTradovateApiAccess(false);
+            setBrokerModalOpen(true);
+          }} style={styles.settingsButton}>Connect Broker</button>
           <button onClick={activateLucidManualMode} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
+          <button onClick={activateLucidTradingViewMode} style={styles.secondaryButton}>Set Up TradingView Webhook</button>
           <button onClick={activateManualMode} style={styles.dismissButton}>Use Manual Mode</button>
           <button onClick={startDemoBroker} style={styles.settingsButton}>Connect Demo Broker</button>
           <button onClick={activateTradingViewMode} style={styles.dismissButton}>Use TradingView Webhook</button>
           <button onClick={() => {
             setBrokerPlatform("Tradovate");
             setBrokerStep(4);
+            if (brokerProvider === "Lucid Trading" || profile.fundedProvider === "Lucid Trading") setHasTradovateApiAccess(false);
             setBrokerModalOpen(true);
           }} style={styles.secondaryButton}>Connect Tradovate</button>
         </div>
@@ -4260,7 +4287,7 @@ function ConnectionsPage({
         <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Webhook or Manual Mode.</p>
         {brokerProvider === "Lucid Trading" || profile.fundedProvider === "Lucid Trading" ? (
           <div style={{ ...styles.priceWarning, marginTop: "12px" }}>
-            Lucid Trading accounts may not support direct API access unless Lucid/Tradovate provides API credentials. Use TradingView Webhook + Manual Funded Rules for now.
+            Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook.
           </div>
         ) : null}
         <div style={{ ...styles.segmentGroup, marginTop: "14px" }}>
@@ -4276,15 +4303,21 @@ function ConnectionsPage({
           <button onClick={() => {
             setBrokerPlatform("Tradovate");
             setBrokerStep(4);
+            if (brokerProvider === "Lucid Trading" || profile.fundedProvider === "Lucid Trading") setHasTradovateApiAccess(false);
             setBrokerModalOpen(true);
           }} style={styles.settingsButton}>Connect Tradovate</button>
           <button onClick={activateLucidManualMode} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
+          <button onClick={activateLucidTradingViewMode} style={styles.secondaryButton}>Set Up TradingView Webhook</button>
           <button onClick={checkTradovateReadOnly} style={styles.secondaryButton}>Check API Plan</button>
           <button onClick={disconnectUserTradovate} style={styles.secondaryButton}>Disconnect Tradovate</button>
         </div>
         <p style={{ ...styles.muted, marginTop: "12px" }}>
           User-owned connection stores encrypted credentials server-side per signed-in user. Read-only mode active. No order placement, cancellation, or modification endpoints are used.
         </p>
+        <div style={{ ...styles.warningStack, marginTop: "14px" }}>
+          <PlanItem title="Manual Funded Mode" text="Tracks daily loss, drawdown, max contracts, profit target, consistency rule, trade grade, and manual P/L without broker API access." />
+          <PlanItem title="TradingView Webhook" text="Feeds current price, support, resistance, bias, chart updates, and trade coach updates from alerts." />
+        </div>
         <p style={{ ...styles.muted, marginTop: "12px" }}>If Tradovate API access is unavailable, use TradingView Webhook + Manual Mode. Trade Pilot will not block the dashboard.</p>
         {tradovateStatus ? (
           <div style={{ ...styles.warningStack, marginTop: "16px" }}>
@@ -4324,6 +4357,7 @@ function ConnectionsPage({
           hasApiAccess={hasTradovateApiAccess}
           onAccountType={setTradovateAccountType}
           onActivateLucidManual={activateLucidManualMode}
+          onActivateTradingView={activateLucidTradingViewMode}
           onClose={() => setBrokerModalOpen(false)}
           onContinue={continueBrokerFlow}
           onCredential={updateTradovateCredential}
@@ -4347,6 +4381,7 @@ function BrokerConnectModal({
   hasApiAccess,
   onAccountType,
   onActivateLucidManual,
+  onActivateTradingView,
   onClose,
   onContinue,
   onCredential,
@@ -4434,7 +4469,10 @@ function BrokerConnectModal({
               {providerOptions.map((provider) => (
                 <button
                   key={provider}
-                  onClick={() => onProvider(provider)}
+                  onClick={() => {
+                    onProvider(provider);
+                    if (provider === "Lucid Trading") onHasApiAccess(false);
+                  }}
                   style={{ ...styles.sourceButton, borderColor: brokerProvider === provider ? "#38bdf8" : "#334155" }}
                 >
                   <strong>{provider}</strong>
@@ -4444,7 +4482,7 @@ function BrokerConnectModal({
             </div>
             {brokerProvider === "Lucid Trading" ? (
               <div style={{ ...styles.priceWarning, marginTop: "14px" }}>
-                Lucid Trading accounts may not support direct API access unless Lucid/Tradovate provides API credentials. Use TradingView Webhook + Manual Funded Rules for now.
+                Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook.
               </div>
             ) : null}
           </section>
@@ -4460,12 +4498,13 @@ function BrokerConnectModal({
                 <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Webhook or Manual Mode.</p>
                 {brokerProvider === "Lucid Trading" ? (
                   <div style={{ ...styles.priceWarning, marginTop: "14px" }}>
-                    Lucid Trading accounts may not support direct API access unless Lucid/Tradovate provides API credentials. Use TradingView Webhook + Manual Funded Rules for now.
+                    Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Webhook.
                   </div>
                 ) : null}
                 <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
-                  <button onClick={() => onHasApiAccess(true)} style={hasApiAccess ? styles.settingsButton : styles.secondaryButton}>I have Tradovate API access</button>
                   <button onClick={onActivateLucidManual} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
+                  <button onClick={onActivateTradingView} style={styles.secondaryButton}>Set Up TradingView Webhook</button>
+                  <button onClick={() => onHasApiAccess(true)} style={hasApiAccess ? styles.settingsButton : styles.secondaryButton}>I Have Advanced API Credentials</button>
                 </div>
                 <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
                   API Access required. CID required. SEC required. API password required. Normal login is not enough.
