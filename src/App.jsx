@@ -1007,7 +1007,7 @@ export default function App() {
     setDataSource("TradingView Webhook");
     setAutoPrice(true);
     setFastMessage(`TradingView signal received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
-    setActivePage("dashboard");
+    if (activePage !== "connections") setActivePage("dashboard");
   };
 
   const applyDemoBrokerSnapshot = (snapshot) => {
@@ -1699,6 +1699,7 @@ export default function App() {
             connectTradovateReadOnly={connectTradovateReadOnly}
             notify={notify}
             saveConnectionSettings={savePersonalWorkspace}
+            setActivePage={setActivePage}
             startDemoBroker={startDemoBroker}
             updateProfile={updateProfile}
           />
@@ -3943,6 +3944,7 @@ function ConnectionsPage({
   quote,
   saveConnectionSettings,
   session,
+  setActivePage,
   startDemoBroker,
   updateProfile,
 }) {
@@ -4105,7 +4107,7 @@ function ConnectionsPage({
 
   const openTradingViewWizard = () => {
     setBrokerModalOpen(false);
-    activateTradingViewMode();
+    setBrokerPlatform("TradingView Webhook");
     setTradingViewWizardOpen(true);
   };
 
@@ -4126,6 +4128,8 @@ function ConnectionsPage({
       // Local dashboard still updates even if the deployed endpoint is unreachable.
     }
     applyAlert?.(payload);
+    setTradingViewWizardOpen(false);
+    setActivePage("dashboard");
     notify?.("TradingView signal received.");
   };
 
