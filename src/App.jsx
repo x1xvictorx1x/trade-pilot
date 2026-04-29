@@ -3189,6 +3189,13 @@ function ManualLiveWorkflow({
 }
 
 function AutoZonePanel({ zoneDetection }) {
+  const repeatedRejectionHighs = Array.isArray(zoneDetection?.repeatedRejectionHighs)
+    ? zoneDetection.repeatedRejectionHighs
+    : [];
+  const repeatedRejectionLows = Array.isArray(zoneDetection?.repeatedRejectionLows)
+    ? zoneDetection.repeatedRejectionLows
+    : [];
+
   return (
     <section style={styles.card}>
       <p style={styles.cardLabel}>Auto Zone Detector</p>
@@ -3204,7 +3211,7 @@ function AutoZonePanel({ zoneDetection }) {
         <Metric label="Swing Low" value={formatOptionalPrice(zoneDetection.pullbackSupport)} tone="good" />
       </div>
       <div style={{ ...styles.coachPrompt, marginTop: "12px" }}>
-        Rejection zones: highs {zoneDetection.repeatedRejectionHighs?.length ? zoneDetection.repeatedRejectionHighs.join(", ") : "none yet"} · lows {zoneDetection.repeatedRejectionLows?.length ? zoneDetection.repeatedRejectionLows.join(", ") : "none yet"}
+        Rejection zones: highs {repeatedRejectionHighs.length ? repeatedRejectionHighs.join(", ") : "none yet"} · lows {repeatedRejectionLows.length ? repeatedRejectionLows.join(", ") : "none yet"}
       </div>
       <p style={{ ...styles.muted, marginTop: "12px" }}>{zoneDetection.message}</p>
     </section>
@@ -3506,8 +3513,8 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
 
   return {
     breakoutLevel: resistanceLevel,
-    repeatedRejectionHighs,
-    repeatedRejectionLows,
+    repeatedRejectionHighs: Array.isArray(rejectionHighs) ? rejectionHighs : [],
+    repeatedRejectionLows: Array.isArray(rejectionLows) ? rejectionLows : [],
     message: "Zones are estimated from recent swing highs/lows, repeated rejection areas, prior levels, session range, and opening range.",
     middleZone: `${middleLow.toFixed(2)} - ${middleHigh.toFixed(2)}`,
     middleZoneHigh: middleHigh,
