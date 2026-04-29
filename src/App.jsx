@@ -3655,7 +3655,6 @@ function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxCon
   const middleLow = Number(zoneDetection.middleZoneLow ?? supportLevel + range * 0.35);
   const middleHigh = Number(zoneDetection.middleZoneHigh ?? resistanceLevel - range * 0.35);
   const tick = Number(marketSpec.tickSize || 0.25);
-  const buffer = Math.max(tick * 8, range * 0.08);
   const priceValue = Number(price);
   const riskBudget = Math.max(1, Number(maxRisk || accountSize * 0.005 || 1));
   const riskLocked = Number(dailyPnl) <= -Math.abs(Number(maxDailyLoss || 0)) * 0.8;
@@ -3683,12 +3682,17 @@ function getAutoTradePlan({ accountSize, contracts, dailyPnl, marketSpec, maxCon
   const nearResistance = priceValue >= resistanceZoneLow || Math.abs(priceValue - resistanceLevel) <= range * 0.18;
   const isLong = nearSupport || (!nearResistance && priceValue > resistanceLevel);
   const direction = isLong ? "long" : "short";
-  const entry = roundToTick(isLong ? Math.max(priceValue, supportLevel) : Math.min(priceValue, resistanceLevel), tick);
-  const stop = roundToTick(isLong ? supportLevel - buffer : resistanceLevel + buffer, tick);
+  const entry = roundToTick(priceValue, tick);
+  const preferredStopPoints = marketSpec.pointValue >= 20 ? 12 : 16;
+  const maxBudgetStopPoints = riskBudget / Math.max(1, marketSpec.pointValue * Number(contracts || 1));
+  const stopPoints = roundToTick(Math.max(tick * 8, Math.min(preferredStopPoints, maxBudgetStopPoints || preferredStopPoints, range * 0.22)), tick);
+  const structureStop = isLong ? supportLevel - tick * 4 : resistanceLevel + tick * 4;
+  const budgetStop = isLong ? entry - stopPoints : entry + stopPoints;
+  const stop = roundToTick(isLong ? Math.max(structureStop, budgetStop) : Math.min(structureStop, budgetStop), tick);
   const riskPoints = Math.abs(entry - stop);
-  const trim1 = roundToTick(isLong ? entry + riskPoints : entry - riskPoints, tick);
-  const trim2 = roundToTick(isLong ? Math.min(resistanceLevel, entry + riskPoints * 2) : Math.max(supportLevel, entry - riskPoints * 2), tick);
-  const runner = roundToTick(isLong ? Math.max(resistanceLevel, entry + riskPoints * 3) : Math.min(supportLevel, entry - riskPoints * 3), tick);
+  const trim1 = roundToTick(isLong ? entry + riskPoints * 1.25 : entry - riskPoints * 1.25, tick);
+  const trim2 = roundToTick(isLong ? entry + riskPoints * 2 : entry - riskPoints * 2, tick);
+  const runner = roundToTick(isLong ? entry + riskPoints * 3 : entry - riskPoints * 3, tick);
   const riskDollars = riskPoints * marketSpec.pointValue * contracts;
   const rewardDollars = Math.abs(runner - entry) * marketSpec.pointValue * contracts;
   const rewardRisk = rewardDollars / Math.max(1, riskDollars);
@@ -4337,6 +4341,7 @@ function ConnectionsPage({
 
   const openTradingViewWizard = () => {
     setBrokerModalOpen(false);
+    activateTradingViewMode();
     setBrokerPlatform("TradingView Webhook");
     setTradingViewWizardOpen(true);
   };
@@ -4385,14 +4390,21 @@ function ConnectionsPage({
       console.log("latest signal", latest);
       if (!latestResponse.ok || latest.ok === false) throw new Error(latest.error || "Latest TradingView signal unavailable");
       if (!latest.signal) throw new Error("Latest TradingView signal was empty");
+      const appliedSignal = {
+        ...latest.signal,
+        price: payload.price,
+        symbol: payload.symbol,
+        timeframe: payload.timeframe,
+        timestamp: payload.timestamp,
+      };
       setWebhookDebug({
         error: "",
-        price: String(latest.signal.price ?? payload.price),
+        price: String(appliedSignal.price),
         received: "Yes",
-        symbol: latest.signal.symbol || payload.symbol,
+        symbol: appliedSignal.symbol,
         updated: new Date().toLocaleTimeString(),
       });
-      applyAlert?.(latest.signal);
+      applyAlert?.(appliedSignal);
       setPriceStatus("TradingView signal received");
       setTradingViewWizardOpen(false);
       setActivePage("dashboard");
