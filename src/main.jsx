@@ -35,13 +35,28 @@ class TradePilotErrorBoundary extends Component {
   resetWorkspace = () => {
     [
       'tradePilotActivePosition',
+      'tradePilotAlerts',
+      'tradePilotAutoZones',
+      'tradePilotConnectionMode',
       'tradePilotConnectionSettings',
       'tradePilotDiscipline',
       'tradePilotLayout',
+      'tradePilotOnboardingComplete',
       'tradePilotProfile',
+      'tradePilotTradePlan',
       'tradePilotWatchlist',
+      'tradePilotWorkspace',
     ].forEach((key) => localStorage.removeItem(key));
     window.location.reload();
+  };
+
+  copyError = async () => {
+    const message = String(this.state.error?.stack || this.state.error?.message || this.state.error);
+    try {
+      await navigator.clipboard?.writeText(message);
+    } catch {
+      console.warn('Could not copy Trade Pilot error');
+    }
   };
 
   render() {
@@ -66,6 +81,7 @@ class TradePilotErrorBoundary extends Component {
           <p style={{ color: '#94a3b8', fontSize: '12px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Trade Pilot Recovery</p>
           <h1 style={{ fontSize: '28px', margin: '8px 0 12px' }}>Dashboard hit a saved-state error.</h1>
           <p style={{ color: '#cbd5e1', lineHeight: 1.6 }}>The app loaded, but an old saved workspace caused a render crash. Resetting the local workspace clears cached settings and keeps your account intact.</p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '18px' }}>
           <button onClick={this.resetWorkspace} style={{
             background: '#2563eb',
             border: '0',
@@ -73,9 +89,18 @@ class TradePilotErrorBoundary extends Component {
             color: '#fff',
             cursor: 'pointer',
             fontWeight: 800,
-            marginTop: '18px',
             padding: '12px 16px',
           }}>Reset local workspace</button>
+          <button onClick={this.copyError} style={{
+            background: '#1f2937',
+            border: '1px solid #334155',
+            borderRadius: '10px',
+            color: '#fff',
+            cursor: 'pointer',
+            fontWeight: 800,
+            padding: '12px 16px',
+          }}>Copy error</button>
+          </div>
           <pre style={{ background: '#020617', borderRadius: '10px', color: '#fecaca', marginTop: '18px', overflow: 'auto', padding: '12px' }}>{String(this.state.error?.message || this.state.error)}</pre>
         </section>
       </main>

@@ -26,6 +26,11 @@ const layoutStorageKey = "tradePilotLayout";
 const connectionSettingsStorageKey = "tradePilotConnectionSettings";
 const watchlistStorageKey = "tradePilotWatchlist";
 const installDismissedStorageKey = "tradePilotInstallDismissed";
+const workspaceStorageKey = "tradePilotWorkspace";
+const alertsStorageKey = "tradePilotAlerts";
+const tradePlanStorageKey = "tradePilotTradePlan";
+const autoZonesStorageKey = "tradePilotAutoZones";
+const connectionModeStorageKey = "tradePilotConnectionMode";
 
 const defaultProfile = {
   traderName: "",
@@ -229,19 +234,26 @@ function loadDiscipline() {
 function loadActivePosition() {
   try {
     const saved = localStorage.getItem(activePositionStorageKey);
-    return saved ? JSON.parse(saved) : null;
+    return safeJsonParse(saved, null);
   } catch {
     return null;
   }
 }
 
 function loadList(key) {
+  return safeArray(safeJsonParse(localStorage.getItem(key), []));
+}
+
+function safeJsonParse(value, fallback = {}) {
   try {
-    const saved = localStorage.getItem(key);
-    return saved ? JSON.parse(saved) : [];
+    return value ? JSON.parse(value) : fallback;
   } catch {
-    return [];
+    return fallback;
   }
+}
+
+function safeArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 const defaultLayout = {
@@ -272,6 +284,124 @@ const dashboardCardOptions = [
   ["alerts", "Alerts"],
   ["performanceStats", "Performance Stats"],
 ];
+
+const cardKeyAliases = {
+  tradeCoach: "coach",
+  riskGuard: "risk",
+};
+
+function normalizeCardKey(key) {
+  return cardKeyAliases[key] || key;
+}
+
+function normalizeCardList(value, fallback = defaultLayout.cardOrder) {
+  const allowed = new Set(dashboardCardOptions.map(([key]) => key));
+  const normalized = safeArray(value)
+    .map(normalizeCardKey)
+    .filter((key) => allowed.has(key));
+  return normalized.length ? Array.from(new Set(normalized)) : fallback;
+}
+
+function normalizeWatchlistItems(value, fallbackMarket = "NQ") {
+  const items = safeArray(value)
+    .map((item) => {
+      if (typeof item === "string") return { id: item, notes: "Watching", symbol: item };
+      if (!item || typeof item !== "object") return null;
+      const symbol = item.symbol || item.market || item.name;
+      return symbol ? { id: item.id || symbol, notes: item.notes || "Watching", symbol } : null;
+    })
+    .filter(Boolean);
+  return items.length ? items : [{ id: fallbackMarket, notes: "Primary market", symbol: fallbackMarket }];
+}
+
+function defaultWorkspace() {
+  return {
+    activeConnection: "manual",
+    alerts: [],
+    autoZones: {
+      openRangeHigh: null,
+      openRangeLow: null,
+      repeatedRejectionHighs: [],
+      repeatedRejectionLows: [],
+      resistance: null,
+      sessionHigh: null,
+      sessionLow: null,
+      support: null,
+      swingHighs: [],
+      swingLows: [],
+    },
+    cardOrder: defaultLayout.cardOrder,
+    journalEntries: [],
+    layout: "Pro",
+    layoutPrefs: defaultLayout,
+    selectedMarket: "NQ",
+    tradeHistory: [],
+    tradePlan: null,
+    version: 2,
+    visibleCards: defaultLayout.cardOrder,
+    watchlist: [{ id: "NQ", notes: "Primary market", symbol: "NQ" }],
+    webhookSignal: null,
+  };
+}
+
+function migrateWorkspace(raw) {
+  const defaults = defaultWorkspace();
+  const workspace = raw && typeof raw === "object" ? raw : {};
+  const fromVersion = Number(workspace.version || 0);
+  const rawLayoutPrefs = workspace.layoutPrefs || workspace.preferred_layout || workspace.layoutSettings || {};
+  const visibleCards = normalizeCardList(workspace.visibleCards, defaults.visibleCards);
+  const cardOrder = normalizeCardList(workspace.cardOrder || rawLayoutPrefs.cardOrder, defaults.cardOrder);
+  const autoZones = workspace.autoZones || {};
+  const selectedMarket = workspace.selectedMarket || workspace.market || rawLayoutPrefs.selected_market || defaults.selectedMarket;
+  const migrated = {
+    ...defaults,
+    ...workspace,
+    activeConnection: workspace.activeConnection || workspace.connectionMode || defaults.activeConnection,
+    alerts: safeArray(workspace.alerts),
+    autoZones: {
+      ...defaults.autoZones,
+      ...autoZones,
+      repeatedRejectionHighs: safeArray(autoZones.repeatedRejectionHighs),
+      repeatedRejectionLows: safeArray(autoZones.repeatedRejectionLows),
+      swingHighs: safeArray(autoZones.swingHighs),
+      swingLows: safeArray(autoZones.swingLows),
+    },
+    cardOrder,
+    journalEntries: safeArray(workspace.journalEntries || workspace.tradeJournal),
+    layout: workspace.layout || rawLayoutPrefs.mode || defaults.layout,
+    layoutPrefs: {
+      ...defaultLayout,
+      ...rawLayoutPrefs,
+      cardOrder,
+      mode: workspace.layout || rawLayoutPrefs.mode || defaults.layout,
+    },
+    selectedMarket,
+    tradeHistory: safeArray(workspace.tradeHistory),
+    tradePlan: workspace.tradePlan || workspace.plannedTrade || null,
+    version: 2,
+    visibleCards,
+    watchlist: normalizeWatchlistItems(workspace.watchlist, selectedMarket),
+    webhookSignal: workspace.webhookSignal || null,
+  };
+  if (fromVersion !== 2 && import.meta.env.DEV) {
+    console.warn("Migrated old workspace state", { fromVersion, toVersion: 2 });
+  }
+  return migrated;
+}
+
+function loadMigratedWorkspace() {
+  const rawWorkspace = safeJsonParse(localStorage.getItem(workspaceStorageKey), {});
+  const legacyWorkspace = {
+    ...rawWorkspace,
+    cardOrder: rawWorkspace.cardOrder || safeJsonParse(localStorage.getItem(layoutStorageKey), {}).cardOrder,
+    layoutPrefs: rawWorkspace.layoutPrefs || safeJsonParse(localStorage.getItem(layoutStorageKey), {}),
+    tradePlan: rawWorkspace.tradePlan || safeJsonParse(localStorage.getItem(tradePlanStorageKey), null) || loadActivePosition(),
+    watchlist: rawWorkspace.watchlist || loadList(watchlistStorageKey),
+  };
+  const migrated = migrateWorkspace(legacyWorkspace);
+  if (rawWorkspace?.version !== 2) localStorage.setItem(workspaceStorageKey, JSON.stringify(migrated));
+  return migrated;
+}
 
 const layoutModePresets = {
   Simple: {
@@ -382,10 +512,11 @@ function profileFromDatabase(row, fallback) {
 }
 
 export default function App() {
+  const [workspace, setWorkspace] = useState(() => loadMigratedWorkspace());
   const [profile, setProfile] = useState(() => loadProfile());
   const [discipline, setDiscipline] = useState(() => loadDiscipline());
-  const [activePosition, setActivePosition] = useState(() => loadActivePosition());
-  const [plannedTrade, setPlannedTrade] = useState(() => loadActivePosition());
+  const [activePosition, setActivePosition] = useState(() => workspace.tradePlan || loadActivePosition());
+  const [plannedTrade, setPlannedTrade] = useState(() => workspace.tradePlan || loadActivePosition());
   const [activePage, setActivePage] = useState("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -398,16 +529,12 @@ export default function App() {
   const [feedbackItems, setFeedbackItems] = useState(() => loadList(feedbackStorageKey));
   const [supportMessages, setSupportMessages] = useState(() => loadList(supportStorageKey));
   const [streamerMode, setStreamerMode] = useState(() => localStorage.getItem(streamerModeStorageKey) === "true");
-  const [journalEntries, setJournalEntries] = useState(() => loadList(journalStorageKey));
+  const [journalEntries, setJournalEntries] = useState(() => safeArray(workspace.journalEntries).length ? workspace.journalEntries : loadList(journalStorageKey));
   const [layoutPrefs, setLayoutPrefs] = useState(() => {
-    try {
-      const saved = localStorage.getItem(layoutStorageKey);
-      return saved ? { ...defaultLayout, ...JSON.parse(saved) } : defaultLayout;
-    } catch {
-      return defaultLayout;
-    }
+    const saved = safeJsonParse(localStorage.getItem(layoutStorageKey), {});
+    return { ...defaultLayout, ...workspace.layoutPrefs, ...saved, cardOrder: normalizeCardList(saved.cardOrder || workspace.cardOrder) };
   });
-  const [watchlist, setWatchlist] = useState(() => loadList(watchlistStorageKey));
+  const [watchlist, setWatchlist] = useState(() => normalizeWatchlistItems(workspace.watchlist, workspace.selectedMarket || profile.mainMarket));
   const [session, setSession] = useState(null);
   const [authModal, setAuthModal] = useState(null);
   const [authMessage, setAuthMessage] = useState("");
@@ -489,16 +616,34 @@ export default function App() {
   }, [streamerMode]);
 
   useEffect(() => {
-    localStorage.setItem(journalStorageKey, JSON.stringify(journalEntries));
+    localStorage.setItem(journalStorageKey, JSON.stringify(safeArray(journalEntries)));
   }, [journalEntries]);
 
   useEffect(() => {
-    localStorage.setItem(layoutStorageKey, JSON.stringify(layoutPrefs));
+    localStorage.setItem(layoutStorageKey, JSON.stringify({ ...layoutPrefs, cardOrder: normalizeCardList(layoutPrefs.cardOrder) }));
   }, [layoutPrefs]);
 
   useEffect(() => {
-    localStorage.setItem(watchlistStorageKey, JSON.stringify(watchlist));
+    localStorage.setItem(watchlistStorageKey, JSON.stringify(normalizeWatchlistItems(watchlist, profile.mainMarket)));
   }, [watchlist]);
+
+  useEffect(() => {
+    const nextWorkspace = migrateWorkspace({
+      ...workspace,
+      activeConnection: dataSource,
+      cardOrder: normalizeCardList(layoutPrefs.cardOrder),
+      journalEntries: safeArray(journalEntries),
+      layout: layoutPrefs.mode || workspace.layout,
+      layoutPrefs,
+      selectedMarket: profile.mainMarket,
+      tradePlan: plannedTrade || null,
+      watchlist: normalizeWatchlistItems(watchlist, profile.mainMarket),
+    });
+    setWorkspace(nextWorkspace);
+    localStorage.setItem(workspaceStorageKey, JSON.stringify(nextWorkspace));
+    localStorage.setItem(tradePlanStorageKey, JSON.stringify(plannedTrade || null));
+    localStorage.setItem(connectionModeStorageKey, dataSource);
+  }, [dataSource, journalEntries, layoutPrefs, plannedTrade, profile.mainMarket, watchlist]);
 
   useEffect(() => {
     const unlockAudio = () => {
@@ -554,19 +699,27 @@ export default function App() {
       }
 
       if (settingsRow) {
+        const migratedSettings = migrateWorkspace({
+          layoutPrefs: settingsRow.preferred_layout || {},
+          selectedMarket: settingsRow.selected_market,
+          support: settingsRow.support,
+          resistance: settingsRow.resistance,
+        });
         setProfile((current) => ({ ...current, ...(settingsRow.risk_settings || {}), mainMarket: settingsRow.selected_market || current.mainMarket }));
         if (Number.isFinite(Number(settingsRow.support))) setSupport(Number(settingsRow.support));
         if (Number.isFinite(Number(settingsRow.resistance))) setResistance(Number(settingsRow.resistance));
-        setLayoutPrefs({ ...defaultLayout, ...(settingsRow.preferred_layout || {}) });
+        setLayoutPrefs(migratedSettings.layoutPrefs);
+        setWorkspace((current) => migrateWorkspace({ ...current, ...migratedSettings }));
       }
 
       if (activePlan?.plan) {
-        setPlannedTrade(activePlan.plan);
-        setActivePosition(activePlan.plan.status === "active" ? activePlan.plan : null);
+        const migratedPlan = normalizeTradePlan(activePlan.plan);
+        setPlannedTrade(migratedPlan);
+        setActivePosition(migratedPlan.status === "active" ? migratedPlan : null);
       }
 
-      if (journalRows?.length) setJournalEntries(journalRows.map((row) => ({ id: row.id, ...(row.entry || {}), stamp: row.created_at })));
-      if (watchRows?.length) setWatchlist(watchRows.map((row) => ({ id: row.id, notes: row.notes, symbol: row.symbol })));
+      if (safeArray(journalRows).length) setJournalEntries(safeArray(journalRows).map((row) => ({ id: row.id, ...(row.entry || {}), stamp: row.created_at })));
+      if (safeArray(watchRows).length) setWatchlist(normalizeWatchlistItems(safeArray(watchRows).map((row) => ({ id: row.id, notes: row.notes, symbol: row.symbol })), profile.mainMarket));
       setSyncStatus("Personal dashboard synced");
       setActivePage("dashboard");
     };
@@ -1258,7 +1411,7 @@ export default function App() {
     setWatchlist((current) => {
       const symbol = snapshot.symbol || profile.mainMarket || "MNQ";
       const demoItem = { id: "demo-broker-watch", notes: "Demo broker price feed active", symbol };
-      return [demoItem, ...current.filter((item) => item.id !== demoItem.id && item.symbol !== symbol)].slice(0, 8);
+      return [demoItem, ...normalizeWatchlistItems(current, profile.mainMarket).filter((item) => item.id !== demoItem.id && item.symbol !== symbol)].slice(0, 8);
     });
     if (snapshot.position) {
       const demoPlan = normalizeTradePlan({
@@ -1989,6 +2142,7 @@ export default function App() {
             support={support}
             updateDiscipline={updateDiscipline}
             updateProfile={updateProfile}
+            watchlist={watchlist}
           />
         ) : null}
         {activePage === "connections" ? (
@@ -2205,7 +2359,9 @@ function DesktopSidebar({ activePage, setActivePage, setStreamerMode }) {
 function RightInsightsPanel({ brokerConnection, discipline, engine, journalEntries, layoutPrefs, profile, setLayoutPrefs, watchlist }) {
   const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
   const fundedWarnings = buildFundedRuleWarnings({ brokerConnection, discipline, profile });
-  const analytics = getJournalAnalytics(journalEntries, discipline);
+  const safeJournalEntries = safeArray(journalEntries);
+  const safeWatchlist = normalizeWatchlistItems(watchlist, profile.mainMarket);
+  const analytics = getJournalAnalytics(safeJournalEntries, discipline);
   const modeOptions = ["Simple", "Pro", "Streamer", "Prop Firm", "Journal Focus"];
   const cardToggles = [
     ["coach", "Trade Coach"],
@@ -2246,7 +2402,7 @@ function RightInsightsPanel({ brokerConnection, discipline, engine, journalEntri
       {layoutPrefs.watchlist !== false ? (
         <section style={styles.insightCard}>
           <p style={styles.cardLabel}>Watchlist</p>
-          {(watchlist?.length ? watchlist : [{ symbol: profile.mainMarket, notes: "Primary market" }]).slice(0, 5).map((item) => (
+          {safeWatchlist.slice(0, 5).map((item) => (
             <PlanItem key={item.id || item.symbol} title={item.symbol} text={item.notes || "Watching"} />
           ))}
         </section>
@@ -2285,7 +2441,7 @@ function RightInsightsPanel({ brokerConnection, discipline, engine, journalEntri
       {layoutPrefs.journal !== false ? (
         <section style={styles.insightCard}>
           <p style={styles.cardLabel}>Journal Notes</p>
-          <p style={styles.muted}>{journalEntries?.[0]?.note || "No note yet."}</p>
+          <p style={styles.muted}>{safeJournalEntries[0]?.note || "No note yet."}</p>
         </section>
       ) : null}
     </aside>
@@ -2701,7 +2857,7 @@ function getEffectiveLayout(layoutPrefs = {}) {
 
 function normalizeCardOrder(order = []) {
   const known = dashboardCardOptions.map(([key]) => key);
-  const clean = Array.isArray(order) ? order.filter((key) => known.includes(key)) : [];
+  const clean = safeArray(order).map(normalizeCardKey).filter((key) => known.includes(key));
   return [...clean, ...known.filter((key) => !clean.includes(key))];
 }
 
@@ -2752,12 +2908,15 @@ function Dashboard({
   support,
   updateDiscipline,
   updateProfile,
+  watchlist,
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [journalNote, setJournalNote] = useState("");
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [setupDirection, setSetupDirection] = useState("Long");
   const [setupType, setSetupType] = useState("Pullback");
+  const safeJournalEntries = safeArray(journalEntries);
+  const safeWatchlist = normalizeWatchlistItems(watchlist, profile.mainMarket);
   const effectiveLayout = getEffectiveLayout(layoutPrefs);
   const rangePad = Math.max(20, price * 0.01);
   const rangeMin = Math.max(0, price - rangePad);
@@ -2895,16 +3054,16 @@ function Dashboard({
         <button style={styles.settingsButton}>Save Note</button>
       </form>
       <div style={{ ...styles.warningStack, marginTop: "14px" }}>
-        {(journalEntries.length ? journalEntries.slice(0, 4) : [{ id: "empty", stamp: new Date().toISOString(), note: "No journal entries yet." }]).map((item) => (
+        {(safeJournalEntries.length ? safeJournalEntries.slice(0, 4) : [{ id: "empty", stamp: new Date().toISOString(), note: "No journal entries yet." }]).map((item) => (
           <PlanItem key={item.id || item.stamp} title={item.stamp ? new Date(item.stamp).toLocaleString() : "Journal"} text={item.note || "Saved trade note"} />
         ))}
       </div>
     </section> : null,
-    performanceStats: effectiveLayout.performanceStats ? <PerformanceStatsCard discipline={discipline} journalEntries={journalEntries} tradeGrade={tradeGrade} /> : null,
+    performanceStats: effectiveLayout.performanceStats ? <PerformanceStatsCard discipline={discipline} journalEntries={safeJournalEntries} tradeGrade={tradeGrade} /> : null,
     propFirmRules: effectiveLayout.propFirmRules ? <PropFirmRulesCard fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} /> : null,
     risk: effectiveLayout.risk ? <RiskGuardCard discipline={discipline} fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} riskStatus={riskStatus} /> : null,
     tradePlan: effectiveLayout.tradePlan ? <TradePlanCard autoTradePlan={autoTradePlan} hasPlan={hasPlan} missedEntry={missedEntry} profile={profile} rewardRisk={rewardRisk} setupName={setupName} tradeGrade={tradeGrade} visualPlan={visualPlan} /> : null,
-    watchlist: effectiveLayout.watchlist ? <WatchlistCard price={price} profile={profile} watchlist={watchlist} /> : null,
+    watchlist: effectiveLayout.watchlist ? <WatchlistCard price={price} profile={profile} watchlist={safeWatchlist} /> : null,
   };
 
   if (streamerMode || effectiveLayout.mode === "Streamer") {
@@ -3594,7 +3753,7 @@ function PropFirmRulesCard({ fundedMetrics, fundedWarnings, profile }) {
 }
 
 function WatchlistCard({ price, profile, watchlist }) {
-  const items = watchlist.length ? watchlist : [{ id: "current", symbol: profile.mainMarket, notes: "Current market" }];
+  const items = normalizeWatchlistItems(watchlist, profile.mainMarket);
   return (
     <section style={styles.card}>
       <p style={styles.cardLabel}>Watchlist</p>
@@ -3858,7 +4017,7 @@ function analyzeKeyLevels({ breakoutLevel, currentPrice, direction, marketBias, 
 }
 
 function chartDataToCandles(chartData = []) {
-  return chartData.map((point, index, list) => {
+  return safeArray(chartData).map((point, index, list) => {
     const close = Number(point.close || 0);
     const previous = Number(list[index - 1]?.close ?? close);
     const range = Math.max(1, Math.abs(close - previous) * 1.6);
@@ -3873,7 +4032,7 @@ function chartDataToCandles(chartData = []) {
 }
 
 function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
-  const clean = candles
+  const clean = safeArray(candles)
     .map((candle) => ({
       close: Number(candle.close),
       high: Number(candle.high ?? candle.close),
@@ -4541,7 +4700,8 @@ function ProductUpgradePanel({ brokerConnection, discipline, journalEntries, pro
 }
 
 function getJournalAnalytics(journalEntries = [], discipline = {}) {
-  const results = journalEntries
+  const safeEntries = safeArray(journalEntries);
+  const results = safeEntries
     .map((entry) => Number(entry.result ?? entry.pnl ?? entry.dailyPnl ?? 0))
     .filter((value) => Number.isFinite(value));
   const wins = results.filter((value) => value > 0);
@@ -4560,14 +4720,14 @@ function getJournalAnalytics(journalEntries = [], discipline = {}) {
     bestDay: results.length ? Math.max(...results) : Math.max(0, Number(discipline.dailyPnl || 0)),
     maxDrawdown: running.maxDrawdown,
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? grossWin : 0,
-    totalTrades: journalEntries.length || Number(discipline.tradesTaken || 0),
+    totalTrades: safeEntries.length || Number(discipline.tradesTaken || 0),
     winRate: results.length ? Math.round((wins.length / results.length) * 100) : 0,
     worstDay: results.length ? Math.min(...results) : Math.min(0, Number(discipline.dailyPnl || 0)),
   };
 }
 
 function getEquityCurvePoints(journalEntries = [], discipline = {}) {
-  const points = journalEntries.slice(0, 12).reverse().map((entry) => Number(entry.result ?? entry.pnl ?? entry.dailyPnl ?? 0));
+  const points = safeArray(journalEntries).slice(0, 12).reverse().map((entry) => Number(entry.result ?? entry.pnl ?? entry.dailyPnl ?? 0));
   if (points.length) return points;
   const daily = Number(discipline.dailyPnl || 0);
   return [-12, 18, 10, -8, 22, 30, daily || 16];
@@ -5821,6 +5981,7 @@ function KeyLevelCoach({
 
 function JournalPage({ activePosition, addJournalEntry, engine, discipline, journalEntries }) {
   const [note, setNote] = useState("");
+  const safeJournalEntries = safeArray(journalEntries);
   const submit = (event) => {
     event.preventDefault();
     if (!note.trim()) return;
@@ -5860,7 +6021,7 @@ function JournalPage({ activePosition, addJournalEntry, engine, discipline, jour
           <button style={styles.settingsButton}>Save Journal Entry</button>
         </form>
         <div style={{ ...styles.warningStack, marginTop: "16px" }}>
-          {journalEntries.slice(0, 8).map((entry) => (
+          {safeJournalEntries.slice(0, 8).map((entry) => (
             <PlanItem key={entry.id || entry.stamp} title={new Date(entry.stamp).toLocaleString()} text={`${entry.market || ""} ${entry.note || ""}`} />
           ))}
         </div>
