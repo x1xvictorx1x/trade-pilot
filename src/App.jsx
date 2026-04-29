@@ -628,6 +628,31 @@ export default function App() {
       return () => clearInterval(timer);
     }
 
+    if (dataSource === "TradingView Webhook") {
+      let lastWebhookTimestamp = "";
+      const refreshTradingViewWebhook = async () => {
+        try {
+          const response = await fetch(`/api/webhook/tradingview?symbol=${encodeURIComponent(profile.mainMarket)}`);
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || "TradingView webhook unavailable.");
+          if (!result.alert) {
+            setPriceStatus("Waiting for TradingView webhook data.");
+            return;
+          }
+          if (result.alert.timestamp === lastWebhookTimestamp) return;
+          lastWebhookTimestamp = result.alert.timestamp;
+          applyAlert(result.alert);
+          setPriceStatus("");
+        } catch (error) {
+          setPriceStatus(error.message || "TradingView webhook unavailable.");
+        }
+      };
+
+      refreshTradingViewWebhook();
+      const timer = setInterval(refreshTradingViewWebhook, 2500);
+      return () => clearInterval(timer);
+    }
+
     if ((dataSource === "Market Data API" || dataSource === "TradingView Webhook") && canUseLocalMarketServer) {
       const stream = new EventSource(`${marketServerUrl}/api/market/stream?symbol=${profile.mainMarket}`);
 
@@ -934,21 +959,23 @@ export default function App() {
   };
 
   const applyAlert = (alert) => {
-    if (alert.symbol) updateProfile("mainMarket", alert.symbol);
+    if (alert.symbol && alert.symbol !== profile.mainMarket) updateProfile("mainMarket", alert.symbol);
     if (Number.isFinite(alert.price)) setPrice(alert.price);
     if (alert.direction === "long" || alert.direction === "short") setDirection(alert.direction);
     if (Number.isFinite(alert.support)) setSupport(alert.support);
     if (Number.isFinite(alert.resistance)) setResistance(alert.resistance);
     if (alert.timestamp) setLastUpdated(new Date(alert.timestamp).toLocaleTimeString());
     else setLastUpdated(new Date().toLocaleTimeString());
-    setQuote({
-      bid: Number((alert.price - 0.25).toFixed(2)),
-      ask: Number((alert.price + 0.25).toFixed(2)),
-    });
+    if (Number.isFinite(alert.price)) {
+      setQuote({
+        bid: Number((alert.price - 0.25).toFixed(2)),
+        ask: Number((alert.price + 0.25).toFixed(2)),
+      });
+    }
     if (alert.bias) setLevelBias(alert.bias);
     setDataSource("TradingView Webhook");
     setAutoPrice(true);
-    setFastMessage(`Webhook preview applied: ${alert.signalType || "signal"} populated the dashboard.`);
+    setFastMessage(`TradingView webhook updated ${alert.symbol || profile.mainMarket} at ${Number(alert.price).toFixed(2)}.`);
     setActivePage("dashboard");
   };
 
@@ -4119,15 +4146,10 @@ function ConnectionsPage({
         {dataSource === "TradingView Webhook" ? (
           <div style={{ ...styles.subPanel, marginTop: "14px" }}>
             <p style={styles.cardLabel}>Webhook</p>
-            <p style={styles.muted}>POST /api/webhook/tradingview</p>
+            <p style={styles.muted}>POST /api/webhook/tradingview. Required: symbol and price. Optional: support, resistance, bias, timeframe, timestamp.</p>
             <pre style={styles.sharePreview}>{JSON.stringify({
               symbol: "MNQ",
               price: 27500.25,
-              timeframe: "5m",
-              support: 27460,
-              resistance: 27550,
-              bias: "bullish",
-              timestamp: new Date().toISOString(),
             }, null, 2)}</pre>
           </div>
         ) : null}
