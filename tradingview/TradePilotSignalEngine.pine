@@ -1,0 +1,175 @@
+// ============================================================
+// Trade Pilot Signal Engine
+// Version: 1.0
+// Description: Detects support/resistance, breakouts, rejections,
+//              and trend direction. Sends JSON alerts to the
+//              Trade Pilot webhook at /api/webhook/tradingview
+//
+// Setup:
+//   1. Open TradingView Pine Script Editor (bottom panel)
+//   2. Paste this script and click "Add to chart"
+//   3. Create an alert → Condition: "Trade Pilot Signal Engine"
+//      → Trigger: "Any alert() function call"
+//      → Webhook URL: https://tradepilottool.com/api/webhook/tradingview
+//      → Message: (leave blank — the script sends the JSON payload)
+// ============================================================
+
+//@version=5
+indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true, max_lines_count=10, max_labels_count=20)
+
+// ============================================================
+// INPUTS
+// ============================================================
+grpSR    = "Support & Resistance"
+swingLen = input.int(10,  "Swing Lookback",   minval=3, maxval=50, group=grpSR,
+                    tooltip="Bars left/right used to identify swing pivots.")
+srBuffer = input.float(0.1, "Zone Buffer %",  minval=0, maxval=2.0, step=0.05, group=grpSR,
+                    tooltip="Widen S/R zone by this % of price for noisy markets.")
+
+grpTrend    = "Trend"
+emaFastLen  = input.int(9,  "EMA Fast", minval=2, maxval=50, group=grpTrend)
+emaSlowLen  = input.int(21, "EMA Slow", minval=5, maxval=200, group=grpTrend)
+
+grpAlerts = "Alerts"
+alertOnBreakout   = input.bool(true,  "Alert on Breakouts",   group=grpAlerts)
+alertOnRejection  = input.bool(true,  "Alert on Rejections",  group=grpAlerts)
+alertOnTrend      = input.bool(false, "Alert on Trend Change", group=grpAlerts)
+alertOnEveryBar   = input.bool(false, "Alert Every Bar (price feed mode)", group=grpAlerts,
+                    tooltip="When enabled, sends a price update on every bar close. Use for live price feed.")
+
+// ============================================================
+// TREND — EMA CROSS
+// ============================================================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+bullishTrend = emaFast > emaSlow
+bearishTrend = emaFast < emaSlow
+trendCrossUp   = ta.crossover(emaFast,  emaSlow)
+trendCrossDown = ta.crossunder(emaFast, emaSlow)
+trendStr = bullishTrend ? "bullish" : bearishTrend ? "bearish" : "neutral"
+
+// ============================================================
+// SUPPORT & RESISTANCE — SWING PIVOTS
+// ============================================================
+rawSwingHigh = ta.pivothigh(high, swingLen, swingLen)
+rawSwingLow  = ta.pivotlow (low,  swingLen, swingLen)
+
+// Carry forward the most recent swing values
+var float resistance = na
+var float support    = na
+
+if not na(rawSwingHigh)
+    resistance := rawSwingHigh
+if not na(rawSwingLow)
+    support := rawSwingLow
+
+// Bootstrap from running high/low on the first bars
+resistance := na(resistance) ? ta.highest(high, 20) : resistance
+support    := na(support)    ? ta.lowest (low,  20) : support
+
+// Compute zone edges
+bufferAmt  = close * srBuffer / 100
+resistHigh = resistance + bufferAmt
+resistLow  = resistance - bufferAmt
+supportHigh = support + bufferAmt
+supportLow  = support - bufferAmt
+
+// ============================================================
+// BREAKOUT DETECTION
+// ============================================================
+breakoutLong  = close > resistHigh and close[1] <= resistHigh and not na(resistance)
+breakoutShort = close < supportLow  and close[1] >= supportLow  and not na(support)
+
+// ============================================================
+// REJECTION DETECTION
+// ============================================================
+// Resistance rejection: wick into resistance zone, closes below
+rejectionAtResistance = high >= resistLow and close < resistLow and close[1] < high[1]
+// Support bounce: wick into support zone, closes above
+bounceAtSupport       = low <= supportHigh and close > supportHigh and close[1] > low[1]
+
+// ============================================================
+// BIAS & DIRECTION
+// ============================================================
+bias = bullishTrend and close >= support ? "bullish" :
+       bearishTrend and close <= resistance ? "bearish" : "neutral"
+
+direction = breakoutLong                          ? "long"    :
+            breakoutShort                         ? "short"   :
+            rejectionAtResistance                 ? "short"   :
+            bounceAtSupport                       ? "long"    :
+            bias == "bullish"                     ? "long"    :
+            bias == "bearish"                     ? "short"   : "neutral"
+
+eventType = breakoutLong           ? "breakout"   :
+            breakoutShort          ? "breakdown"  :
+            rejectionAtResistance  ? "rejection"  :
+            bounceAtSupport        ? "bounce"      :
+            trendCrossUp           ? "trend_up"   :
+            trendCrossDown         ? "trend_down"  : "price"
+
+// ============================================================
+// PLOTS
+// ============================================================
+plot(resistance, "Resistance",    color=color.new(color.orange, 0),  linewidth=2, style=plot.style_stepline)
+plot(support,    "Support",       color=color.new(color.teal,   0),  linewidth=2, style=plot.style_stepline)
+plot(emaFast,    "EMA Fast (9)",  color=color.new(color.blue,   30), linewidth=1)
+plot(emaSlow,    "EMA Slow (21)", color=color.new(color.purple, 30), linewidth=1)
+
+plotshape(breakoutLong,          "Breakout Long",      shape.triangleup,   location.belowbar, color.lime,   size=size.small)
+plotshape(breakoutShort,         "Breakout Short",     shape.triangledown, location.abovebar, color.red,    size=size.small)
+plotshape(rejectionAtResistance, "Rejection at R",     shape.xcross,       location.abovebar, color.orange, size=size.tiny)
+plotshape(bounceAtSupport,       "Bounce off S",       shape.xcross,       location.belowbar, color.teal,   size=size.tiny)
+plotshape(trendCrossUp,          "Trend Up",           shape.circle,       location.belowbar, color.aqua,   size=size.tiny)
+plotshape(trendCrossDown,        "Trend Down",         shape.circle,       location.abovebar, color.fuchsia,size=size.tiny)
+
+// ============================================================
+// ALERT MESSAGE BUILDER
+// ============================================================
+// Builds the JSON payload sent to /api/webhook/tradingview
+buildPayload() =>
+    '{"symbol":"'     + syminfo.ticker                                             + '",' +
+     '"price":'       + str.tostring(close,      "#.##")                           + ','  +
+     '"timeframe":"'  + timeframe.period                                            + '",' +
+     '"timestamp":"'  + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '",' +
+     '"support":'     + str.tostring(support,    "#.##")                           + ','  +
+     '"resistance":'  + str.tostring(resistance, "#.##")                           + ','  +
+     '"bias":"'       + bias                                                        + '",' +
+     '"direction":"'  + direction                                                   + '",' +
+     '"event":"'      + eventType                                                   + '"}'
+
+// ============================================================
+// FIRE ALERTS
+// ============================================================
+if alertOnBreakout and breakoutLong
+    alert(buildPayload(), alert.freq_once_per_bar)
+
+if alertOnBreakout and breakoutShort
+    alert(buildPayload(), alert.freq_once_per_bar)
+
+if alertOnRejection and rejectionAtResistance
+    alert(buildPayload(), alert.freq_once_per_bar)
+
+if alertOnRejection and bounceAtSupport
+    alert(buildPayload(), alert.freq_once_per_bar)
+
+if alertOnTrend and trendCrossUp
+    alert(buildPayload(), alert.freq_once_per_bar)
+
+if alertOnTrend and trendCrossDown
+    alert(buildPayload(), alert.freq_once_per_bar)
+
+if alertOnEveryBar
+    alert(buildPayload(), alert.freq_once_per_bar_close)
+
+// ============================================================
+// NAMED ALERT CONDITIONS (for manual condition-based alerts)
+// These can be used as alternative to alert() for simple setups.
+// ============================================================
+alertcondition(breakoutLong,          "Breakout Long",      "Trade Pilot: Breakout Long — {{ticker}} @ {{close}}")
+alertcondition(breakoutShort,         "Breakout Short",     "Trade Pilot: Breakout Short — {{ticker}} @ {{close}}")
+alertcondition(rejectionAtResistance, "Rejection at R",     "Trade Pilot: Rejection — {{ticker}} @ {{close}}")
+alertcondition(bounceAtSupport,       "Bounce at S",        "Trade Pilot: Bounce — {{ticker}} @ {{close}}")
+alertcondition(trendCrossUp,          "Trend Change Up",    "Trade Pilot: Trend Up — {{ticker}}")
+alertcondition(trendCrossDown,        "Trend Change Down",  "Trade Pilot: Trend Down — {{ticker}}")
