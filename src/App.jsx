@@ -721,7 +721,7 @@ export default function App() {
         status: plannedTrade.status === "active" ? "active" : plannedTrade.status,
       }));
     }
-  }, [plannedTrade]);
+  }, [plannedTrade, price, dataSource, profile.mainMarket]);
 
   useEffect(() => {
     localStorage.setItem(feedbackStorageKey, JSON.stringify(feedbackItems));
@@ -1035,6 +1035,7 @@ export default function App() {
 
       stream.onerror = () => {
         stream.close();
+        setBrokerConnection((current) => ({ ...current, connected: false, connectionStatus: "Stream disconnected" }));
         setPriceStatus("Broker stream unavailable. Start the local market server, then reconnect.");
       };
 
@@ -1103,7 +1104,7 @@ export default function App() {
     }
 
     if (dataSource === "TradingView Webhook") {
-      let lastWebhookTimestamp = "";
+      let lastWebhookTimestampMs = 0;
       const refreshTradingViewWebhook = async () => {
         try {
           const response = await fetch("/api/webhook/tradingview/latest");
@@ -1120,6 +1121,7 @@ export default function App() {
             return;
           }
           const signalTime = result.signal.created_at || result.signal.timestamp;
+          const signalTimeMs = signalTime ? new Date(signalTime).getTime() : 0;
           setWebhookDebug({
             error: "",
             price: String(result.signal.price ?? ""),
@@ -1127,8 +1129,8 @@ export default function App() {
             symbol: result.signal.symbol || "",
             updated: signalTime ? new Date(signalTime).toLocaleTimeString() : new Date().toLocaleTimeString(),
           });
-          if (signalTime === lastWebhookTimestamp) return;
-          lastWebhookTimestamp = signalTime;
+          if (signalTimeMs > 0 && signalTimeMs === lastWebhookTimestampMs) return;
+          lastWebhookTimestampMs = signalTimeMs;
           applyAlert(result.signal);
           setPriceStatus("TradingView signal received");
           notify("TradingView signal received.", "success");
@@ -1597,7 +1599,7 @@ export default function App() {
             currentPrice: safeNumber(nextPrice, current.currentPrice),
             isActive: false,
             realizedPL: current.realizedPL || current.unrealizedPL,
-            status: alertEvent === "stop" ? "closed" : "closed",
+            status: alertEvent === "stop" ? "stopped" : "closed",
           });
         }
         return normalizeActiveTrade({
@@ -1622,8 +1624,8 @@ export default function App() {
       source: "TradingView Alerts",
       updatedAt: signalTime,
     }));
-    setDataSource("TradingView Webhook");
-    setAutoPrice(true);
+    if (dataSource !== "TradingView Webhook") setDataSource("TradingView Webhook");
+    if (!autoPrice) setAutoPrice(true);
     setPriceStatus("TradingView signal received");
     setFastMessage(!hasSupport && !hasResistance
       ? `TradingView price received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}. Add levels to generate plan.`
@@ -2084,6 +2086,8 @@ export default function App() {
         main { max-width: none !important; }
         *, *::before, *::after { box-sizing: border-box; }
         img, svg, canvas, video { max-width: 100%; }
+        .tradepilot-more-menu.closed { display: none; }
+        .mobile-overlay.closed { display: none !important; }
         .app-shell { width: 100%; min-height: 100vh; overflow-x: hidden; background: #05070d; }
         .app-container,
         .page-container,
@@ -2132,14 +2136,11 @@ export default function App() {
         .mobile-menu-item { display: none !important; }
         .desktop-nav-item { display: none !important; }
         .mobile-menu-button { display: inline-flex !important; }
-        @media (max-width: 760px) {
+        @media (max-width: 768px) {
           .desktop-nav-item { display: none !important; }
           .mobile-menu-item { display: block !important; }
           .mobile-menu-button { display: inline-flex !important; }
           .mobile-launch-button { display: inline-flex !important; align-items: center; }
-          .tradepilot-title { font-size: 34px !important; }
-          .tradepilot-header { align-items: center !important; padding-top: 8px !important; }
-          .tradepilot-top-actions { position: static !important; width: 100%; justify-content: center !important; }
           .tradepilot-subtitle,
           .tradepilot-positioning,
           .tradepilot-header-meta,
@@ -2154,8 +2155,9 @@ export default function App() {
             box-shadow: -18px 0 44px rgba(0, 0, 0, .45) !important;
             display: grid !important;
             gap: 10px !important;
-            height: 100vh !important;
+            height: 100dvh !important;
             left: auto !important;
+            min-width: 0 !important;
             max-width: 100vw !important;
             overflow-y: auto !important;
             padding: 18px !important;
@@ -2163,10 +2165,15 @@ export default function App() {
             right: 0 !important;
             top: 0 !important;
             transform: translateX(0) !important;
-            width: min(85vw, 360px) !important;
+            transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+            width: min(88vw, 360px) !important;
             z-index: 9999 !important;
           }
-          .mobile-drawer.closed { transform: translateX(100%) !important; }
+          .mobile-drawer.closed {
+            display: grid !important;
+            transform: translateX(100%) !important;
+            visibility: hidden !important;
+          }
           .mobile-overlay {
             background: rgba(0, 0, 0, .6) !important;
             border: 0 !important;
@@ -2269,16 +2276,15 @@ export default function App() {
                     <span style={styles.menuBar} />
                     <span style={styles.menuBar} />
                   </button>
-                  {moreMenuOpen ? (
-                    <button
-                      aria-label="Close mobile menu"
-                      className="mobile-overlay"
-                      onClick={() => setMoreMenuOpen(false)}
-                      style={styles.mobileOverlay}
-                    />
-                  ) : null}
-                  {moreMenuOpen ? (
-                    <div className="tradepilot-more-menu mobile-drawer" style={styles.moreMenu}>
+                  <button
+                    aria-hidden={!moreMenuOpen}
+                    aria-label="Close mobile menu"
+                    className={`mobile-overlay${moreMenuOpen ? "" : " closed"}`}
+                    onClick={() => setMoreMenuOpen(false)}
+                    style={styles.mobileOverlay}
+                    tabIndex={moreMenuOpen ? 0 : -1}
+                  />
+                  <div className={`tradepilot-more-menu mobile-drawer${moreMenuOpen ? "" : " closed"}`} style={styles.moreMenu}>
                       {navigationTabs.map((tab) => (
                         <button
                           className="mobile-menu-item"
@@ -2326,7 +2332,6 @@ export default function App() {
                         </button>
                       ) : null}
                     </div>
-                  ) : null}
                 </div>
               </>
             )}
@@ -2410,10 +2415,13 @@ export default function App() {
             riskPoints={riskPoints}
             runFastAction={runFastAction}
             setAutoPrice={setAutoPrice}
+            setActiveTrade={setActiveTrade}
+            setActivePosition={setActivePosition}
             setContracts={setContracts}
             setDataSource={setDataSource}
             setDirection={setDirection}
             setEntry={setEntry}
+            setPlannedTrade={setPlannedTrade}
             setPrice={setPrice}
             setBreakoutLevel={setBreakoutLevel}
             setLevelBias={setLevelBias}
@@ -2455,6 +2463,8 @@ export default function App() {
             setActivePage={setActivePage}
             setPlannedTrade={setPlannedTrade}
             setActiveTrade={setActiveTrade}
+            setPriceStatus={setPriceStatus}
+            setWebhookDebug={setWebhookDebug}
             startDemoBroker={startDemoBroker}
             updateProfile={updateProfile}
             webhookDebug={webhookDebug}
@@ -3160,6 +3170,218 @@ function normalizeCardOrder(order = []) {
   return [...clean, ...known.filter((key) => !clean.includes(key))];
 }
 
+function DashboardNextStep({ activeTrade, dataSource, hasPlan, support, resistance, onMarkActive }) {
+  const hasLevels = Number.isFinite(Number(support)) && Number(support) > 0
+    && Number.isFinite(Number(resistance)) && Number(resistance) > 0;
+  const connected = dataSource && dataSource !== "Manual";
+
+  let message = null;
+  let action = null;
+
+  if (activeTrade?.isActive) {
+    message = "Trade active. Monitor price against your targets.";
+  } else if (hasPlan) {
+    message = "Plan ready. Click Mark Trade Active when you enter the trade.";
+    action = { label: "Mark Trade Active", onClick: onMarkActive };
+  } else if (connected && hasLevels) {
+    message = "Levels set. Generate a plan or build one manually.";
+    action = { label: "Build Plan", onClick: onMarkActive };
+  } else if (connected && !hasLevels) {
+    message = `${dataSource} connected. Add support and resistance to generate a plan.`;
+  } else {
+    message = "Connect a data source, then add support and resistance levels to begin.";
+  }
+
+  return (
+    <div style={{ alignItems: "center", background: "rgba(15,23,42,.6)", border: "1px solid #1e293b", borderRadius: "12px", display: "flex", fontSize: "13px", gap: "12px", justifyContent: "space-between", margin: "0 0 12px", padding: "10px 16px" }}>
+      <span style={{ color: "#94a3b8" }}>{message}</span>
+      {action ? (
+        <button
+          onClick={action.onClick}
+          style={{ background: "#2563eb", border: "none", borderRadius: "8px", color: "#f8fafc", cursor: "pointer", fontSize: "12px", fontWeight: 900, padding: "6px 14px", whiteSpace: "nowrap" }}
+        >{action.label}</button>
+      ) : null}
+    </div>
+  );
+}
+
+function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resistance, setActiveTrade, setActivePosition, setPlannedTrade, support, onClose }) {
+  const [view, setView] = useState("checklist");
+  const [form, setForm] = useState({
+    contracts: String(profile.defaultContracts || 1),
+    direction: "long",
+    entry: price > 0 ? String(price) : "",
+    runner: "",
+    stop: "",
+    tp1: "",
+    tp2: "",
+  });
+
+  const hasPrice = price > 0;
+  const hasSupport = Number.isFinite(Number(support)) && Number(support) > 0;
+  const hasResistance = Number.isFinite(Number(resistance)) && Number(resistance) > 0;
+
+  const e = Number(form.entry), s = Number(form.stop), t1 = Number(form.tp1);
+  const t2 = Number(form.tp2), r = Number(form.runner);
+  let validationError = null;
+  if (!Number.isFinite(e) || e <= 0) validationError = "Entry price is required.";
+  else if (!Number.isFinite(s) || s <= 0) validationError = "Stop loss is required.";
+  else if (!Number.isFinite(t1) || t1 <= 0) validationError = "Target 1 is required.";
+  else if (form.direction === "long") {
+    if (s >= e) validationError = "Long trade invalid: stop must be below entry.";
+    else if (t1 <= e) validationError = "Long trade invalid: TP1 must be above entry.";
+    else if (t2 > 0 && t2 <= t1) validationError = "Long trade invalid: TP2 must be above TP1.";
+    else if (r > 0 && r <= (t2 > 0 ? t2 : t1)) validationError = "Long trade invalid: Runner must be above TP2.";
+  } else {
+    if (s <= e) validationError = "Short trade invalid: stop must be above entry.";
+    else if (t1 >= e) validationError = "Short trade invalid: TP1 must be below entry.";
+    else if (t2 > 0 && t2 >= t1) validationError = "Short trade invalid: TP2 must be below TP1.";
+    else if (r > 0 && r >= (t2 > 0 ? t2 : t1)) validationError = "Short trade invalid: Runner must be below TP2.";
+  }
+  const manualPlanValid = !validationError && e > 0 && s > 0 && t1 > 0;
+
+  const handleAutoGenerate = () => {
+    if (!hasSupport || !hasResistance) {
+      notify("Add support and resistance levels first.", "failure");
+      return;
+    }
+    applyQuickSetup(form.direction === "short" ? "Breakdown Short" : "Breakout Long");
+    notify("Plan generated. Click Mark Trade Active to enter.", "success");
+    onClose();
+  };
+
+  const handleSaveAndMarkActive = () => {
+    if (!manualPlanValid) return;
+    const plan = normalizeTradePlan({
+      contracts: Number(form.contracts) || 1,
+      direction: form.direction,
+      entry: e,
+      runner: r > 0 ? r : undefined,
+      stop: s,
+      trim1: t1,
+      trim2: t2 > 0 ? t2 : undefined,
+    });
+    const nextTrade = activeTradeFromPlan(plan, { currentPrice: price, market: profile.mainMarket, source: "manual", status: "active" });
+    setPlannedTrade?.({ ...plan, status: "active" });
+    setActiveTrade(nextTrade);
+    setActivePosition({ ...plan, openedAt: nextTrade.openedAt, status: "active" });
+    notify("Trade marked active.", "success");
+    onClose();
+  };
+
+  const field = (label, key, placeholder) => (
+    <label key={key} style={{ color: "#a1a1aa", display: "grid", fontSize: "13px", gap: "4px" }}>
+      {label}
+      <input
+        placeholder={placeholder}
+        step="0.25"
+        style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: "8px", color: "#f8fafc", fontSize: "14px", fontWeight: 700, padding: "8px 12px", width: "100%" }}
+        type="number"
+        value={form[key]}
+        onChange={(ev) => setForm((f) => ({ ...f, [key]: ev.target.value }))}
+      />
+    </label>
+  );
+
+  const btn = (label, onClick, variant = "primary", disabled = false) => (
+    <button
+      disabled={disabled}
+      onClick={disabled ? undefined : onClick}
+      style={{
+        background: disabled ? "#1c1c1e" : variant === "primary" ? "#2563eb" : variant === "success" ? "#16a34a" : variant === "ghost" ? "transparent" : "#0f172a",
+        border: variant === "ghost" ? "none" : "1px solid " + (disabled ? "#334155" : variant === "primary" ? "#3b82f6" : variant === "success" ? "#22c55e" : "#334155"),
+        borderRadius: "10px",
+        color: disabled ? "#52525b" : "#f8fafc",
+        cursor: disabled ? "not-allowed" : "pointer",
+        fontSize: "14px",
+        fontWeight: 900,
+        padding: "11px 18px",
+        textAlign: "center",
+      }}
+    >{label}</button>
+  );
+
+  const checkRow = (ok, label) => (
+    <div key={label} style={{ alignItems: "center", display: "flex", gap: "10px", padding: "5px 0" }}>
+      <span style={{ color: ok ? "#22c55e" : "#ef4444", fontSize: "15px" }}>{ok ? "✓" : "✗"}</span>
+      <span style={{ color: ok ? "#94a3b8" : "#f8fafc", fontSize: "13px" }}>{label}</span>
+    </div>
+  );
+
+  return (
+    <div
+      style={{ alignItems: "center", background: "rgba(0,0,0,.82)", display: "flex", inset: 0, justifyContent: "center", padding: "16px", position: "fixed", zIndex: 10000 }}
+      onClick={onClose}
+    >
+      <div
+        style={{ background: "#05070d", border: "1px solid #1e293b", borderRadius: "20px", boxShadow: "0 32px 80px rgba(0,0,0,.7)", maxHeight: "92vh", maxWidth: "520px", overflowY: "auto", padding: "28px", width: "100%" }}
+        onClick={(ev) => ev.stopPropagation()}
+      >
+        {view === "checklist" ? (
+          <>
+            <p style={{ color: "#f8fafc", fontSize: "18px", fontWeight: 950, margin: "0 0 6px" }}>Create a Trade Plan First</p>
+            <p style={{ color: "#64748b", fontSize: "13px", margin: "0 0 20px" }}>You need a valid plan before marking a trade active.</p>
+            <div style={{ marginBottom: "20px" }}>
+              {checkRow(hasPrice, `Current price${hasPrice ? ` — ${price}` : " — connect a data source"}`)}
+              {checkRow(hasSupport, `Support level${hasSupport ? ` — ${support}` : " — add a support level in the panel"}`)}
+              {checkRow(hasResistance, `Resistance level${hasResistance ? ` — ${resistance}` : " — add a resistance level in the panel"}`)}
+            </div>
+            {(!hasSupport || !hasResistance) ? (
+              <p style={{ background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.25)", borderRadius: "10px", color: "#fde68a", fontSize: "12px", marginBottom: "16px", padding: "10px 14px" }}>
+                Set both S/R levels to enable auto-generate, or use the manual builder.
+              </p>
+            ) : null}
+            <div style={{ display: "grid", gap: "8px" }}>
+              {btn("Auto Generate Plan", handleAutoGenerate, "primary")}
+              {btn("Manual Plan Builder", () => setView("manual"), "secondary")}
+              {btn("Cancel", onClose, "ghost")}
+            </div>
+          </>
+        ) : (
+          <>
+            <p style={{ color: "#f8fafc", fontSize: "18px", fontWeight: 950, margin: "0 0 6px" }}>Manual Plan Builder</p>
+            <p style={{ color: "#64748b", fontSize: "13px", margin: "0 0 20px" }}>Fill in your plan. Validation runs instantly.</p>
+            <div style={{ display: "grid", gap: "12px", marginBottom: "16px" }}>
+              <label style={{ color: "#a1a1aa", display: "grid", fontSize: "13px", gap: "4px" }}>
+                Direction
+                <div style={{ display: "flex", gap: "8px" }}>
+                  {["long", "short"].map((d) => (
+                    <button
+                      key={d}
+                      onClick={() => setForm((f) => ({ ...f, direction: d }))}
+                      style={{
+                        background: form.direction === d ? (d === "long" ? "#166534" : "#7f1d1d") : "#0f172a",
+                        border: "1px solid " + (form.direction === d ? (d === "long" ? "#22c55e" : "#ef4444") : "#334155"),
+                        borderRadius: "8px", color: "#f8fafc", cursor: "pointer", flex: 1, fontWeight: 900, padding: "8px",
+                      }}
+                    >{d === "long" ? "Long" : "Short"}</button>
+                  ))}
+                </div>
+              </label>
+              {field("Entry", "entry", price > 0 ? String(price) : "e.g. 21500")}
+              {field("Stop Loss", "stop", form.direction === "long" ? "Below entry" : "Above entry")}
+              {field("Target 1 (TP1) *", "tp1", form.direction === "long" ? "Above entry" : "Below entry")}
+              {field("Target 2 (TP2) — optional", "tp2", "Optional")}
+              {field("Runner — optional", "runner", "Optional")}
+              {field("Contracts", "contracts", "1")}
+            </div>
+            {validationError ? (
+              <p style={{ background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.35)", borderRadius: "10px", color: "#fca5a5", fontSize: "13px", marginBottom: "16px", padding: "10px 14px" }}>{validationError}</p>
+            ) : manualPlanValid ? (
+              <p style={{ background: "rgba(34,197,94,.08)", border: "1px solid rgba(34,197,94,.25)", borderRadius: "10px", color: "#86efac", fontSize: "13px", marginBottom: "16px", padding: "10px 14px" }}>Plan is valid. Ready to save and mark active.</p>
+            ) : null}
+            <div style={{ display: "grid", gap: "8px" }}>
+              {btn("Save Plan & Mark Active", handleSaveAndMarkActive, "success", !manualPlanValid)}
+              {btn("Back", () => setView("checklist"), "secondary")}
+              {btn("Cancel", onClose, "ghost")}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({
   activePosition,
   activeTrade,
@@ -3198,6 +3420,7 @@ function Dashboard({
   setPrice,
   setPlannedTrade,
   setActiveTrade,
+  setActivePosition,
   setBreakoutLevel,
   setLevelBias,
   setLayoutPrefs,
@@ -3215,6 +3438,7 @@ function Dashboard({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [journalNote, setJournalNote] = useState("");
   const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [markActiveModalOpen, setMarkActiveModalOpen] = useState(false);
   const [setupDirection, setSetupDirection] = useState("Long");
   const [setupType, setSetupType] = useState("Pullback");
   const safeJournalEntries = safeArray(journalEntries);
@@ -3237,10 +3461,26 @@ function Dashboard({
     () => buildChartData({ price, entry, stop: engine.smartStop, support, resistance, trim1: engine.trim1, trim2: engine.trim2, runner: engine.runner }),
     [engine.runner, engine.smartStop, engine.trim1, engine.trim2, entry, price, resistance, support],
   );
+  const candles = useMemo(() => chartDataToCandles(chartData), [chartData]);
   const zoneDetection = useMemo(
-    () => detectKeyLevelsFromCandles(chartDataToCandles(chartData), { entry, price, resistance, support }),
-    [chartData, entry, price, resistance, support],
+    () => detectKeyLevelsFromCandles(candles, { entry, price, resistance, support }),
+    [candles, entry, price, resistance, support],
   );
+  const marketStructure = useMemo(
+    () => analyzeMarketStructure(candles, { price, resistance, support }),
+    [candles, price, resistance, support],
+  );
+  const enrichedZoneDetection = useMemo(() => ({
+    ...zoneDetection,
+    sessionHigh: marketStructure.sessionHigh ?? zoneDetection.sessionHigh,
+    sessionLow: marketStructure.sessionLow ?? zoneDetection.sessionLow,
+    swingHighs: marketStructure.swingHighs,
+    swingLows: marketStructure.swingLows,
+    vwap: marketStructure.vwap,
+    liquiditySweepHigh: marketStructure.liquiditySweepHigh,
+    liquiditySweepLow: marketStructure.liquiditySweepLow,
+    marketStructure: marketStructure.marketStructure,
+  }), [zoneDetection, marketStructure]);
   const marketSpec = marketSpecs[profile.mainMarket] ?? marketSpecs.MNQ;
   const activeBias = normalizeActiveBias(levelBias);
   const autoTradePlan = getAutoTradePlan({
@@ -3255,7 +3495,7 @@ function Dashboard({
     price,
     resistance,
     support,
-    zoneDetection,
+    zoneDetection: enrichedZoneDetection,
   });
   const fallbackPlan = {
     contracts,
@@ -3297,7 +3537,7 @@ function Dashboard({
     stop: visualPlan.stop,
     support,
     resistance,
-    zoneDetection,
+    zoneDetection: enrichedZoneDetection,
   });
   const displayTradeGrade = activeTradePlan.direction === "none" || activePlanValidation.valid === false
     ? { letter: "No Trade", reason: activePlanValidation.reason || "Waiting for valid setup.", score: 0 }
@@ -3315,7 +3555,7 @@ function Dashboard({
   const setupName = activeTradePlan.source || (plannedTrade || activePosition ? `${setupType} ${setupDirection}` : "Auto Zone");
   const hasPlan = activeTradePlan.direction !== "none" && activePlanValidation.valid && !rewardRisk.invalid;
   const coachDecision = getCoachDecision({ activeBias, activePosition, activeTradePlan, price, resistance, support, validation: activePlanValidation });
-  const liveCoach = getLiveCoachMessage({ activeBias, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, tradeGrade: displayTradeGrade, visualPlan });
+  const liveCoach = getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, support, resistance, tradeGrade: displayTradeGrade, visualPlan });
   const riskStatus = engine.disciplineWarnings.some((warning) => warning.includes("Stop") || warning.includes("loss limit reached") || warning.includes("exceeded"))
     ? "Stop Trading"
     : engine.disciplineWarnings.some((warning) => warning.includes("Warning") || warning.includes("approaching") || warning.includes("High risk") || warning.includes("too large") || warning.includes("Contracts"))
@@ -3338,7 +3578,7 @@ function Dashboard({
 
   const markTradeActive = () => {
     if (!hasPlan) {
-      notify("Generate a valid trade plan first.", "failure");
+      setMarkActiveModalOpen(true);
       return;
     }
     const nextTrade = activeTradeFromPlan(visualPlan, {
@@ -3372,18 +3612,18 @@ function Dashboard({
 
   const cardOrder = normalizeCardOrder(effectiveLayout.cardOrder);
   const dashboardCards = {
-    alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={zoneDetection} /> : null,
+    alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
       chartData={chartData}
       currentPrice={price}
       entry={hasPlan ? visualPlan.entry : undefined}
       runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
       stop={hasPlan ? visualPlan.stop : undefined}
-      support={zoneDetection.supportLevel ?? support}
-      resistance={zoneDetection.resistanceLevel ?? resistance}
+      support={enrichedZoneDetection.supportLevel ?? support}
+      resistance={enrichedZoneDetection.resistanceLevel ?? resistance}
       trim1={hasPlan ? visualPlan.trim1 : undefined}
       trim2={hasPlan ? visualPlan.trim2 : undefined}
-      zoneDetection={zoneDetection}
+      zoneDetection={enrichedZoneDetection}
     /> : null,
     coach: effectiveLayout.coach ? <div style={styles.coachCard}>
       <p style={styles.cardLabel}>Trade Coach</p>
@@ -3393,10 +3633,20 @@ function Dashboard({
         <Metric label="Action" value={coachDecision.action} tone={coachDecision.action === "WAIT" || coachDecision.action === "NO TRADE" ? "warn" : "good"} />
         <Metric label="Grade" value={`${displayTradeGrade.letter} ${displayTradeGrade.score}/100`} tone={displayTradeGrade.score >= 75 ? "good" : displayTradeGrade.score >= 55 ? "warn" : "bad"} />
       </div>
-      <p style={styles.coachMessage}>{coachDecision.message}</p>
+      <div style={styles.coachGrid}>
+        <Metric label="Structure" value={marketStructure.marketStructure.charAt(0).toUpperCase() + marketStructure.marketStructure.slice(1)} tone={marketStructure.marketStructure === "bullish" ? "good" : marketStructure.marketStructure === "bearish" ? "bad" : "warn"} />
+        <Metric label="VWAP" value={marketStructure.vwap.toFixed(2)} tone={price >= marketStructure.vwap ? "good" : "bad"} />
+        {marketStructure.liquiditySweepHigh ? <Metric label="Sweep High" value={marketStructure.liquiditySweepHigh.toFixed(2)} tone="warn" /> : null}
+        {marketStructure.liquiditySweepLow ? <Metric label="Sweep Low" value={marketStructure.liquiditySweepLow.toFixed(2)} tone="warn" /> : null}
+      </div>
+      <p style={styles.coachMessage}>{liveCoach}</p>
       {!activePlanValidation.valid && activeTradePlan.direction !== "none" ? <div style={styles.priceWarning}>{activePlanValidation.reason}</div> : null}
       {autoTradePlan.noTrade ? <div style={styles.priceWarning}>{autoTradePlan.message}</div> : null}
-      <p style={styles.muted}>{activeTradePlan.direction === "none" ? "Waiting for valid setup." : autoTradePlan.coachMessage || displayTradeGrade.reason}</p>
+      {marketStructure.liquiditySweepHigh || marketStructure.liquiditySweepLow ? (
+        <div style={styles.priceWarning}>{marketStructure.structureMessage}</div>
+      ) : (
+        <p style={styles.muted}>{activeTradePlan.direction === "none" ? "Waiting for valid setup." : displayTradeGrade.reason}</p>
+      )}
     </div> : null,
     journal: effectiveLayout.journal ? <section style={styles.card}>
       <p style={styles.cardLabel}>Journal</p>
@@ -3478,6 +3728,28 @@ function Dashboard({
         <span style={styles.muted}>Layout: {layoutPrefs.mode || "Pro"}</span>
         <span style={styles.muted}>Active Trade: {activeTrade?.isActive ? `${activeTrade.direction.toUpperCase()} ${activeTrade.market}` : "None"}</span>
       </section>
+      <DashboardNextStep
+        activeTrade={activeTrade}
+        dataSource={dataSource}
+        hasPlan={hasPlan}
+        support={support}
+        resistance={resistance}
+        onMarkActive={() => setMarkActiveModalOpen(true)}
+      />
+      {markActiveModalOpen ? (
+        <MarkTradeActiveModal
+          applyQuickSetup={applyQuickSetup}
+          notify={notify}
+          price={price}
+          profile={profile}
+          resistance={resistance}
+          setActiveTrade={setActiveTrade}
+          setActivePosition={setActivePosition}
+          setPlannedTrade={setPlannedTrade}
+          support={support}
+          onClose={() => setMarkActiveModalOpen(false)}
+        />
+      ) : null}
       {customizeOpen ? (
         <CustomizeDashboardPanel layoutPrefs={layoutPrefs} notify={notify} setLayoutPrefs={setLayoutPrefs} />
       ) : null}
@@ -4297,6 +4569,8 @@ function calculateTrade({ activePosition, contracts, direction, discipline, entr
   if (lostStructure) autoCoaching.push("Exit if price loses structure.");
   if (autoCoaching.length === 0) autoCoaching.push("Hold plan. Wait for price to reach a decision level.");
 
+  const grade = getSetupGradeLabel(score);
+
   return {
     actionTone,
     autoCoaching,
@@ -4307,10 +4581,11 @@ function calculateTrade({ activePosition, contracts, direction, discipline, entr
     confidence,
     confidenceColor,
     disciplineWarnings,
-    factors,
-    openPnl,
     dollarPerPoint,
     estimatedMaxLoss,
+    factors,
+    grade,
+    openPnl,
     riskLeft,
     riskPerTenPoints,
     score,
@@ -4511,6 +4786,101 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
   };
 }
 
+// Market Structure Engine — detects swing highs/lows, liquidity sweeps, VWAP proxy, session levels
+function analyzeMarketStructure(candles = [], fallback = {}) {
+  const clean = safeArray(candles)
+    .map((c) => ({
+      close: Number(c.close),
+      high: Number(c.high ?? c.close),
+      low: Number(c.low ?? c.close),
+      open: Number(c.open ?? c.close),
+      volume: Number(c.volume ?? 1),
+    }))
+    .filter((c) => [c.close, c.high, c.low, c.open].every(Number.isFinite));
+
+  const currentPrice = Number(fallback.price ?? clean.at(-1)?.close ?? 0);
+  if (!clean.length) {
+    return {
+      liquiditySweepHigh: null,
+      liquiditySweepLow: null,
+      marketStructure: "unknown",
+      sessionHigh: Number(fallback.resistance ?? currentPrice),
+      sessionLow: Number(fallback.support ?? currentPrice),
+      structureMessage: "Insufficient candle data. Using manual levels.",
+      swingHighs: [],
+      swingLows: [],
+      vwap: currentPrice,
+    };
+  }
+
+  // Swing highs and lows (3-bar pivot)
+  const swingHighs = [];
+  const swingLows = [];
+  for (let i = 1; i < clean.length - 1; i++) {
+    if (clean[i].high > clean[i - 1].high && clean[i].high > clean[i + 1].high) swingHighs.push(clean[i].high);
+    if (clean[i].low < clean[i - 1].low && clean[i].low < clean[i + 1].low) swingLows.push(clean[i].low);
+  }
+
+  // Session extremes
+  const sessionHigh = Math.max(...clean.map((c) => c.high));
+  const sessionLow = Math.min(...clean.map((c) => c.low));
+
+  // VWAP proxy: weighted average of typical price by volume
+  const totalVolume = clean.reduce((sum, c) => sum + c.volume, 0);
+  const vwap = totalVolume > 0
+    ? Number((clean.reduce((sum, c) => sum + ((c.high + c.low + c.close) / 3) * c.volume, 0) / totalVolume).toFixed(2))
+    : Number(((sessionHigh + sessionLow) / 2).toFixed(2));
+
+  // Liquidity sweep detection: price briefly exceeded a prior swing level then reversed
+  let liquiditySweepHigh = null;
+  let liquiditySweepLow = null;
+  if (swingHighs.length >= 2 && clean.length >= 3) {
+    const priorSwingHigh = swingHighs[swingHighs.length - 2];
+    const last = clean.at(-1);
+    const prev = clean.at(-2);
+    if (last.high > priorSwingHigh && last.close < priorSwingHigh) liquiditySweepHigh = priorSwingHigh;
+    if (prev.high > priorSwingHigh && prev.close < priorSwingHigh) liquiditySweepHigh = priorSwingHigh;
+  }
+  if (swingLows.length >= 2 && clean.length >= 3) {
+    const priorSwingLow = swingLows[swingLows.length - 2];
+    const last = clean.at(-1);
+    const prev = clean.at(-2);
+    if (last.low < priorSwingLow && last.close > priorSwingLow) liquiditySweepLow = priorSwingLow;
+    if (prev.low < priorSwingLow && prev.close > priorSwingLow) liquiditySweepLow = priorSwingLow;
+  }
+
+  // Market structure: higher highs/higher lows = bullish, lower highs/lower lows = bearish
+  let marketStructure = "neutral";
+  if (swingHighs.length >= 2 && swingLows.length >= 2) {
+    const risingHighs = swingHighs.at(-1) > swingHighs.at(-2);
+    const risingLows = swingLows.at(-1) > swingLows.at(-2);
+    const fallingHighs = swingHighs.at(-1) < swingHighs.at(-2);
+    const fallingLows = swingLows.at(-1) < swingLows.at(-2);
+    if (risingHighs && risingLows) marketStructure = "bullish";
+    else if (fallingHighs && fallingLows) marketStructure = "bearish";
+    else if (risingHighs && fallingLows) marketStructure = "distribution";
+    else if (fallingHighs && risingLows) marketStructure = "accumulation";
+  }
+
+  const aboveVwap = currentPrice > vwap;
+  let structureMessage = `Market structure is ${marketStructure}. Price is ${aboveVwap ? "above" : "below"} VWAP (${vwap.toFixed(2)}).`;
+  if (liquiditySweepHigh) structureMessage += ` Liquidity sweep detected above ${liquiditySweepHigh.toFixed(2)} — watch for reversal.`;
+  if (liquiditySweepLow) structureMessage += ` Liquidity sweep detected below ${liquiditySweepLow.toFixed(2)} — watch for reversal.`;
+
+  return {
+    aboveVwap,
+    liquiditySweepHigh,
+    liquiditySweepLow,
+    marketStructure,
+    sessionHigh,
+    sessionLow,
+    structureMessage,
+    swingHighs,
+    swingLows,
+    vwap,
+  };
+}
+
 function findRepeatedRejectionLevels(levels = [], pad = 1) {
   const clean = levels.filter(Number.isFinite).sort((a, b) => a - b);
   const clusters = [];
@@ -4558,11 +4928,10 @@ function getEntryQuality({ direction = "long", entry, price, resistance, support
 }
 
 function getSetupGradeLabel(score) {
-  if (score >= 90) return "A+";
-  if (score >= 80) return "A";
+  if (score >= 85) return "A";
   if (score >= 70) return "B";
-  if (score >= 60) return "C";
-  return "Avoid";
+  if (score >= 55) return "C";
+  return "D";
 }
 
 function getTradeGrade({ activeBias = "neutral", contracts, dailyPnl, direction = "long", entry, maxContracts, maxDailyLoss, price, rewardRisk, resistance, stop, support, zoneDetection = {} }) {
@@ -4572,83 +4941,125 @@ function getTradeGrade({ activeBias = "neutral", contracts, dailyPnl, direction 
       reason: rewardRisk?.reason || "Invalid plan: targets are on the wrong side of entry.",
       score: 0,
       reasons: [rewardRisk?.reason || "targets are on the wrong side of entry"],
+      factors: {},
     };
   }
+
   const range = Math.max(1, Math.abs(resistance - support));
   const supportLevel = Number(zoneDetection.supportLevel ?? support);
   const resistanceLevel = Number(zoneDetection.resistanceLevel ?? resistance);
-  const nearSupport = Math.abs(entry - supportLevel) <= range * 0.2;
-  const nearResistance = Math.abs(entry - resistanceLevel) <= range * 0.2;
+  const sessionHigh = Number(zoneDetection.sessionHigh ?? resistanceLevel);
+  const sessionLow = Number(zoneDetection.sessionLow ?? supportLevel);
   const middleLow = Number(zoneDetection.middleZoneLow ?? support + range * 0.35);
   const middleHigh = Number(zoneDetection.middleZoneHigh ?? resistance - range * 0.35);
-  const middleEntry = entry > middleLow && entry < middleHigh;
-  const stopOutsideStructure = stop < support || stop > resistance;
-  const stopCorrectSide = direction === "short" ? Number(stop) > Number(entry) : Number(stop) < Number(entry);
-  const biasAligned = normalizeActiveBias(activeBias) === "neutral" || directionFromBias(activeBias) === direction;
-  const entryQuality = getEntryQuality({ direction, entry, price, resistance, support, zoneDetection });
+  const openRangeHigh = Number(zoneDetection.openRangeHigh ?? resistanceLevel);
+  const openRangeLow = Number(zoneDetection.openRangeLow ?? supportLevel);
   const riskPoints = Math.abs(entry - stop);
-  let score = 100;
-  const reasons = [];
+  const entryQuality = getEntryQuality({ direction, entry, price, resistance, support, zoneDetection });
 
-  if (!nearSupport && !nearResistance) {
-    score -= 18;
-    reasons.push("entry was too far from support/resistance");
-  }
-  if (rewardRisk.ratio < 1.5) {
-    score -= 22;
-    reasons.push("target is too close for the risk");
-  } else if (rewardRisk.ratio < 2) {
-    score -= 10;
-    reasons.push("risk/reward is under 2R");
-  }
-  if (riskPoints > range * 0.35) {
-    score -= 12;
-    reasons.push("stop size is wider than the setup");
-  }
-  if (!stopOutsideStructure) {
-    score -= 14;
-    reasons.push("stop is inside the range");
-  }
-  if (!stopCorrectSide) {
-    score -= 35;
-    reasons.push("stop is on the wrong side");
-  }
-  if (!biasAligned) {
-    score -= 22;
-    reasons.push("bias does not align with direction");
-  }
-  if (Number(contracts) > Number(maxContracts || 1)) {
-    score -= 18;
-    reasons.push("contract size is above your funded limit");
-  }
-  if (middleEntry) {
-    score -= 16;
-    reasons.push("entry is in the middle/no-trade zone");
-  }
-  if (Number(dailyPnl) <= -Math.abs(Number(maxDailyLoss || 0)) * 0.8) {
-    score -= 18;
-    reasons.push("daily loss protection is close");
-  }
-  if (Math.abs(price - entry) > range * 0.35) {
-    score -= 8;
-    reasons.push("current price is stretched from entry");
-  }
-  if (entryQuality.label === "Chasing") {
-    score -= 12;
-    reasons.push("entry is chasing");
-  }
-  if (entryQuality.label === "Invalid") {
-    score -= 25;
-    reasons.push("do not enter mid-range");
+  // Factor 1 — Location (20 pts): is entry near S/R, not mid-range?
+  const nearSupport = Math.abs(entry - supportLevel) <= range * 0.2;
+  const nearResistance = Math.abs(entry - resistanceLevel) <= range * 0.2;
+  const nearLevel = nearSupport || nearResistance;
+  const middleEntry = entry > middleLow && entry < middleHigh;
+  const locationScore = middleEntry ? 2 : nearLevel ? 20 : entryQuality.label === "Chasing" ? 6 : 12;
+  const locationReason = middleEntry
+    ? "entry is in the no-trade middle zone"
+    : nearLevel
+      ? "entry is near a key support or resistance level"
+      : entryQuality.label === "Chasing"
+        ? "entry is chasing — wait for a pullback"
+        : "entry is between levels";
+
+  // Factor 2 — Risk/Reward (20 pts): does the plan offer at least 2R to the runner?
+  const rrRatio = rewardRisk.ratio;
+  const rrScore = rrRatio >= 3 ? 20 : rrRatio >= 2 ? 16 : rrRatio >= 1.5 ? 10 : rrRatio >= 1 ? 5 : 0;
+  const rrReason = rrRatio >= 3
+    ? `strong ${rrRatio.toFixed(1)}R reward/risk ratio`
+    : rrRatio >= 2
+      ? `acceptable ${rrRatio.toFixed(1)}R reward/risk`
+      : rrRatio >= 1.5
+        ? `reward/risk is ${rrRatio.toFixed(1)}R — below ideal 2R`
+        : rrRatio >= 1
+          ? `reward/risk is only ${rrRatio.toFixed(1)}R — target is too close`
+          : "reward does not cover the risk";
+
+  // Factor 3 — Trend Alignment (20 pts): does direction match market bias?
+  const normalizedBias = normalizeActiveBias(activeBias);
+  const biasAligned = normalizedBias === "neutral" || directionFromBias(normalizedBias) === direction;
+  const biasScore = normalizedBias === "neutral" ? 10 : biasAligned ? 20 : 0;
+  const biasReason = normalizedBias === "neutral"
+    ? "bias is neutral — no trend confirmation either way"
+    : biasAligned
+      ? `${direction} direction aligns with ${normalizedBias} bias`
+      : `${direction} direction trades against ${normalizedBias} bias`;
+
+  // Factor 4 — Breakout / Rejection Confirmation (20 pts): does the setup match price action at the level?
+  const priceAtResistance = Math.abs(price - resistanceLevel) <= range * 0.22;
+  const priceAtSupport = Math.abs(price - supportLevel) <= range * 0.22;
+  const breakoutAbove = price > resistanceLevel;
+  const breakdownBelow = price < supportLevel;
+  let confirmationScore = 8;
+  let confirmationReason = "no clear confirmation yet at a key level";
+  if (direction === "long") {
+    if (priceAtSupport) { confirmationScore = 20; confirmationReason = "price is testing support — long rejection setup"; }
+    else if (breakoutAbove && nearResistance) { confirmationScore = 16; confirmationReason = "breakout above resistance — potential continuation"; }
+    else if (breakdownBelow) { confirmationScore = 2; confirmationReason = "price broke below support — against long setup"; }
+  } else {
+    if (priceAtResistance) { confirmationScore = 20; confirmationReason = "price is testing resistance — short rejection setup"; }
+    else if (breakdownBelow && nearSupport) { confirmationScore = 16; confirmationReason = "breakdown below support — potential continuation short"; }
+    else if (breakoutAbove) { confirmationScore = 2; confirmationReason = "price broke above resistance — against short setup"; }
   }
 
-  const boundedScore = Math.max(0, Math.min(100, Math.round(score)));
+  // Factor 5 — Session Context (20 pts): is entry near session high/low or open range?
+  const nearSessionHigh = Math.abs(entry - sessionHigh) <= range * 0.18;
+  const nearSessionLow = Math.abs(entry - sessionLow) <= range * 0.18;
+  const nearOpenRangeHigh = Math.abs(entry - openRangeHigh) <= range * 0.18;
+  const nearOpenRangeLow = Math.abs(entry - openRangeLow) <= range * 0.18;
+  const sessionContextScore = (
+    (direction === "short" && nearSessionHigh) ||
+    (direction === "long" && nearSessionLow)
+  ) ? 20 : (
+    nearOpenRangeHigh || nearOpenRangeLow
+  ) ? 14 : (
+    nearSessionHigh || nearSessionLow
+  ) ? 10 : 6;
+  const sessionContextReason = (direction === "short" && nearSessionHigh)
+    ? "short entry near session high — strong location"
+    : (direction === "long" && nearSessionLow)
+      ? "long entry near session low — strong location"
+      : (nearOpenRangeHigh || nearOpenRangeLow)
+        ? "entry near opening range boundary"
+        : (nearSessionHigh || nearSessionLow)
+          ? "entry near session extreme but wrong side for direction"
+          : "entry is away from session reference levels";
+
+  // Penalty: wrong stop side or risk too wide
+  const stopCorrectSide = direction === "short" ? Number(stop) > Number(entry) : Number(stop) < Number(entry);
+  const riskTooWide = riskPoints > range * 0.4;
+  const dailyLossNear = Number(dailyPnl) <= -Math.abs(Number(maxDailyLoss || 0)) * 0.8;
+  const oversized = Number(contracts) > Number(maxContracts || contracts);
+  let penalty = 0;
+  const penaltyReasons = [];
+  if (!stopCorrectSide) { penalty += 30; penaltyReasons.push("stop is on the wrong side of entry"); }
+  if (riskTooWide) { penalty += 10; penaltyReasons.push("stop is wider than the setup range"); }
+  if (dailyLossNear) { penalty += 12; penaltyReasons.push("daily loss protection is nearly hit"); }
+  if (oversized) { penalty += 12; penaltyReasons.push("contract size exceeds your funded limit"); }
+
+  const rawScore = locationScore + rrScore + biasScore + confirmationScore + sessionContextScore - penalty;
+  const boundedScore = Math.max(0, Math.min(100, Math.round(rawScore)));
   const letter = getSetupGradeLabel(boundedScore);
-  const reason = reasons.length
-    ? `${letter} grade: ${reasons[0]}.`
-    : `${letter} grade: clean location, controlled risk, and plan is defined.`;
 
-  return { entryQuality, letter, reason, score: boundedScore, reasons };
+  const factors = { location: locationScore, rewardRisk: rrScore, trendAlignment: biasScore, confirmation: confirmationScore, sessionContext: sessionContextScore };
+  const allReasons = [locationReason, rrReason, biasReason, confirmationReason, sessionContextReason, ...penaltyReasons];
+  const topIssue = allReasons.find((r) => r.includes("wrong side") || r.includes("no-trade") || r.includes("only") || r.includes("against") || r.includes("chasing")) || allReasons[0];
+  const reason = penaltyReasons.length
+    ? `${letter} grade: ${penaltyReasons[0]}.`
+    : boundedScore >= 85
+      ? `${letter} grade: ${allReasons[0]}.`
+      : `${letter} grade: ${topIssue}.`;
+
+  return { entryQuality, factors, letter, reason, reasons: allReasons, score: boundedScore };
 }
 
 function gradeCompletedTrade({ plan, profile, trade }) {
@@ -4730,6 +5141,7 @@ function calculateRewardRisk(args) {
 }
 
 function normalizeTradePlan(plan = {}, fallback = {}) {
+  if (plan.direction === "none" || plan.noTrade) return { ...plan, direction: "none", noTrade: true };
   const direction = plan.direction === "short" ? "short" : "long";
   const entry = safeNumber(plan.entry, fallback.entry, 0);
   const rawStop = safeNumber(plan.stop, fallback.stop, direction === "long" ? entry - 10 : entry + 10);
@@ -5171,21 +5583,53 @@ function buildChartData({ price, entry, stop, support, resistance, trim1, trim2,
   });
 }
 
-function getLiveCoachMessage({ activeBias, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, tradeGrade, visualPlan }) {
-  if (discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss)) return "Daily loss limit reached. Stop trading.";
-  if (activePosition || activeTradePlan?.status === "managing_trade") {
+function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, support, resistance, tradeGrade, visualPlan }) {
+  if (discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss)) return "Daily loss limit reached. Stop trading today.";
+
+  const isInTrade = activeTrade?.isActive || activePosition || activeTradePlan?.status === "managing_trade";
+  if (isInTrade) {
     const isLong = (activePosition?.direction || activeTradePlan?.direction || visualPlan.direction) !== "short";
     const stopHit = isLong ? price <= visualPlan.stop : price >= visualPlan.stop;
-    if (stopHit) return "Stop area reached. Respect your plan.";
-    return getTargetProgressMessage({ activePosition, plan: activeTradePlan || visualPlan, price });
+    if (stopHit) return "Stop area reached. Respect your plan and exit.";
+    const progressMsg = getTargetProgressMessage({ activePosition, plan: activeTradePlan || visualPlan, price });
+    if (progressMsg) return progressMsg;
   }
-  if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message;
-  if (normalizeActiveBias(activeBias) === "neutral" || activeTradePlan?.direction === "none") return "Waiting for valid setup.";
+
+  if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message || "No trade. Wait for confirmation.";
+  if (normalizeActiveBias(activeBias) === "neutral" || activeTradePlan?.direction === "none") {
+    if (!Number.isFinite(Number(support)) || !Number.isFinite(Number(resistance))) {
+      return "Price connected. Add support and resistance levels to generate a plan.";
+    }
+    return "Waiting for valid setup. Price is between levels — no edge here yet.";
+  }
   if (!visualPlan?.entry || !visualPlan?.stop) return "Plan outdated. Regenerate from current market data.";
-  if (tradeGrade?.letter === "Invalid") return "Invalid plan: targets are on the wrong side of entry.";
-  if ((activePosition?.contracts || visualPlan.contracts || 0) > profile.maxContracts) return "High risk size detected. Reduce contracts.";
-  if (tradeGrade?.score < 55) return "Risk too high. Lower contracts or wait for a cleaner level.";
-  return getTargetProgressMessage({ activePosition, plan: activeTradePlan || visualPlan, price }) || engine.autoCoaching[0] || "Hold plan. Let price reach a decision level.";
+
+  if (tradeGrade?.letter === "Invalid") {
+    return `Invalid plan: ${tradeGrade.reasons?.[0] || "targets are on the wrong side of entry"}.`;
+  }
+  if ((activePosition?.contracts || visualPlan.contracts || 0) > profile.maxContracts) {
+    return "Contract size exceeds your funded limit. Reduce before entering.";
+  }
+
+  // Grade-based coaching with WHY
+  const grade = tradeGrade?.letter || "D";
+  const score = tradeGrade?.score ?? 0;
+  const topReason = tradeGrade?.reasons?.[0];
+
+  if (grade === "A") {
+    return `Grade A setup (${score}/100). ${topReason ? `Why: ${topReason}.` : "Clean location, controlled risk, plan is defined."}`;
+  }
+  if (grade === "B") {
+    return `Grade B setup (${score}/100). ${topReason ? `Watch: ${topReason}.` : "Acceptable setup. Follow your plan."}`;
+  }
+  if (grade === "C") {
+    const issue = tradeGrade?.reasons?.find((r) => r.includes("too close") || r.includes("chasing") || r.includes("neutral") || r.includes("middle")) || topReason;
+    return `Grade C setup (${score}/100). Caution: ${issue || "setup quality is low"}.`;
+  }
+
+  // Grade D — be specific about what is wrong
+  const issue = tradeGrade?.reasons?.find((r) => r.includes("wrong side") || r.includes("no-trade") || r.includes("against") || r.includes("only") || r.includes("chasing")) || topReason;
+  return `Grade D setup (${score}/100). Do not trade: ${issue || "setup does not meet quality threshold"}.`;
 }
 
 function TradeChartPanel({ chartData, currentPrice, entry, runner, stop, support, resistance, trim1, trim2, zoneDetection = {} }) {
@@ -5493,6 +5937,8 @@ function ConnectionsPage({
   session,
   setActivePage,
   setActiveTrade,
+  setPriceStatus,
+  setWebhookDebug,
   startDemoBroker,
   updateProfile,
   webhookDebug,
@@ -5859,15 +6305,10 @@ function ConnectionsPage({
           {isFunded ? <SelectField label="Account Phase" value={profile.accountPhase} options={["evaluation", "funded", "live"]} onChange={(value) => updateProfile("accountPhase", value)} /> : null}
         </div>
         <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
-          <button onClick={() => {
-            if (brokerProvider === "Lucid Trading" || profile.fundedProvider === "Lucid Trading") setHasTradovateApiAccess(false);
-            setBrokerModalOpen(true);
-          }} style={styles.settingsButton}>Connect Broker</button>
+          <button onClick={openTradingViewWizard} style={styles.settingsButton}>Connect TradingView Alerts</button>
+          <button onClick={startDemoBroker} style={styles.secondaryButton}>Connect Demo Broker</button>
           <button onClick={activateLucidManualMode} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
-          <button onClick={openTradingViewWizard} style={styles.secondaryButton}>Connect TradingView Alerts</button>
           <button onClick={activateManualMode} style={styles.dismissButton}>Use Manual Mode</button>
-          <button onClick={startDemoBroker} style={styles.settingsButton}>Connect Demo Broker</button>
-          <button onClick={openTradingViewWizard} style={styles.dismissButton}>Connect TradingView Alerts</button>
           <button onClick={() => {
             setBrokerPlatform("Tradovate");
             setBrokerStep(4);
