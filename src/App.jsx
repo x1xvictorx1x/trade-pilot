@@ -3241,12 +3241,28 @@ function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resista
   const manualPlanValid = !validationError && e > 0 && s > 0 && t1 > 0;
 
   const handleAutoGenerate = () => {
-    if (!hasSupport || !hasResistance) {
-      notify("Add support and resistance levels first.", "failure");
+    if (!hasPrice) {
+      notify("Connect a data source to get the current price.", "failure");
       return;
     }
-    applyQuickSetup(form.direction === "short" ? "Breakdown Short" : "Breakout Long");
-    notify("Plan generated. Click Mark Trade Active to enter.", "success");
+    const offset = Math.max(10, Math.round(price * 0.002 * 4) / 4);
+    const effSupport = hasSupport ? Number(support) : price - offset;
+    const effResistance = hasResistance ? Number(resistance) : price + offset;
+    const isShort = form.direction === "short";
+    let plan;
+    if (isShort) {
+      const nextEntry = effSupport - 2;
+      plan = { direction: "short", entry: nextEntry, stop: effSupport + 15, trim1: nextEntry - 20, trim2: nextEntry - 40, runner: nextEntry - 80 };
+    } else {
+      const nextEntry = effResistance + 2;
+      plan = { direction: "long", entry: nextEntry, stop: effResistance - 15, trim1: nextEntry + 20, trim2: nextEntry + 40, runner: nextEntry + 80 };
+    }
+    const normalized = normalizeTradePlan({ ...plan, contracts: Number(profile.defaultContracts) || 1, status: "active" });
+    const nextTrade = activeTradeFromPlan(normalized, { currentPrice: price, market: profile?.mainMarket, source: "auto", status: "active" });
+    setPlannedTrade?.({ ...normalized, status: "active" });
+    setActiveTrade(nextTrade);
+    setActivePosition({ ...normalized, openedAt: nextTrade.openedAt, status: "active" });
+    notify("Plan generated and trade marked active.", "success");
     onClose();
   };
 
@@ -3327,8 +3343,8 @@ function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resista
               {checkRow(hasResistance, `Resistance level${hasResistance ? ` — ${resistance}` : " — add a resistance level in the panel"}`)}
             </div>
             {(!hasSupport || !hasResistance) ? (
-              <p style={{ background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.25)", borderRadius: "10px", color: "#fde68a", fontSize: "12px", marginBottom: "16px", padding: "10px 14px" }}>
-                Set both S/R levels to enable auto-generate, or use the manual builder.
+              <p style={{ background: "rgba(59,130,246,.08)", border: "1px solid rgba(59,130,246,.25)", borderRadius: "10px", color: "#93c5fd", fontSize: "12px", marginBottom: "16px", padding: "10px 14px" }}>
+                No S/R levels set — plan will be generated from current price ({price > 0 ? price : "no price"}).
               </p>
             ) : null}
             <div style={{ display: "grid", gap: "8px" }}>
@@ -6002,12 +6018,14 @@ function ConnectionsPage({
   };
 
   const connectUserTradovate = async () => {
-    const missingCredentialsMessage = brokerProvider === "Lucid Trading"
-      ? "Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts."
-      : "Missing API credentials. Use Manual Mode or TradingView Alerts until your provider enables API access.";
+    const lucidCredsMissing = brokerProvider === "Lucid Trading"
+      ? "Lucid does not provide Tradovate API credentials. Use TradingView Alerts or Manual Funded Mode."
+      : null;
+    const apiCredsMissing = "API credentials missing. Use TradingView Alerts or Manual Funded Mode.";
     if (!hasTradovateApiAccess) {
-      setTradovateDemoAuthStatus({ connected: false, error: missingCredentialsMessage, message: "API access required" });
-      notify?.(missingCredentialsMessage, "failure");
+      const msg = lucidCredsMissing || apiCredsMissing;
+      setTradovateDemoAuthStatus({ connected: false, error: msg, message: "API access required" });
+      notify?.(msg, "failure");
       return;
     }
 
@@ -6024,8 +6042,9 @@ function ConnectionsPage({
 
     const missing = ["username", "password", "cid", "sec"].filter((key) => !String(tradovateCredentials[key] || "").trim());
     if (missing.length) {
-      setTradovateDemoAuthStatus({ connected: false, error: missingCredentialsMessage, message: "Failed" });
-      notify?.(missingCredentialsMessage, "failure");
+      const missingMsg = `API credentials missing (${missing.join(", ")}). Use TradingView Alerts or Manual Funded Mode.`;
+      setTradovateDemoAuthStatus({ connected: false, error: missingMsg, message: "Failed" });
+      notify?.(missingMsg, "failure");
       return;
     }
 
@@ -6841,7 +6860,7 @@ function BrokerConnectModal({
             </div>
             {brokerProvider === "Lucid Trading" ? (
               <div style={{ ...styles.priceWarning, marginTop: "14px" }}>
-                Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts.
+                Lucid only provides standard Tradovate username/password — not CID or SEC. API credentials missing. Use TradingView Alerts or Manual Funded Mode.
               </div>
             ) : null}
           </section>
@@ -6854,29 +6873,30 @@ function BrokerConnectModal({
             {brokerPlatform === "Tradovate" ? (
               <>
                 <h4 style={{ ...styles.sectionTitle, fontSize: "20px" }}>Tradovate API Connection</h4>
-                <p style={styles.muted}>This requires Tradovate API Access. Your normal broker login may not work. If your prop firm does not provide CID/SEC/API password, use TradingView Alerts or Manual Mode.</p>
+                <p style={styles.muted}>Tradovate API requires: <strong>Username, API Password, CID, SEC, App ID, App Version, and Device ID</strong>. Your standard broker login is not enough — you need API credentials from Tradovate directly.</p>
                 {brokerProvider === "Lucid Trading" ? (
                   <div style={{ ...styles.priceWarning, marginTop: "14px" }}>
-                    Lucid does not provide Tradovate API credentials in the dashboard. Use Manual Funded Mode or TradingView Alerts.
+                    Lucid only provides standard Tradovate username/password — not CID or SEC. API credentials missing. Use TradingView Alerts or Manual Funded Mode.
                   </div>
-                ) : null}
+                ) : (
+                  <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
+                    If your prop firm does not provide CID/SEC, use TradingView Alerts or Manual Funded Mode instead.
+                  </div>
+                )}
                 <div style={{ ...styles.installBannerActions, marginTop: "16px" }}>
                   <button onClick={onActivateLucidManual} style={styles.secondaryButton}>Use Lucid Manual Mode</button>
                   <button onClick={onActivateTradingView} style={styles.secondaryButton}>Connect TradingView Alerts</button>
                   <button onClick={() => onHasApiAccess(true)} style={hasApiAccess ? styles.settingsButton : styles.secondaryButton}>I Have Advanced API Credentials</button>
                 </div>
-                <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
-                  API Access required. CID required. SEC required. API password required. Normal login is not enough.
-                </div>
                 {hasApiAccess ? (
                   <div style={{ ...styles.formGrid, marginTop: "16px" }}>
-                    <Field label="Username" value={credentials.username} onChange={(value) => onCredential("username", value)} />
-                    <Field label="API Password" type="password" value={credentials.password} onChange={(value) => onCredential("password", value)} />
-                    <Field label="CID" value={credentials.cid} onChange={(value) => onCredential("cid", value)} />
-                    <Field label="SEC" type="password" value={credentials.sec} onChange={(value) => onCredential("sec", value)} />
-                    <Field label="App ID" value={credentials.appId} onChange={(value) => onCredential("appId", value)} />
-                    <Field label="App Version" value={credentials.appVersion} onChange={(value) => onCredential("appVersion", value)} />
-                    <Field label="Device ID" value={credentials.deviceId} onChange={(value) => onCredential("deviceId", value)} />
+                    <Field label="Username *" value={credentials.username} onChange={(value) => onCredential("username", value)} />
+                    <Field label="API Password *" type="password" value={credentials.password} onChange={(value) => onCredential("password", value)} />
+                    <Field label="CID *" value={credentials.cid} onChange={(value) => onCredential("cid", value)} />
+                    <Field label="SEC *" type="password" value={credentials.sec} onChange={(value) => onCredential("sec", value)} />
+                    <Field label="App ID (default: trade-pilot)" value={credentials.appId} onChange={(value) => onCredential("appId", value)} />
+                    <Field label="App Version (default: 1.0)" value={credentials.appVersion} onChange={(value) => onCredential("appVersion", value)} />
+                    <Field label="Device ID (default: tradepilot-web)" value={credentials.deviceId} onChange={(value) => onCredential("deviceId", value)} />
                     <SelectField label="Environment" value={credentials.environment} options={["demo", "live"]} onChange={(value) => onCredential("environment", value)} />
                   </div>
                 ) : null}
