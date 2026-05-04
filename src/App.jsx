@@ -75,7 +75,50 @@ const pointValues = {
   ETH: 1,
   SPY: 1,
   QQQ: 1,
+  CUSTOM: 1,
 };
+
+const customMarketSpec = { displayName: "Custom Market", pointValue: 1, tickSize: 0.01, marketType: "custom" };
+
+const futuresSymbolMap = {
+  NQ: "NQ", "NQ1!": "NQ",
+  MNQ: "MNQ", "MNQ1!": "MNQ",
+  ES: "ES", "ES1!": "ES",
+  MES: "MES", "MES1!": "MES",
+  YM: "YM", "YM1!": "YM",
+  MYM: "MYM", "MYM1!": "MYM",
+  RTY: "RTY", "RTY1!": "RTY",
+  M2K: "M2K", "M2K1!": "M2K",
+  CL: "CL", "CL1!": "CL",
+  GC: "GC", "GC1!": "GC",
+  BTC: "BTC", "BTC1!": "BTC",
+  ETH: "ETH", "ETH1!": "ETH",
+  SPY: "SPY",
+  QQQ: "QQQ",
+};
+
+function resolveMarketFromSymbol(symbol = "", fallback = "MNQ") {
+  const raw = String(symbol || "").trim().toUpperCase();
+  if (!raw) {
+    return { market: fallback, symbol: fallback, marketType: marketSpecs[fallback] ? "futures" : "custom", spec: marketSpecs[fallback] || customMarketSpec };
+  }
+  if (futuresSymbolMap[raw]) {
+    const code = futuresSymbolMap[raw];
+    return { market: code, symbol: raw, marketType: "futures", spec: marketSpecs[code] || customMarketSpec };
+  }
+  for (const key of Object.keys(futuresSymbolMap)) {
+    if (raw.startsWith(key)) {
+      const code = futuresSymbolMap[key];
+      return { market: code, symbol: raw, marketType: "futures", spec: marketSpecs[code] || customMarketSpec };
+    }
+  }
+  return { market: raw, symbol: raw, marketType: "custom", spec: customMarketSpec };
+}
+
+function specForMarket(market) {
+  if (market && marketSpecs[market]) return marketSpecs[market];
+  return customMarketSpec;
+}
 
 const marketDefaults = {
   MNQ: 27289,
@@ -95,12 +138,21 @@ const marketDefaults = {
 };
 
 function normalizeFuturesSymbol(symbol = "") {
-  const clean = String(symbol).toUpperCase();
+  const clean = String(symbol || "").toUpperCase();
+  if (!clean) return "MNQ";
   if (clean.includes("MNQ")) return "MNQ";
   if (clean.includes("MES")) return "MES";
   if (clean.includes("NQ")) return "NQ";
   if (clean.includes("ES")) return "ES";
-  return clean || "MNQ";
+  if (clean.includes("MYM")) return "MYM";
+  if (clean.includes("YM")) return "YM";
+  if (clean.includes("M2K")) return "M2K";
+  if (clean.includes("RTY")) return "RTY";
+  if (clean.includes("BTC")) return "BTC";
+  if (clean.includes("ETH")) return "ETH";
+  if (clean.includes("CL")) return "CL";
+  if (clean.includes("GC")) return "GC";
+  return clean;
 }
 
 const markets = Object.keys(marketDefaults);
@@ -280,7 +332,7 @@ function normalizeActiveTrade(raw) {
 function activeTradeFromPlan(plan, { currentPrice, market, source = "manual", status = "active" } = {}) {
   if (!plan || plan.direction === "none") return defaultActiveTrade({ currentPrice, market, source });
   const normalized = normalizeTradePlan(plan);
-  const spec = marketSpecs[market] || marketSpecs.MNQ;
+  const spec = marketSpecs[market] || customMarketSpec;
   const livePrice = safeNumber(currentPrice, normalized.entry, 0);
   const contracts = safeNumber(normalized.contracts, 1);
   const points = normalized.direction === "short" ? normalized.entry - livePrice : livePrice - normalized.entry;
@@ -309,7 +361,7 @@ function updateActiveTradeProgress(trade, currentPrice, market) {
     return { ...current, currentPrice: safeNumber(currentPrice, current.currentPrice), market: market || current.market };
   }
   const livePrice = safeNumber(currentPrice, current.currentPrice, current.entry);
-  const spec = marketSpecs[market || current.market] || marketSpecs.MNQ;
+  const spec = marketSpecs[market || current.market] || customMarketSpec;
   const points = current.direction === "short" ? current.entry - livePrice : livePrice - current.entry;
   const hit = (target) => Number.isFinite(Number(target)) && Number(target) > 0 && (current.direction === "short" ? livePrice <= Number(target) : livePrice >= Number(target));
   const stopHit = Number(current.stop) > 0 && (current.direction === "short" ? livePrice >= Number(current.stop) : livePrice <= Number(current.stop));
@@ -883,14 +935,19 @@ export default function App() {
 
   useEffect(() => {
     if (dataSource === "TradingView Webhook") return;
-    const base = marketDefaults[profile.mainMarket] ?? 27400;
+    const knownDefault = marketDefaults[profile.mainMarket];
+    if (!Number.isFinite(knownDefault)) return;
+    const base = knownDefault;
+    const spec = specForMarket(profile.mainMarket);
+    const padDown = Math.max(spec.tickSize * 4, base * 0.0013);
+    const padUp = Math.max(spec.tickSize * 4, base * 0.0018);
     setPrice(base);
-    setSupport(base - Math.max(10, base * 0.0013));
-    setResistance(base + Math.max(10, base * 0.0018));
+    setSupport(Number((base - padDown).toFixed(2)));
+    setResistance(Number((base + padUp).toFixed(2)));
     setEntry(base);
-    setRecentHigh(base + Math.max(10, base * 0.0018));
-    setPullbackSupport(base - Math.max(10, base * 0.0013));
-    setBreakoutLevel(base + Math.max(10, base * 0.0018));
+    setRecentHigh(Number((base + padUp).toFixed(2)));
+    setPullbackSupport(Number((base - padDown).toFixed(2)));
+    setBreakoutLevel(Number((base + padUp).toFixed(2)));
     setLastUpdated(`Market changed to ${profile.mainMarket}`);
   }, [dataSource, profile.mainMarket]);
 
@@ -1149,18 +1206,24 @@ export default function App() {
       return () => stream.close();
     }
 
-    const base = marketDefaults[profile.mainMarket] ?? 27400;
+    const knownDefault = marketDefaults[profile.mainMarket];
+    if (!Number.isFinite(knownDefault) || knownDefault <= 0) {
+      setPriceStatus("Custom market detected. Set tick size and point value to enable simulated price.");
+      return undefined;
+    }
+    const base = knownDefault;
+    const spec = specForMarket(profile.mainMarket);
+    const tick = spec.tickSize || (base > 1000 ? 0.25 : 0.01);
     const timer = setInterval(() => {
       const drift = Math.sin(Date.now() / 12000) * base * 0.0008;
       const noise = (Math.random() - 0.5) * base * 0.0007;
-      const tick = base > 1000 ? 0.25 : base > 100 ? 0.01 : 0.01;
       const rawPrice = base + drift + noise;
-      const nextPrice = Number((Math.round(rawPrice / tick) * tick).toFixed(2));
-      const spread = base > 1000 ? 0.5 : base > 100 ? 0.02 : 0.02;
+      const nextPrice = Number((Math.round(rawPrice / tick) * tick).toFixed(4));
+      const spread = Math.max(tick * 2, base * 0.00002);
       setPrice(nextPrice);
       setQuote({
-        bid: Number((nextPrice - spread / 2).toFixed(2)),
-        ask: Number((nextPrice + spread / 2).toFixed(2)),
+        bid: Number((nextPrice - spread / 2).toFixed(4)),
+        ask: Number((nextPrice + spread / 2).toFixed(4)),
       });
       setLastUpdated(new Date().toLocaleTimeString());
     }, 1000);
@@ -1478,7 +1541,8 @@ export default function App() {
   };
 
   const applyAlert = (alert) => {
-    const nextMarket = normalizeFuturesSymbol(alert.symbol || profile.mainMarket);
+    const resolved = resolveMarketFromSymbol(alert.symbol || profile.mainMarket, profile.mainMarket);
+    const nextMarket = resolved.market;
     const nextPrice = Number(alert.price);
     const signalTime = alert.created_at || alert.receivedAt || alert.timestamp || new Date().toISOString();
     const hasSupport = Number.isFinite(Number(alert.support));
@@ -1487,10 +1551,43 @@ export default function App() {
     const hasStop = Number.isFinite(Number(alert.stop));
     const alertBias = normalizeActiveBias(alert.bias);
     const alertEvent = String(alert.event || alert.type || "").toLowerCase();
-    if (nextMarket && nextMarket !== profile.mainMarket) updateProfile("mainMarket", nextMarket);
+
+    const symbolChanged = nextMarket && nextMarket !== profile.mainMarket;
+    const previousMarketDefault = marketDefaults[profile.mainMarket];
+    const newMarketDefault = marketDefaults[nextMarket];
+    const priceLooksMismatched =
+      Number.isFinite(nextPrice) &&
+      Number.isFinite(previousMarketDefault) &&
+      previousMarketDefault > 0 &&
+      Math.abs(nextPrice - previousMarketDefault) / previousMarketDefault > 0.5 &&
+      (!Number.isFinite(newMarketDefault) || Math.abs(nextPrice - newMarketDefault) / newMarketDefault < 0.5);
+
+    if (symbolChanged) {
+      updateProfile("mainMarket", nextMarket);
+      setSupport(0);
+      setResistance(0);
+      setEntry(0);
+      setRiskPoints(profile.defaultRiskPoints);
+      setLevelBias("neutral");
+      setPriceHistory([]);
+      setPlannedTrade(null);
+      setActivePosition(null);
+      setActiveTrade((current) => ({ ...current, isActive: false, status: "waiting_entry", market: nextMarket }));
+      setFastMessage(`Symbol changed to ${resolved.symbol}. Cleared previous market data.`);
+      if (resolved.marketType === "custom") {
+        notify(`Custom market detected: ${resolved.symbol}. Set tick size and point value in Settings.`, "warn");
+      }
+    } else if (priceLooksMismatched) {
+      notify(`Symbol/market mismatch. ${alert.symbol || "Signal"} sent ${nextPrice} but current market is ${profile.mainMarket}.`, "failure");
+      setSupport(0);
+      setResistance(0);
+      setEntry(0);
+    }
+
     if (Number.isFinite(nextPrice)) {
       setPrice(nextPrice);
       setPriceHistory((h) => {
+        if (symbolChanged) return [{ close: nextPrice, label: new Date(signalTime).toLocaleTimeString() }];
         const point = { close: nextPrice, label: new Date(signalTime).toLocaleTimeString() };
         const next = [...h, point];
         return next.length > 60 ? next.slice(next.length - 60) : next;
@@ -1507,7 +1604,9 @@ export default function App() {
     if (hasSupport) setSupport(Number(alert.support));
     if (hasResistance) setResistance(Number(alert.resistance));
     if (!hasSupport && !hasResistance && dataSource !== "Manual Mode" && Number.isFinite(nextPrice)) {
-      const pad = Math.max(8, Math.abs(nextPrice) * 0.0015);
+      const tickSize = resolved.spec.tickSize || 0.01;
+      const padBase = Math.abs(nextPrice) * 0.0015;
+      const pad = Math.max(tickSize * 4, padBase);
       setSupport(Number((nextPrice - pad).toFixed(2)));
       setResistance(Number((nextPrice + pad).toFixed(2)));
       setFastMessage("TradingView price received. Add levels to generate a stronger plan.");
@@ -1834,7 +1933,7 @@ export default function App() {
         maxContracts: profile.maxContracts,
         maxDailyLoss: profile.maxDailyLoss,
         price: activeTrade.currentPrice,
-        rewardRisk: calculateRewardRisk({ plan: plannedTrade || activeTrade, pointValue: marketSpecs[activeTrade.market]?.pointValue || 20 }),
+        rewardRisk: calculateRewardRisk({ plan: plannedTrade || activeTrade, pointValue: marketSpecs[activeTrade.market]?.pointValue || customMarketSpec.pointValue }),
         resistance,
         stop: activeTrade.stop,
         support,
@@ -1853,8 +1952,8 @@ export default function App() {
         body,
         #root {
           width: 100% !important;
-          max-width: 100% !important;
-          min-width: 100% !important;
+          max-width: 100vw !important;
+          min-width: 0 !important;
           min-height: 100vh !important;
           margin: 0 !important;
           padding: 0 !important;
@@ -1866,13 +1965,28 @@ export default function App() {
           place-items: unset !important;
           justify-content: unset !important;
           align-items: unset !important;
+          overscroll-behavior-x: none !important;
         }
         main { max-width: none !important; }
         *, *::before, *::after { box-sizing: border-box; }
         img, svg, canvas, video { max-width: 100%; }
         .tradepilot-more-menu.closed { display: none; }
         .mobile-overlay.closed { display: none !important; }
-        .app-shell { width: 100%; min-height: 100vh; overflow-x: hidden; background: #05070d; }
+        .app-shell {
+          width: 100%;
+          max-width: 100vw;
+          min-height: 100vh;
+          overflow-x: hidden;
+          background: #05070d;
+          padding-left: env(safe-area-inset-left, 0px);
+          padding-right: env(safe-area-inset-right, 0px);
+          padding-bottom: env(safe-area-inset-bottom, 0px);
+        }
+        .tradepilot-header {
+          padding-top: max(12px, calc(env(safe-area-inset-top, 0px) + 8px)) !important;
+          padding-left: max(18px, env(safe-area-inset-left, 0px)) !important;
+          padding-right: max(18px, env(safe-area-inset-right, 0px)) !important;
+        }
         .app-container,
         .page-container,
         .dashboard-container {
@@ -1930,8 +2044,26 @@ export default function App() {
           .tradepilot-header-meta,
           .tradepilot-auth-actions { display: none !important; }
           .tradepilot-title { font-size: 24px !important; line-height: 1 !important; margin: 0 !important; }
-          .tradepilot-header { align-items: center !important; display: flex !important; gap: 10px !important; justify-content: space-between !important; padding: 10px 12px !important; }
+          .tradepilot-header {
+            align-items: center !important;
+            display: flex !important;
+            gap: 10px !important;
+            justify-content: space-between !important;
+            padding-top: max(10px, calc(env(safe-area-inset-top, 0px) + 6px)) !important;
+            padding-bottom: 10px !important;
+            padding-left: max(12px, env(safe-area-inset-left, 0px)) !important;
+            padding-right: max(12px, env(safe-area-inset-right, 0px)) !important;
+            position: sticky !important;
+            top: 0 !important;
+            z-index: 50 !important;
+          }
           .tradepilot-top-actions { margin-left: auto !important; position: static !important; width: auto !important; justify-content: flex-end !important; gap: 8px !important; }
+          .mobile-menu-button {
+            height: 44px !important;
+            width: 44px !important;
+            min-height: 44px !important;
+            min-width: 44px !important;
+          }
           .mobile-drawer {
             background: #05070d !important;
             border-left: 1px solid #1e3a5f !important;
@@ -1944,14 +2076,21 @@ export default function App() {
             min-width: 0 !important;
             max-width: 100vw !important;
             overflow-y: auto !important;
-            padding: 18px !important;
+            padding-top: max(18px, calc(env(safe-area-inset-top, 0px) + 12px)) !important;
+            padding-right: max(18px, env(safe-area-inset-right, 0px)) !important;
+            padding-bottom: max(18px, calc(env(safe-area-inset-bottom, 0px) + 12px)) !important;
+            padding-left: 18px !important;
             position: fixed !important;
             right: 0 !important;
             top: 0 !important;
             transform: translateX(0) !important;
             transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-            width: min(88vw, 360px) !important;
+            width: min(86vw, 320px) !important;
             z-index: 9999 !important;
+          }
+          .mobile-menu-item {
+            min-height: 44px !important;
+            padding: 12px 14px !important;
           }
           .mobile-drawer.closed {
             display: grid !important;
@@ -1979,8 +2118,21 @@ export default function App() {
           .card-alerts, .card-watchlist, .card-propFirmRules { order: 8; }
           .onboarding-card { max-width: 100% !important; width: 100% !important; }
           .onboarding-card button { width: 100% !important; }
-          .install-banner { max-width: 100% !important; width: 100% !important; }
-          .install-banner button { flex: 1 1 100%; }
+          .install-banner {
+            max-width: 100% !important;
+            width: 100% !important;
+            padding: 10px 12px !important;
+            gap: 8px !important;
+            border-radius: 10px !important;
+          }
+          .install-banner strong { font-size: 14px !important; }
+          .install-banner p { font-size: 12px !important; margin: 2px 0 0 !important; }
+          .install-banner button {
+            flex: 1 1 auto;
+            font-size: 13px !important;
+            padding: 9px 10px !important;
+            min-height: 40px !important;
+          }
           .mobile-status-bar { display: grid !important; }
           .mobile-status-bar > div { min-width: 0; }
           .mobile-status-bar strong { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3281,7 +3433,7 @@ function Dashboard({
     liquiditySweepLow: marketStructure.liquiditySweepLow,
     marketStructure: marketStructure.marketStructure,
   }), [zoneDetection, marketStructure]);
-  const marketSpec = marketSpecs[profile.mainMarket] ?? marketSpecs.MNQ;
+  const marketSpec = marketSpecs[profile.mainMarket] ?? customMarketSpec;
   const activeBias = normalizeActiveBias(levelBias);
   const autoTradePlan = getAutoTradePlan({
     accountSize: Number(profile.accountSize || 0),
@@ -4270,7 +4422,7 @@ function FundedManualPanel({ profile, updateProfile }) {
 }
 
 function calculateTrade({ activePosition, contracts, direction, discipline, entry, price, profile, resistance, riskPoints, support }) {
-  const pointValue = pointValues[profile.mainMarket] || 2;
+  const pointValue = pointValues[profile.mainMarket] || customMarketSpec.pointValue;
   const isLong = direction === "long";
   const inChop = price >= support && price <= resistance;
   const longTrigger = price > resistance;
@@ -5875,13 +6027,32 @@ function ConnectionsPage({
         <section style={styles.card}>
           <p style={styles.cardLabel}>Signal Feed</p>
           <h2 style={styles.sectionTitle}>TradingView Webhook Active</h2>
-          <div style={styles.metricGrid}>
-            <Metric label="Last signal received" value={webhookDebug?.received || "No"} tone={webhookDebug?.received === "Yes" ? "good" : "warn"} />
-            <Metric label="Symbol" value={webhookDebug?.symbol || "None"} />
-            <Metric label="Price" value={webhookDebug?.price || "None"} />
-            <Metric label="Last updated" value={webhookDebug?.updated || "Waiting"} />
-            <Metric label="Error" value={webhookDebug?.error || "None"} tone={webhookDebug?.error ? "bad" : "neutral"} />
-          </div>
+          {(() => {
+            const debugSymbol = webhookDebug?.symbol || profile.mainMarket || "";
+            const resolvedDebug = resolveMarketFromSymbol(debugSymbol, profile.mainMarket);
+            const marketTypeLabel = resolvedDebug.marketType === "futures"
+              ? `${resolvedDebug.market} (Futures)`
+              : `${resolvedDebug.symbol || "Custom"} (Custom)`;
+            const priceSourceLabel = webhookDebug?.received === "Yes" ? "TradingView Webhook" : (dataSource || "Unknown");
+            return (
+              <>
+                <div style={styles.metricGrid}>
+                  <Metric label="Last signal received" value={webhookDebug?.received || "No"} tone={webhookDebug?.received === "Yes" ? "good" : "warn"} />
+                  <Metric label="Symbol" value={debugSymbol || "None"} />
+                  <Metric label="Market Type" value={marketTypeLabel} tone={resolvedDebug.marketType === "custom" ? "warn" : "neutral"} />
+                  <Metric label="Price Source" value={priceSourceLabel} />
+                  <Metric label="Current Price" value={webhookDebug?.price || "None"} />
+                  <Metric label="Last Updated" value={webhookDebug?.updated || "Waiting"} />
+                  <Metric label="Error" value={webhookDebug?.error || "None"} tone={webhookDebug?.error ? "bad" : "neutral"} />
+                </div>
+                {resolvedDebug.marketType === "custom" && webhookDebug?.received === "Yes" ? (
+                  <div style={{ ...styles.coachPrompt, marginTop: "12px" }}>
+                    Price connected. Choose market settings to continue — set tick size and point value for {resolvedDebug.symbol} in Settings.
+                  </div>
+                ) : null}
+              </>
+            );
+          })()}
           <div style={{ ...styles.subPanel, marginTop: "14px" }}>
             <p style={styles.cardLabel}>Webhook Endpoint</p>
             <pre style={styles.sharePreview}>POST https://tradepilottool.com/api/webhook/tradingview</pre>
@@ -7023,10 +7194,13 @@ const styles = {
     display: "inline-flex",
     flexDirection: "column",
     gap: "4px",
-    height: "42px",
+    height: "44px",
     justifyContent: "center",
+    minHeight: "44px",
+    minWidth: "44px",
     padding: 0,
-    width: "42px",
+    touchAction: "manipulation",
+    width: "44px",
   },
   menuBar: {
     background: "#e2e8f0",
