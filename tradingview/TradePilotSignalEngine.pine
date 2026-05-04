@@ -60,9 +60,9 @@ plotshape(shortSetup, "Short Setup", shape.triangledown, location.abovebar, colo
 // ALERT CONDITIONS
 // Each alert message is JSON shaped for the Trade Pilot webhook.
 // ============================================================
-priceUpdateMsg = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"price_update","timestamp":"{{timenow}}"}'
-longSetupMsg   = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"long_setup","timestamp":"{{timenow}}"}'
-shortSetupMsg  = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"short_setup","timestamp":"{{timenow}}"}'
+priceUpdateMsg = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}'
+longSetupMsg   = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"long_setup","timestamp":"{{timenow}}"}'
+shortSetupMsg  = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"short_setup","timestamp":"{{timenow}}"}'
 
 alertcondition(true,       title="TradePilot Price Update", message=priceUpdateMsg)
 alertcondition(longSetup,  title="TradePilot Long Setup",   message=longSetupMsg)

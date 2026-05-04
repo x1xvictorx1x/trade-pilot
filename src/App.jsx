@@ -11,6 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import { isSupabaseConfigured, supabase } from "./supabaseClient";
+import TradingChart from "./components/TradingChart.jsx";
 
 const profileStorageKey = "tradePilotProfile";
 const disciplineStorageKey = "tradePilotDiscipline";
@@ -32,6 +33,142 @@ const alertsStorageKey = "tradePilotAlerts";
 const tradePlanStorageKey = "tradePilotTradePlan";
 const autoZonesStorageKey = "tradePilotAutoZones";
 const connectionModeStorageKey = "tradePilotConnectionMode";
+const candleHistoryStorageKey = "tradePilotCandleHistory";
+
+const MAX_CANDLES_PER_KEY = 300;
+const SR_LOOKBACK_CANDLES = 100;
+
+function candleHistoryKey(symbol, timeframe) {
+  const sym = String(symbol || "").trim().toUpperCase();
+  const tf = String(timeframe || "").trim();
+  if (!sym) return "";
+  return tf ? `${sym}|${tf}` : sym;
+}
+
+function loadCandleHistory() {
+  try {
+    const raw = localStorage.getItem(candleHistoryStorageKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (Array.isArray(value)) {
+        out[key] = value
+          .filter((candle) => candle && Number.isFinite(Number(candle.close)) && (candle.timestamp || candle.time))
+          .slice(-MAX_CANDLES_PER_KEY);
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function appendCandle(history, key, candle) {
+  if (!key || !candle) return history;
+  const open = Number(candle.open);
+  const high = Number(candle.high);
+  const low = Number(candle.low);
+  const close = Number(candle.close);
+  if (![open, high, low, close].every(Number.isFinite)) return history;
+  const ts = candle.timestamp ? new Date(candle.timestamp).getTime() : Date.now();
+  if (!Number.isFinite(ts)) return history;
+  const candleObj = {
+    open,
+    high,
+    low,
+    close,
+    volume: Number.isFinite(Number(candle.volume)) ? Number(candle.volume) : null,
+    timeframe: candle.timeframe || null,
+    timestamp: new Date(ts).toISOString(),
+  };
+  const existing = Array.isArray(history[key]) ? history[key] : [];
+  const last = existing[existing.length - 1];
+  let next;
+  if (last && new Date(last.timestamp).getTime() === ts) {
+    next = [...existing.slice(0, -1), candleObj];
+  } else {
+    next = [...existing, candleObj];
+  }
+  if (next.length > MAX_CANDLES_PER_KEY) next = next.slice(next.length - MAX_CANDLES_PER_KEY);
+  return { ...history, [key]: next };
+}
+
+function pickCandleSeries(history, symbol, timeframe) {
+  if (!history || typeof history !== "object") return [];
+  const exact = candleHistoryKey(symbol, timeframe);
+  if (exact && Array.isArray(history[exact]) && history[exact].length) return history[exact];
+  const symbolOnly = candleHistoryKey(symbol);
+  if (symbolOnly) {
+    const matches = Object.entries(history)
+      .filter(([key, value]) => Array.isArray(value) && value.length && (key === symbolOnly || key.startsWith(`${symbolOnly}|`)));
+    if (matches.length) {
+      matches.sort((a, b) => {
+        const aLast = a[1][a[1].length - 1]?.timestamp || "";
+        const bLast = b[1][b[1].length - 1]?.timestamp || "";
+        return bLast.localeCompare(aLast);
+      });
+      return matches[0][1];
+    }
+  }
+  return [];
+}
+
+function detectAutoSRZones(candleSeries) {
+  const candles = Array.isArray(candleSeries) ? candleSeries.slice(-SR_LOOKBACK_CANDLES) : [];
+  if (candles.length < 6) {
+    return {
+      supportZone: null,
+      resistanceZone: null,
+      sessionHigh: null,
+      sessionLow: null,
+      trend: "neutral",
+      candleCount: candles.length,
+    };
+  }
+  let highest = -Infinity;
+  let lowest = Infinity;
+  for (const c of candles) {
+    if (Number.isFinite(c.high) && c.high > highest) highest = c.high;
+    if (Number.isFinite(c.low) && c.low < lowest) lowest = c.low;
+  }
+  const range = Math.max(highest - lowest, 0.0001);
+  const zoneWidth = Math.max(range * 0.025, 0.0001);
+  const lowsSorted = candles.map((c) => c.low).filter(Number.isFinite).sort((a, b) => a - b);
+  const highsSorted = candles.map((c) => c.high).filter(Number.isFinite).sort((a, b) => b - a);
+  const lowQuantile = lowsSorted[Math.min(lowsSorted.length - 1, Math.floor(lowsSorted.length * 0.1))];
+  const highQuantile = highsSorted[Math.min(highsSorted.length - 1, Math.floor(highsSorted.length * 0.1))];
+  const supportCenter = lowQuantile ?? lowest;
+  const resistanceCenter = highQuantile ?? highest;
+  const supportZone = {
+    min: Number((supportCenter - zoneWidth / 2).toFixed(4)),
+    max: Number((supportCenter + zoneWidth / 2).toFixed(4)),
+    center: Number(supportCenter.toFixed(4)),
+  };
+  const resistanceZone = {
+    min: Number((resistanceCenter - zoneWidth / 2).toFixed(4)),
+    max: Number((resistanceCenter + zoneWidth / 2).toFixed(4)),
+    center: Number(resistanceCenter.toFixed(4)),
+  };
+  const half = Math.floor(candles.length / 2);
+  const firstHalf = candles.slice(0, half);
+  const secondHalf = candles.slice(half);
+  const avg = (arr) => arr.reduce((sum, c) => sum + ((c.high + c.low) / 2), 0) / Math.max(1, arr.length);
+  const firstAvg = avg(firstHalf);
+  const secondAvg = avg(secondHalf);
+  let trend = "neutral";
+  if (secondAvg > firstAvg + range * 0.05) trend = "bullish";
+  else if (secondAvg < firstAvg - range * 0.05) trend = "bearish";
+  return {
+    supportZone,
+    resistanceZone,
+    sessionHigh: highest,
+    sessionLow: lowest,
+    trend,
+    candleCount: candles.length,
+  };
+}
 
 const defaultProfile = {
   traderName: "",
@@ -177,7 +314,7 @@ const accountTypeOptions = ["Personal Trading Account", "Funded / Prop Firm Acco
 const fundedProviders = ["None", "Lucid Trading", "Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other"];
 const fundedPlatforms = ["Manual Mode", "TradingView Webhook", "Rithmic", "TopstepX", "CSV Import", "Other"];
 const navigationTabs = ["Home", "Dashboard", "Journal", "Account"];
-const moreTabs = ["Profile", "Settings", "Connections", "Install", "Help", "Support", "QA"];
+const moreTabs = ["Profile", "Settings", "Connections", "Indicator", "Install", "Help", "Support", "QA"];
 const authRedirectUrl = "https://tradepilottool.com";
 const marketServerUrl = "http://127.0.0.1:8787";
 const brokerSamplePayload = {
@@ -727,6 +864,10 @@ export default function App() {
   const [direction, setDirection] = useState("long");
   const [price, setPrice] = useState(marketDefaults[profile.mainMarket] ?? 27400);
   const [priceHistory, setPriceHistory] = useState([]);
+  const [candleHistory, setCandleHistory] = useState(() => loadCandleHistory());
+  const [activeTimeframe, setActiveTimeframe] = useState("");
+  const [tradingViewSignal, setTradingViewSignal] = useState(null);
+  const [priceSource, setPriceSource] = useState("manual");
   const [support, setSupport] = useState((marketDefaults[profile.mainMarket] ?? 27400) - 35);
   const [resistance, setResistance] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 50);
   const [entry, setEntry] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 5);
@@ -741,6 +882,34 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(profileStorageKey, JSON.stringify(profile));
   }, [profile]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(candleHistoryStorageKey, JSON.stringify(candleHistory));
+    } catch {
+      // localStorage may be full or disabled.
+    }
+  }, [candleHistory]);
+
+  useEffect(() => {
+    if (dataSource !== "TradingView Webhook") return;
+    const series = pickCandleSeries(candleHistory, profile.mainMarket, activeTimeframe);
+    if (series.length < 6) return;
+    const zones = detectAutoSRZones(series);
+    if (!zones.supportZone || !zones.resistanceZone) return;
+    setSupport((current) => {
+      const target = zones.supportZone.center;
+      if (!Number.isFinite(target)) return current;
+      if (Math.abs(Number(current) - target) < target * 0.0005) return current;
+      return Number(target.toFixed(4));
+    });
+    setResistance((current) => {
+      const target = zones.resistanceZone.center;
+      if (!Number.isFinite(target)) return current;
+      if (Math.abs(Number(current) - target) < target * 0.0005) return current;
+      return Number(target.toFixed(4));
+    });
+  }, [candleHistory, profile.mainMarket, activeTimeframe, dataSource]);
 
   useEffect(() => {
     localStorage.setItem(disciplineStorageKey, JSON.stringify(discipline));
@@ -1545,6 +1714,27 @@ export default function App() {
     const nextMarket = resolved.market;
     const nextPrice = Number(alert.price);
     const signalTime = alert.created_at || alert.receivedAt || alert.timestamp || new Date().toISOString();
+    const tfRaw = alert.timeframe ? String(alert.timeframe).trim() : "";
+    if (tfRaw) setActiveTimeframe(tfRaw);
+    setTradingViewSignal({
+      symbol: resolved.symbol,
+      market: nextMarket,
+      price: Number.isFinite(nextPrice) ? nextPrice : null,
+      timeframe: tfRaw || null,
+      signal: alert.signal ? String(alert.signal).toLowerCase() : null,
+      timestamp: signalTime,
+      candle: alert.candle || null,
+    });
+    setPriceSource("TradingView Webhook");
+    const candleFromAlert = alert.candle && Number.isFinite(Number(alert.candle.close))
+      ? alert.candle
+      : (Number.isFinite(Number(alert.open)) && Number.isFinite(Number(alert.high)) && Number.isFinite(Number(alert.low)) && Number.isFinite(Number(alert.close)))
+        ? { open: alert.open, high: alert.high, low: alert.low, close: alert.close, volume: alert.volume, timeframe: tfRaw, timestamp: signalTime }
+        : null;
+    if (candleFromAlert) {
+      const key = candleHistoryKey(nextMarket, tfRaw);
+      if (key) setCandleHistory((current) => appendCandle(current, key, { ...candleFromAlert, timestamp: signalTime, timeframe: tfRaw || candleFromAlert.timeframe || null }));
+    }
     const hasSupport = Number.isFinite(Number(alert.support));
     const hasResistance = Number.isFinite(Number(alert.resistance));
     const hasEntry = Number.isFinite(Number(alert.entry));
@@ -2416,6 +2606,13 @@ export default function App() {
           />
         ) : null}
         {activePage === "install" ? <InstallPage canInstall={Boolean(installPrompt)} onInstall={installApp} /> : null}
+        {activePage === "indicator" ? (
+          <IndicatorPage
+            applyAlert={applyAlert}
+            notify={notify}
+            onOpenWizardPage={() => setActivePage("connections")}
+          />
+        ) : null}
         {activePage === "journal" ? (
           <JournalPage
             activePosition={activePosition}
@@ -2852,6 +3049,110 @@ function InstallBanner({ canInstall, onDismiss, onInstall, onInstructions }) {
   );
 }
 
+function IndicatorPage({ applyAlert, notify, onOpenWizardPage }) {
+  const [sending, setSending] = useState(false);
+  const [status, setStatus] = useState("");
+  const webhookUrl = "https://tradepilottool.com/api/webhook/tradingview";
+
+  const copyText = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus("Copied to clipboard.");
+    } catch {
+      setStatus("Clipboard blocked. Select the text manually.");
+    }
+  };
+
+  const sendTestSignal = async () => {
+    if (sending) return;
+    setSending(true);
+    setStatus("Sending test signal...");
+    const now = new Date();
+    const payload = {
+      symbol: "NQ1!",
+      price: 22500.5,
+      timeframe: "5",
+      open: 22498.0,
+      high: 22504.25,
+      low: 22495.75,
+      close: 22500.5,
+      volume: 1240,
+      signal: "price_update",
+      timestamp: now.toISOString(),
+    };
+    const isLocalhost = typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+    const apiBase = isLocalhost ? "https://tradepilottool.com" : "";
+    try {
+      const response = await fetch(`${apiBase}/api/webhook/tradingview`, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      const result = await response.json();
+      if (!response.ok || result.ok === false) throw new Error(result.error || "Test signal failed.");
+      applyAlert?.({ ...payload, candle: { open: payload.open, high: payload.high, low: payload.low, close: payload.close, volume: payload.volume, timeframe: payload.timeframe, timestamp: payload.timestamp } });
+      setStatus("Test signal received. Check the dashboard.");
+      notify?.("Test signal received.", "success");
+    } catch (error) {
+      setStatus(error.message || "Test signal failed.");
+      notify?.(error.message || "Test signal failed.", "failure");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <main style={styles.installPage}>
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Trade Pilot Signal Engine</p>
+        <h2 style={styles.sectionTitle}>The TradingView indicator that powers Trade Pilot</h2>
+        <p style={styles.muted}>Works with any TradingView symbol. No broker API required.</p>
+        <p style={styles.muted}>The indicator detects support, resistance, breakouts, breakdowns, bounces, and rejections from your chart, then pushes the live OHLCV candle to Trade Pilot through a webhook alert. The dashboard, coach, and trade plan use this data as the source of truth.</p>
+        <div style={{ ...styles.installBannerActions, marginTop: "12px" }}>
+          <button onClick={onOpenWizardPage} style={styles.settingsButton}>Open Setup Wizard</button>
+          <button onClick={sendTestSignal} disabled={sending} style={{ ...styles.secondaryButton, opacity: sending ? 0.6 : 1 }}>
+            {sending ? "Sending..." : "Send Test Signal"}
+          </button>
+        </div>
+        {status ? <p style={{ ...styles.muted, marginTop: "10px" }}>{status}</p> : null}
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Step 1 — Pine Script</p>
+        <h2 style={styles.sectionTitle}>Copy the full indicator</h2>
+        <p style={styles.muted}>Open the Pine Editor in TradingView, paste this code, click Save, then Add to chart.</p>
+        <pre style={{ ...styles.sharePreview, fontSize: "11px", maxHeight: "260px", overflow: "auto" }}>{TRADE_PILOT_PINE_INDICATOR}</pre>
+        <button onClick={() => copyText(TRADE_PILOT_PINE_INDICATOR)} style={styles.settingsButton}>Copy Full Indicator</button>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Step 2 — Webhook URL</p>
+        <h2 style={styles.sectionTitle}>Paste this into the TradingView alert</h2>
+        <pre style={styles.sharePreview}>{webhookUrl}</pre>
+        <button onClick={() => copyText(webhookUrl)} style={styles.settingsButton}>Copy Webhook URL</button>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Step 3 — Alert Message</p>
+        <h2 style={styles.sectionTitle}>OHLCV alert payload</h2>
+        <p style={styles.muted}>The indicator already supplies these messages for each named alert. Use this template if you create a custom alert.</p>
+        <pre style={{ ...styles.sharePreview, fontSize: "12px" }}>{TRADE_PILOT_ALERT_MESSAGE}</pre>
+        <button onClick={() => copyText(TRADE_PILOT_ALERT_MESSAGE)} style={styles.settingsButton}>Copy Alert Message</button>
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.cardLabel}>Troubleshooting</p>
+        <h2 style={styles.sectionTitle}>Common fixes</h2>
+        <PlanItem title="No signal received" text="Verify the webhook URL has no trailing whitespace and the alert is set to Once Per Bar Close (not 'Only Once')." />
+        <PlanItem title="Wrong symbol on dashboard" text="The webhook trusts the symbol field. If TradingView sends 'NQ1!', the dashboard maps it to NQ. For custom symbols, set tick size and point value in Settings." />
+        <PlanItem title="Price differs from chart" text="The indicator sends the bar close. Compare the dashboard's Last Candle close to the matching bar on TradingView — they should be identical." />
+        <PlanItem title="Empty chart" text="Trade Pilot waits for at least one candle before drawing. Trigger a new bar in TradingView or click 'Send Test Signal' to verify the pipeline." />
+        <PlanItem title="Compile error in Pine" text="Re-copy the indicator from this page. Pine Script v5 is required." />
+      </section>
+    </main>
+  );
+}
+
 function InstallPage({ canInstall, onInstall }) {
   return (
     <main style={styles.installPage}>
@@ -3138,6 +3439,44 @@ function DashboardNextStep({ activeTrade, dataSource, hasPlan, support, resistan
   );
 }
 
+function SignalSourceCard({ activeSymbol, candleSeries, currentPrice, dataSource, priceSource, timeframe, tradingViewSignal }) {
+  const lastCandle = Array.isArray(candleSeries) && candleSeries.length ? candleSeries[candleSeries.length - 1] : null;
+  const sourceLabel = dataSource === "TradingView Webhook"
+    ? "TradingView Webhook"
+    : dataSource === "Demo Broker"
+      ? "Demo Broker"
+      : dataSource === "Market Data API"
+        ? "Market Data API (delayed)"
+        : "Manual";
+  const lastSignalText = tradingViewSignal
+    ? `${tradingViewSignal.signal || "price_update"} · ${Number(tradingViewSignal.price).toFixed(2)}${tradingViewSignal.timestamp ? ` · ${new Date(tradingViewSignal.timestamp).toLocaleTimeString()}` : ""}`
+    : "Not received yet";
+  const lastCandleText = lastCandle
+    ? `O ${Number(lastCandle.open).toFixed(2)} · H ${Number(lastCandle.high).toFixed(2)} · L ${Number(lastCandle.low).toFixed(2)} · C ${Number(lastCandle.close).toFixed(2)}${lastCandle.timestamp ? ` · ${new Date(lastCandle.timestamp).toLocaleTimeString()}` : ""}`
+    : "No candle data";
+  const priceMismatch = tradingViewSignal && Number.isFinite(tradingViewSignal.price)
+    && Number.isFinite(Number(currentPrice))
+    && Math.abs(tradingViewSignal.price - Number(currentPrice)) / Math.max(1, Math.abs(tradingViewSignal.price)) > 0.001;
+  return (
+    <section style={{ background: "rgba(15,23,42,.78)", border: "1px solid #1e293b", borderRadius: "14px", display: "grid", gap: "8px", margin: "0 0 14px", padding: "12px 16px" }}>
+      <div style={{ alignItems: "center", display: "flex", gap: "10px", justifyContent: "space-between" }}>
+        <p style={{ ...styles.cardLabel, margin: 0 }}>Signal Source</p>
+        <span style={{ color: priceMismatch ? "#fca5a5" : "#10b981", fontSize: "12px", fontWeight: 800 }}>
+          {priceMismatch ? "Mismatch — webhook price differs from displayed price" : "In sync"}
+        </span>
+      </div>
+      <div style={{ display: "grid", gap: "4px", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+        <div><span style={styles.cardLabel}>Active Symbol</span><strong style={{ color: "#e2e8f0", display: "block" }}>{activeSymbol || "—"}</strong></div>
+        <div><span style={styles.cardLabel}>Current Price</span><strong style={{ color: "#e2e8f0", display: "block" }}>{Number.isFinite(Number(currentPrice)) ? Number(currentPrice).toFixed(2) : "—"}</strong></div>
+        <div><span style={styles.cardLabel}>Price Source</span><strong style={{ color: "#e2e8f0", display: "block" }}>{priceSource === "TradingView Webhook" ? "TradingView Webhook" : sourceLabel}</strong></div>
+        <div><span style={styles.cardLabel}>Timeframe</span><strong style={{ color: "#e2e8f0", display: "block" }}>{timeframe || tradingViewSignal?.timeframe || "—"}</strong></div>
+        <div style={{ gridColumn: "1 / -1" }}><span style={styles.cardLabel}>Last TradingView Signal</span><strong style={{ color: "#e2e8f0", display: "block", fontSize: "12px" }}>{lastSignalText}</strong></div>
+        <div style={{ gridColumn: "1 / -1" }}><span style={styles.cardLabel}>Last Candle</span><strong style={{ color: "#e2e8f0", display: "block", fontSize: "12px" }}>{lastCandleText}</strong></div>
+      </div>
+    </section>
+  );
+}
+
 function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resistance, setActiveTrade, setActivePosition, setPlannedTrade, support, onClose }) {
   const [view, setView] = useState("checklist");
   const [form, setForm] = useState({
@@ -3407,6 +3746,12 @@ function Dashboard({
     resistance,
     support,
   });
+  const liveCandleSeries = useMemo(
+    () => pickCandleSeries(candleHistory, profile.mainMarket, activeTimeframe),
+    [candleHistory, profile.mainMarket, activeTimeframe],
+  );
+  const hasLiveCandles = liveCandleSeries.length >= 6;
+  const autoSR = useMemo(() => detectAutoSRZones(liveCandleSeries), [liveCandleSeries]);
   const chartData = useMemo(
     () => priceHistory.length >= 2
       ? priceHistory
@@ -3422,17 +3767,33 @@ function Dashboard({
     () => analyzeMarketStructure(candles, { price, resistance, support }),
     [candles, price, resistance, support],
   );
-  const enrichedZoneDetection = useMemo(() => ({
-    ...zoneDetection,
-    sessionHigh: marketStructure.sessionHigh ?? zoneDetection.sessionHigh,
-    sessionLow: marketStructure.sessionLow ?? zoneDetection.sessionLow,
-    swingHighs: marketStructure.swingHighs,
-    swingLows: marketStructure.swingLows,
-    vwap: marketStructure.vwap,
-    liquiditySweepHigh: marketStructure.liquiditySweepHigh,
-    liquiditySweepLow: marketStructure.liquiditySweepLow,
-    marketStructure: marketStructure.marketStructure,
-  }), [zoneDetection, marketStructure]);
+  const enrichedZoneDetection = useMemo(() => {
+    const base = {
+      ...zoneDetection,
+      sessionHigh: marketStructure.sessionHigh ?? zoneDetection.sessionHigh,
+      sessionLow: marketStructure.sessionLow ?? zoneDetection.sessionLow,
+      swingHighs: marketStructure.swingHighs,
+      swingLows: marketStructure.swingLows,
+      vwap: marketStructure.vwap,
+      liquiditySweepHigh: marketStructure.liquiditySweepHigh,
+      liquiditySweepLow: marketStructure.liquiditySweepLow,
+      marketStructure: marketStructure.marketStructure,
+    };
+    if (autoSR.supportZone && autoSR.resistanceZone) {
+      base.supportZoneLow = autoSR.supportZone.min;
+      base.supportZoneHigh = autoSR.supportZone.max;
+      base.supportLevel = autoSR.supportZone.center;
+      base.resistanceZoneLow = autoSR.resistanceZone.min;
+      base.resistanceZoneHigh = autoSR.resistanceZone.max;
+      base.resistanceLevel = autoSR.resistanceZone.center;
+      base.sessionHigh = autoSR.sessionHigh ?? base.sessionHigh;
+      base.sessionLow = autoSR.sessionLow ?? base.sessionLow;
+      base.candleTrend = autoSR.trend;
+      base.candleCount = autoSR.candleCount;
+      base.source = "tradingview-candles";
+    }
+    return base;
+  }, [zoneDetection, marketStructure, autoSR]);
   const marketSpec = marketSpecs[profile.mainMarket] ?? customMarketSpec;
   const activeBias = normalizeActiveBias(levelBias);
   const autoTradePlan = getAutoTradePlan({
@@ -3566,14 +3927,15 @@ function Dashboard({
   const dashboardCards = {
     alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
-      chartData={chartData}
+      candleSeries={liveCandleSeries}
       currentPrice={price}
       entry={hasPlan ? visualPlan.entry : undefined}
-      isLive={priceHistory.length >= 2}
       runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
       stop={hasPlan ? visualPlan.stop : undefined}
       support={enrichedZoneDetection.supportLevel ?? support}
       resistance={enrichedZoneDetection.resistanceLevel ?? resistance}
+      symbol={profile.mainMarket}
+      timeframe={activeTimeframe}
       trim1={hasPlan ? visualPlan.trim1 : undefined}
       trim2={hasPlan ? visualPlan.trim2 : undefined}
       zoneDetection={enrichedZoneDetection}
@@ -3642,17 +4004,18 @@ function Dashboard({
           tradeGrade={displayTradeGrade}
         />
         <TradeChartPanel
-          chartData={chartData}
+          candleSeries={liveCandleSeries}
           currentPrice={price}
           entry={hasPlan ? visualPlan.entry : undefined}
-          isLive={priceHistory.length >= 2}
           runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
           stop={hasPlan ? visualPlan.stop : undefined}
-          support={zoneDetection.supportLevel ?? support}
-          resistance={zoneDetection.resistanceLevel ?? resistance}
+          support={enrichedZoneDetection.supportLevel ?? support}
+          resistance={enrichedZoneDetection.resistanceLevel ?? resistance}
+          symbol={profile.mainMarket}
+          timeframe={activeTimeframe}
           trim1={hasPlan ? visualPlan.trim1 : undefined}
           trim2={hasPlan ? visualPlan.trim2 : undefined}
-          zoneDetection={zoneDetection}
+          zoneDetection={enrichedZoneDetection}
         />
       </>
     );
@@ -3689,6 +4052,15 @@ function Dashboard({
         support={support}
         resistance={resistance}
         onMarkActive={() => setMarkActiveModalOpen(true)}
+      />
+      <SignalSourceCard
+        activeSymbol={profile.mainMarket}
+        candleSeries={liveCandleSeries}
+        currentPrice={price}
+        dataSource={dataSource}
+        priceSource={priceSource}
+        timeframe={activeTimeframe}
+        tradingViewSignal={tradingViewSignal}
       />
       {markActiveModalOpen ? (
         <MarkTradeActiveModal
@@ -3820,17 +4192,18 @@ function Dashboard({
       </section>
 
       {effectiveLayout.chart ? <TradeChartPanel
-        chartData={chartData}
+        candleSeries={liveCandleSeries}
         currentPrice={price}
         entry={visualPlan.entry}
-        isLive={priceHistory.length >= 2}
         runner={visualPlan.runner ?? visualPlan.target}
         stop={visualPlan.stop}
-        support={zoneDetection.supportLevel ?? support}
-        resistance={zoneDetection.resistanceLevel ?? resistance}
+        support={enrichedZoneDetection.supportLevel ?? support}
+        resistance={enrichedZoneDetection.resistanceLevel ?? resistance}
+        symbol={profile.mainMarket}
+        timeframe={activeTimeframe}
         trim1={visualPlan.trim1}
         trim2={visualPlan.trim2}
-        zoneDetection={zoneDetection}
+        zoneDetection={enrichedZoneDetection}
       /> : null}
 
       <section style={styles.alphaMiddleGrid}>
@@ -5587,52 +5960,49 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   return `Grade D setup (${score}/100). Do not trade: ${issue || "setup does not meet quality threshold"}.`;
 }
 
-function TradeChartPanel({ chartData, currentPrice, entry, isLive, runner, stop, support, resistance, trim1, trim2, zoneDetection = {} }) {
-  const safeChartData = chartData?.length ? chartData : buildChartData({ price: currentPrice, entry, stop, support, resistance, trim1, trim2, runner });
-  const supportLow = Number(zoneDetection.supportZoneLow ?? support);
-  const supportHigh = Number(zoneDetection.supportZoneHigh ?? support);
-  const resistanceLow = Number(zoneDetection.resistanceZoneLow ?? resistance);
-  const resistanceHigh = Number(zoneDetection.resistanceZoneHigh ?? resistance);
-  const middleLow = Number(zoneDetection.middleZoneLow);
-  const middleHigh = Number(zoneDetection.middleZoneHigh);
+function TradeChartPanel({ candleSeries, currentPrice, entry, runner, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
+  const supportZone = Number.isFinite(Number(zoneDetection.supportZoneLow)) && Number.isFinite(Number(zoneDetection.supportZoneHigh))
+    ? { min: Number(zoneDetection.supportZoneLow), max: Number(zoneDetection.supportZoneHigh) }
+    : Number.isFinite(Number(support))
+      ? { min: Number(support), max: Number(support) }
+      : null;
+  const resistanceZone = Number.isFinite(Number(zoneDetection.resistanceZoneLow)) && Number.isFinite(Number(zoneDetection.resistanceZoneHigh))
+    ? { min: Number(zoneDetection.resistanceZoneLow), max: Number(zoneDetection.resistanceZoneHigh) }
+    : Number.isFinite(Number(resistance))
+      ? { min: Number(resistance), max: Number(resistance) }
+      : null;
+  const candles = Array.isArray(candleSeries) ? candleSeries : [];
+  const plan = {
+    entry: Number.isFinite(Number(entry)) ? Number(entry) : null,
+    stop: Number.isFinite(Number(stop)) ? Number(stop) : null,
+    tp1: Number.isFinite(Number(trim1)) ? Number(trim1) : null,
+    tp2: Number.isFinite(Number(trim2)) ? Number(trim2) : null,
+    runner: Number.isFinite(Number(runner)) ? Number(runner) : null,
+  };
   return (
     <section className="chart-panel" style={styles.chartPanel}>
       <div style={styles.sectionHeader}>
         <div>
           <p style={styles.cardLabel}>Chart View</p>
-          <h2 style={styles.sectionTitle}>Live Trade Map</h2>
+          <h2 style={styles.sectionTitle}>{symbol || "Live Chart"}{timeframe ? ` · ${timeframe}` : ""}</h2>
         </div>
-        <strong style={styles.chartPrice}>{Number(currentPrice).toFixed(2)}</strong>
+        <strong style={styles.chartPrice}>{Number.isFinite(Number(currentPrice)) ? Number(currentPrice).toFixed(2) : "—"}</strong>
       </div>
       <div className="tradepilot-chart-wrap" style={styles.chartWrap}>
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={safeChartData} margin={{ top: 12, right: 22, bottom: 8, left: 0 }}>
-            <CartesianGrid stroke="#1f2937" strokeDasharray="4 4" />
-            <XAxis dataKey="label" hide />
-            <YAxis domain={["dataMin - 12", "dataMax + 12"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={64} />
-            <Tooltip contentStyle={{ background: "#020617", border: "1px solid #334155", borderRadius: "10px", color: "#f8fafc" }} />
-            {Number.isFinite(supportLow) && Number.isFinite(supportHigh) ? (
-              <ReferenceArea y1={supportLow} y2={supportHigh} fill="#14b8a6" fillOpacity={0.16} strokeOpacity={0} />
-            ) : null}
-            {Number.isFinite(resistanceLow) && Number.isFinite(resistanceHigh) ? (
-              <ReferenceArea y1={resistanceLow} y2={resistanceHigh} fill="#f97316" fillOpacity={0.14} strokeOpacity={0} />
-            ) : null}
-            {Number.isFinite(middleLow) && Number.isFinite(middleHigh) ? (
-              <ReferenceArea y1={middleLow} y2={middleHigh} fill="#64748b" fillOpacity={0.08} strokeOpacity={0} />
-            ) : null}
-            <Line type="monotone" dataKey="close" stroke="#f8fafc" strokeWidth={3} dot={false} isAnimationActive={false} />
-            <ReferenceLine y={currentPrice} label="Price" stroke="#facc15" strokeWidth={2} />
-            <ReferenceLine y={entry} label="Entry" stroke="#3b82f6" strokeWidth={2} />
-            <ReferenceLine y={stop} label="Stop" stroke="#ef4444" strokeWidth={2} />
-            <ReferenceLine y={trim1} label="Trim 1" stroke="#22c55e" />
-            <ReferenceLine y={trim2} label="Trim 2" stroke="#16a34a" />
-            <ReferenceLine y={runner} label="Runner" stroke="#86efac" />
-            <ReferenceLine y={support} label="Support" stroke="#14b8a6" strokeDasharray="5 5" />
-            <ReferenceLine y={resistance} label="Resistance" stroke="#f97316" strokeDasharray="5 5" />
-          </LineChart>
-        </ResponsiveContainer>
+        <TradingChart
+          candles={candles}
+          currentPrice={currentPrice}
+          supportZone={supportZone}
+          resistanceZone={resistanceZone}
+          plan={plan}
+          symbol={symbol}
+          timeframe={timeframe}
+          height={360}
+        />
       </div>
-      {!isLive ? <p style={styles.chartNote}>Demo chart shown until TradingView or broker data is connected.</p> : null}
+      {candles.length === 0 ? (
+        <p style={styles.chartNote}>Waiting for TradingView candle data. Add the Trade Pilot indicator and create a Price Update alert.</p>
+      ) : null}
     </section>
   );
 }
@@ -5711,19 +6081,20 @@ function ProductUpgradePanel({ brokerConnection, discipline, journalEntries, pro
         <PlanItem title="Current Grade" text={analytics.totalTrades ? `${analytics.winRate}% win rate from saved notes.` : "Start saving trades to build your stats."} />
       </section>
 
-      <section style={styles.card}>
-        <p style={styles.cardLabel}>Tradovate API Connection</p>
-        <h2 style={styles.sectionTitle}>Broker Planning</h2>
-        <div style={styles.metricGrid}>
-          <Metric label="Connection" value={brokerConnection.connectionStatus || "Not Connected"} />
-          <Metric label="Current Price" value={brokerConnection.quote?.price ? brokerConnection.quote.price.toFixed(2) : "Ready"} />
-          <Metric label="Position" value={brokerConnection.position ? brokerConnection.position.direction : "Read-only"} />
-          <Metric label="Open P/L" value={`$${Number(brokerConnection.openPnl || 0).toFixed(2)}`} />
-          <Metric label="Realized P/L" value={`$${Number(brokerConnection.realizedPnl || 0).toFixed(2)}`} />
-          <Metric label="Account Balance" value={`$${Number(brokerConnection.accountBalance || profile.accountSize || 0).toFixed(2)}`} />
+      <details style={{ ...styles.card, padding: "12px 16px" }}>
+        <summary style={{ color: "#94a3b8", cursor: "pointer", fontSize: "13px", fontWeight: 800 }}>
+          Advanced — Broker integrations (coming later)
+        </summary>
+        <div style={{ marginTop: "10px" }}>
+          <p style={styles.cardLabel}>Tradovate / Prop Broker</p>
+          <p style={styles.muted}>Read-only broker bridges are on the roadmap. Trade Pilot will never place, cancel, or modify trades — TradingView Alerts is the recommended live data source.</p>
+          <div style={{ ...styles.metricGrid, marginTop: "10px" }}>
+            <Metric label="Connection" value={brokerConnection.connectionStatus || "Not Connected"} />
+            <Metric label="Position" value={brokerConnection.position ? brokerConnection.position.direction : "Read-only"} />
+            <Metric label="Account Balance" value={`$${Number(brokerConnection.accountBalance || profile.accountSize || 0).toFixed(2)}`} />
+          </div>
         </div>
-        <p style={{ ...styles.muted, marginTop: "12px" }}>Read-only only. Trade Pilot does not place, cancel, or modify trades.</p>
-      </section>
+      </details>
 
       <section style={styles.card}>
         <p style={styles.cardLabel}>Supabase Security</p>
@@ -6057,7 +6428,7 @@ function ConnectionsPage({
             <p style={styles.cardLabel}>Webhook Endpoint</p>
             <pre style={styles.sharePreview}>POST https://tradepilottool.com/api/webhook/tradingview</pre>
             <p style={{ ...styles.muted, marginTop: "8px" }}>The Trade Pilot Signal Engine indicator sends this payload automatically on every signal:</p>
-            <pre style={styles.sharePreview}>{JSON.stringify({ symbol: "{{ticker}}", price: "{{close}}", timeframe: "{{interval}}", timestamp: "{{timenow}}", support: "<calculated>", resistance: "<calculated>", bias: "bullish|bearish|neutral", direction: "long|short|neutral", event: "breakout|rejection|price" }, null, 2)}</pre>
+            <pre style={styles.sharePreview}>{JSON.stringify({ symbol: "{{ticker}}", price: "{{close}}", timeframe: "{{interval}}", open: "{{open}}", high: "{{high}}", low: "{{low}}", close: "{{close}}", volume: "{{volume}}", signal: "price_update", timestamp: "{{timenow}}" }, null, 2)}</pre>
           </div>
         </section>
       ) : null}
@@ -6205,9 +6576,9 @@ plot(support,    "Support",    color=color.new(color.green, 0), linewidth=2, sty
 plotshape(longSetup,  "Long Setup",  shape.triangleup,   location.belowbar, color.lime, size=size.small, text="LONG")
 plotshape(shortSetup, "Short Setup", shape.triangledown, location.abovebar, color.red,  size=size.small, text="SHORT")
 
-priceUpdateMsg = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"price_update","timestamp":"{{timenow}}"}'
-longSetupMsg   = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"long_setup","timestamp":"{{timenow}}"}'
-shortSetupMsg  = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"short_setup","timestamp":"{{timenow}}"}'
+priceUpdateMsg = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}'
+longSetupMsg   = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"long_setup","timestamp":"{{timenow}}"}'
+shortSetupMsg  = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"short_setup","timestamp":"{{timenow}}"}'
 
 alertcondition(true,       title="TradePilot Price Update", message=priceUpdateMsg)
 alertcondition(longSetup,  title="TradePilot Long Setup",   message=longSetupMsg)
@@ -6218,6 +6589,11 @@ const TRADE_PILOT_ALERT_MESSAGE = `{
  "symbol": "{{ticker}}",
  "price": {{close}},
  "timeframe": "{{interval}}",
+ "open": {{open}},
+ "high": {{high}},
+ "low": {{low}},
+ "close": {{close}},
+ "volume": {{volume}},
  "signal": "price_update",
  "timestamp": "{{timenow}}"
 }`;

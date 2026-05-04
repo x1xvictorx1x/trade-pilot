@@ -55,6 +55,26 @@ export function normalizeSignal(payload = {}) {
   if (stop !== null) signal.stop = stop;
   if (payload.bias) signal.bias = String(payload.bias).trim().toLowerCase();
   if (payload.timeframe) signal.timeframe = String(payload.timeframe).trim();
+  if (payload.signal) signal.signal = String(payload.signal).trim().toLowerCase();
+
+  const open = toNumber(payload.open);
+  const high = toNumber(payload.high);
+  const low = toNumber(payload.low);
+  const closeValue = toNumber(payload.close);
+  const volume = toNumber(payload.volume);
+  const hasOhlc = open !== null && high !== null && low !== null && closeValue !== null;
+  if (hasOhlc) {
+    signal.candle = {
+      open,
+      high,
+      low,
+      close: closeValue,
+      volume: volume ?? null,
+      timeframe: signal.timeframe || null,
+      timestamp: signal.timestamp,
+    };
+  }
+
   if (Array.isArray(payload.targets)) {
     signal.targets = payload.targets.map(toNumber).filter((value) => value !== null);
   } else if (payload.targets !== undefined && payload.targets !== null) {
@@ -102,6 +122,23 @@ export async function getLatestSignal(symbol = "") {
     const { data, error } = await query;
     if (!error && data?.[0]) {
       const row = data[0];
+      const raw = row.raw_payload || {};
+      const candleOpen = toNumber(raw.open);
+      const candleHigh = toNumber(raw.high);
+      const candleLow = toNumber(raw.low);
+      const candleClose = toNumber(raw.close);
+      const candleVolume = toNumber(raw.volume);
+      const candle = candleOpen !== null && candleHigh !== null && candleLow !== null && candleClose !== null
+        ? {
+            open: candleOpen,
+            high: candleHigh,
+            low: candleLow,
+            close: candleClose,
+            volume: candleVolume ?? null,
+            timeframe: row.timeframe || raw.timeframe || null,
+            timestamp: row.created_at,
+          }
+        : null;
       return {
         bias: row.bias,
         created_at: row.created_at,
@@ -114,6 +151,8 @@ export async function getLatestSignal(symbol = "") {
         targets: row.targets,
         timeframe: row.timeframe,
         timestamp: row.created_at,
+        signal: raw.signal ? String(raw.signal).trim().toLowerCase() : null,
+        candle,
       };
     }
   }
