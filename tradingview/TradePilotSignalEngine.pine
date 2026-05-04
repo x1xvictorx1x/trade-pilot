@@ -3,18 +3,17 @@ indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
 
 // ============================================================
 // Trade Pilot Signal Engine
-// Version: 3.1
-// Description: Quality-gated long/short signals. Each potential
-// setup gets a 0-100 score. Only B+ (>=75) and A (>=85) setups
-// fire trade_setup alerts and plot markers. price_update is
-// always streamed for the dashboard chart.
+// Version: 3.2
+// Quality-gated long/short signals. Each potential setup gets a
+// 0-100 score. Only B+ (>=75) and A (>=85) setups fire trade_setup
+// alerts and plot markers. price_update is always streamed for
+// the dashboard chart.
 //
 // Setup:
 //   1. Pine Editor -> paste -> Save -> Add to chart.
 //   2. Right-click chart -> Add alert.
 //   3. Condition: "Trade Pilot Signal Engine".
-//   4. Trigger: "Any alert() function call" (recommended) - one
-//      alert covers price updates and B+/A setups.
+//   4. Trigger: "Any alert() function call" (recommended).
 //   5. Webhook URL: https://tradepilottool.com/api/webhook/tradingview
 //   6. Message: leave blank - the script supplies the JSON.
 // ============================================================
@@ -25,25 +24,25 @@ indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
 lookback        = input.int(20, "S/R Lookback Bars", minval=5, maxval=200)
 emaFastLen      = input.int(9,  "EMA Fast", minval=2, maxval=50)
 emaSlowLen      = input.int(21, "EMA Slow", minval=5, maxval=200)
-minSetupScore   = input.int(75, "Min Setup Score (B+ = 75)", minval=0, maxval=100, tooltip="Only setups at or above this score plot a marker and fire trade_setup alerts.")
-sendPriceUpdate = input.bool(true, "Stream price_update on every bar close", tooltip="The Trade Pilot dashboard reads price_update for live candles. Leave on.")
+minSetupScore   = input.int(75, "Min Setup Score (B+ = 75)", minval=0, maxval=100)
+sendPriceUpdate = input.bool(true, "Stream price_update on every bar close")
 
 // ============================================================
 // SUPPORT, RESISTANCE, TREND
 // ============================================================
 support         = ta.lowest(low,   lookback)
 resistance      = ta.highest(high, lookback)
-priorSupport    = support[1]
-priorResistance = resistance[1]
+priorSupport    = nz(support[1],    support)
+priorResistance = nz(resistance[1], resistance)
 emaFast         = ta.ema(close, emaFastLen)
 emaSlow         = ta.ema(close, emaSlowLen)
 
 rng       = math.max(priorResistance - priorSupport, syminfo.mintick * 4)
 zoneWidth = rng * 0.025
 
-nearSupport     = math.abs(close - priorSupport)    <= rng * 0.18
-nearResistance  = math.abs(close - priorResistance) <= rng * 0.18
-inMidRange      = close > priorSupport + rng * 0.30 and close < priorResistance - rng * 0.30
+nearSupport    = math.abs(close - priorSupport)    <= rng * 0.18
+nearResistance = math.abs(close - priorResistance) <= rng * 0.18
+inMidRange     = close > priorSupport + rng * 0.30 and close < priorResistance - rng * 0.30
 
 bullishConfirm = close > open and close >= priorSupport    and low  <= priorSupport    + zoneWidth
 bearishConfirm = close < open and close <= priorResistance and high >= priorResistance - zoneWidth
@@ -99,47 +98,27 @@ plotshape(plotShortA, "A Short",  shape.triangledown, location.abovebar, color.n
 plotshape(plotShortB, "B+ Short", shape.triangledown, location.abovebar, color.new(color.red,   30), size=size.small,  text="B+ SHORT")
 
 // ============================================================
-// ALERT PAYLOAD BUILDERS
+// FIRE ALERTS — single-line str.format, no multi-line concat.
 // ============================================================
-isoNow() =>
-    str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
+ts = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
 
-buildPriceUpdate() =>
-    '{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close)
-      + ',"timeframe":"' + timeframe.period + '","open":' + str.tostring(open)
-      + ',"high":' + str.tostring(high) + ',"low":' + str.tostring(low)
-      + ',"close":' + str.tostring(close) + ',"volume":' + str.tostring(volume)
-      + ',"signal":"price_update","timestamp":"' + isoNow() + '"}'
-
-buildSetup(direction, score, grade) =>
-    '{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close)
-      + ',"timeframe":"' + timeframe.period + '","signal":"trade_setup","direction":"' + direction
-      + '","setupScore":' + str.tostring(math.round(score))
-      + ',"grade":"' + grade + '","timestamp":"' + isoNow() + '"}'
-
-// ============================================================
-// FIRE ALERTS
-// ============================================================
 if sendPriceUpdate
-    alert(buildPriceUpdate(), alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","open":{3,number,#.##########},"high":{4,number,#.##########},"low":{5,number,#.##########},"close":{6,number,#.##########},"volume":{7,number,#.##},"signal":"price_update","timestamp":"{8}"}', syminfo.ticker, close, timeframe.period, open, high, low, close, volume, ts), alert.freq_once_per_bar_close)
 
 if plotLongA
-    alert(buildSetup("long",  longSetupScore,  "A"),  alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"long","setupScore":{3,number,#},"grade":"A","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, longSetupScore, ts), alert.freq_once_per_bar_close)
 
 if plotLongB
-    alert(buildSetup("long",  longSetupScore,  "B+"), alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"long","setupScore":{3,number,#},"grade":"B+","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, longSetupScore, ts), alert.freq_once_per_bar_close)
 
 if plotShortA
-    alert(buildSetup("short", shortSetupScore, "A"),  alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"short","setupScore":{3,number,#},"grade":"A","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, shortSetupScore, ts), alert.freq_once_per_bar_close)
 
 if plotShortB
-    alert(buildSetup("short", shortSetupScore, "B+"), alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"short","setupScore":{3,number,#},"grade":"B+","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, shortSetupScore, ts), alert.freq_once_per_bar_close)
 
 // ============================================================
-// NAMED ALERTCONDITIONS
-// alertcondition() messages must be const strings, so setupScore
-// and grade are not embedded here. Use the alert()-based pipeline
-// above for the full payload.
+// NAMED ALERTCONDITIONS (constant messages, no runtime score)
 // ============================================================
 alertcondition(true,                     title="TradePilot Price Update",  message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}')
 alertcondition(plotLongA or plotLongB,   title="TradePilot Long Setup",    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"long","timestamp":"{{timenow}}"}')

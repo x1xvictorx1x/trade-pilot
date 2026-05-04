@@ -7383,8 +7383,8 @@ sendPriceUpdate = input.bool(true, "Stream price_update on every bar close")
 
 support         = ta.lowest(low,   lookback)
 resistance      = ta.highest(high, lookback)
-priorSupport    = support[1]
-priorResistance = resistance[1]
+priorSupport    = nz(support[1],    support)
+priorResistance = nz(resistance[1], resistance)
 emaFast         = ta.ema(close, emaFastLen)
 emaSlow         = ta.ema(close, emaSlowLen)
 
@@ -7436,31 +7436,18 @@ plotshape(plotLongB,  "B+ Long",  shape.triangleup,   location.belowbar, color.n
 plotshape(plotShortA, "A Short",  shape.triangledown, location.abovebar, color.new(color.red,   0),  size=size.normal, text="A SHORT")
 plotshape(plotShortB, "B+ Short", shape.triangledown, location.abovebar, color.new(color.red,   30), size=size.small,  text="B+ SHORT")
 
-isoNow() => str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
-
-buildPriceUpdate() =>
-    '{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close)
-    + ',"timeframe":"' + timeframe.period + '","open":' + str.tostring(open)
-    + ',"high":' + str.tostring(high) + ',"low":' + str.tostring(low)
-    + ',"close":' + str.tostring(close) + ',"volume":' + str.tostring(volume)
-    + ',"signal":"price_update","timestamp":"' + isoNow() + '"}'
-
-buildSetup(direction, score, grade) =>
-    '{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close)
-    + ',"timeframe":"' + timeframe.period + '","signal":"trade_setup","direction":"' + direction
-    + '","setupScore":' + str.tostring(math.round(score))
-    + ',"grade":"' + grade + '","timestamp":"' + isoNow() + '"}'
+ts = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
 
 if sendPriceUpdate
-    alert(buildPriceUpdate(), alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","open":{3,number,#.##########},"high":{4,number,#.##########},"low":{5,number,#.##########},"close":{6,number,#.##########},"volume":{7,number,#.##},"signal":"price_update","timestamp":"{8}"}', syminfo.ticker, close, timeframe.period, open, high, low, close, volume, ts), alert.freq_once_per_bar_close)
 if plotLongA
-    alert(buildSetup("long",  longSetupScore,  "A"),  alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"long","setupScore":{3,number,#},"grade":"A","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, longSetupScore, ts), alert.freq_once_per_bar_close)
 if plotLongB
-    alert(buildSetup("long",  longSetupScore,  "B+"), alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"long","setupScore":{3,number,#},"grade":"B+","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, longSetupScore, ts), alert.freq_once_per_bar_close)
 if plotShortA
-    alert(buildSetup("short", shortSetupScore, "A"),  alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"short","setupScore":{3,number,#},"grade":"A","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, shortSetupScore, ts), alert.freq_once_per_bar_close)
 if plotShortB
-    alert(buildSetup("short", shortSetupScore, "B+"), alert.freq_once_per_bar_close)
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"short","setupScore":{3,number,#},"grade":"B+","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, shortSetupScore, ts), alert.freq_once_per_bar_close)
 
 alertcondition(true,                     title="TradePilot Price Update",
     message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}')
