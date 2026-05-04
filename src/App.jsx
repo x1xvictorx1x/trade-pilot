@@ -34,6 +34,31 @@ const tradePlanStorageKey = "tradePilotTradePlan";
 const autoZonesStorageKey = "tradePilotAutoZones";
 const connectionModeStorageKey = "tradePilotConnectionMode";
 const candleHistoryStorageKey = "tradePilotCandleHistory";
+const notificationPrefsStorageKey = "tradePilotNotificationPrefs";
+
+const NOTIFY_CRITICAL = "critical";
+const NOTIFY_IMPORTANT = "important";
+const NOTIFY_INFO = "info";
+const NOTIFY_THROTTLE_MS = 30_000;
+
+const defaultNotificationPrefs = {
+  toast: true,
+  sound: true,
+  priceUpdateAlerts: false,
+  setupAlerts: true,
+};
+
+function loadNotificationPrefs() {
+  try {
+    const raw = localStorage.getItem(notificationPrefsStorageKey);
+    if (!raw) return { ...defaultNotificationPrefs };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return { ...defaultNotificationPrefs };
+    return { ...defaultNotificationPrefs, ...parsed };
+  } catch {
+    return { ...defaultNotificationPrefs };
+  }
+}
 
 const MAX_CANDLES_PER_KEY = 300;
 const SR_LOOKBACK_CANDLES = 100;
@@ -905,6 +930,9 @@ export default function App() {
   const [tradingViewSignal, setTradingViewSignal] = useState(null);
   const [priceSource, setPriceSource] = useState("manual");
   const [lastTradeSetup, setLastTradeSetup] = useState(null);
+  const [notificationPrefs, setNotificationPrefs] = useState(() => loadNotificationPrefs());
+  const lastSignalDedupRef = useRef("");
+  const lastNonCriticalNotifyRef = useRef(0);
   const [support, setSupport] = useState((marketDefaults[profile.mainMarket] ?? 27400) - 35);
   const [resistance, setResistance] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 50);
   const [entry, setEntry] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 5);
@@ -927,6 +955,14 @@ export default function App() {
       // localStorage may be full or disabled.
     }
   }, [candleHistory]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(notificationPrefsStorageKey, JSON.stringify(notificationPrefs));
+    } catch {
+      // ignore
+    }
+  }, [notificationPrefs]);
 
   useEffect(() => {
     if (dataSource !== "TradingView Webhook") return;
@@ -1378,7 +1414,8 @@ export default function App() {
           if (isQualifiedSetup) {
             const grade = result.signal.grade || "B+";
             const direction = result.signal.direction || "setup";
-            notify(`${grade} ${direction} setup received.`, "success");
+            const dedupKey = `setup:${result.signal.symbol}:${result.signal.price}:${signalTimeMs}:${incomingSignal}`;
+            notify(`${grade} ${direction} setup received.`, "success", { category: NOTIFY_IMPORTANT, dedupKey });
           }
         } catch (error) {
           setWebhookDebug((current) => ({
@@ -1387,7 +1424,7 @@ export default function App() {
             updated: new Date().toLocaleTimeString(),
           }));
           setPriceStatus(error.message || "TradingView alerts unavailable.");
-          notify(error.message || "TradingView webhook error", "failure");
+          notify(error.message || "TradingView webhook error", "failure", { category: NOTIFY_CRITICAL });
         }
       };
 
@@ -1493,9 +1530,30 @@ export default function App() {
     window.setTimeout(() => context.close?.(), 600);
   };
 
-  const notify = (message, type = "info") => {
-    setToastMessage(message);
-    if (type === "success" || type === "failure") playBeep(type);
+  const notify = (message, type = "info", options = {}) => {
+    const category = options.category || NOTIFY_IMPORTANT;
+    const dedupKey = options.dedupKey || null;
+
+    // Settings gates
+    if (category === NOTIFY_INFO && !notificationPrefs.priceUpdateAlerts) return;
+    if (category === NOTIFY_IMPORTANT && !notificationPrefs.setupAlerts) return;
+
+    // Dedup: skip identical message+key combos
+    if (dedupKey) {
+      const key = `${dedupKey}|${message}`;
+      if (lastSignalDedupRef.current === key) return;
+      lastSignalDedupRef.current = key;
+    }
+
+    // Throttle non-critical to one toast per 30s
+    if (category !== NOTIFY_CRITICAL) {
+      const now = Date.now();
+      if (now - lastNonCriticalNotifyRef.current < NOTIFY_THROTTLE_MS) return;
+      lastNonCriticalNotifyRef.current = now;
+    }
+
+    if (notificationPrefs.toast) setToastMessage(message);
+    if (notificationPrefs.sound && (type === "success" || type === "failure")) playBeep(type);
     window.clearTimeout(notify.timer);
     notify.timer = window.setTimeout(() => setToastMessage(""), 2800);
   };
@@ -1967,12 +2025,10 @@ export default function App() {
       setPriceStatus(`Trade Pilot: ${setupGrade || "B+"} ${alert.direction === "short" ? "short" : "long"} setup (${setupScore ?? "?"})`);
       setFastMessage(`${setupGrade || "B+"} ${alert.direction === "short" ? "short" : "long"} setup at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
       if (activePage !== "connections") setActivePage("dashboard");
-    } else if (signalKind === "price_update") {
-      setPriceStatus("Live price updating from TradingView.");
     } else {
-      setFastMessage(!hasSupport && !hasResistance
-        ? `TradingView price received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}. Add levels to generate plan.`
-        : `TradingView signal received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
+      // price_update and unclassified signals stay silent — only the persistent
+      // status line updates so the user sees the feed is alive.
+      setPriceStatus("Live TradingView feed active");
     }
   };
 
@@ -2720,7 +2776,9 @@ export default function App() {
         {activePage === "settings" ? (
           <SettingsPage
             applyAlert={applyAlert}
+            notificationPrefs={notificationPrefs}
             profile={profile}
+            setNotificationPrefs={setNotificationPrefs}
             updateProfile={updateProfile}
           />
         ) : null}
@@ -7541,7 +7599,7 @@ function SupportPage({ messages, onSubmit }) {
   );
 }
 
-function SettingsPage({ applyAlert, profile, updateProfile }) {
+function SettingsPage({ applyAlert, notificationPrefs, profile, setNotificationPrefs, updateProfile }) {
   const [settingsTab, setSettingsTab] = useState("General");
   const accountType = normalizeAccountType(profile.accountType);
   const isFunded = isFundedAccountType(accountType);
@@ -7611,13 +7669,43 @@ function SettingsPage({ applyAlert, profile, updateProfile }) {
         ) : null}
         {settingsTab === "Alerts" ? (
           <div style={styles.warningStack}>
+            <p style={styles.muted}>Trade Pilot reduces noise by default. Price updates stay silent — only B+/A trade setups, connection events, TPs, and stops trigger toasts and sounds.</p>
             <label style={styles.switchRow}>
-              <input type="checkbox" checked={profile.voiceAlerts} onChange={(event) => updateProfile("voiceAlerts", event.target.checked)} />
-              Voice alerts on/off
+              <input
+                type="checkbox"
+                checked={notificationPrefs?.toast !== false}
+                onChange={(event) => setNotificationPrefs?.((current) => ({ ...current, toast: event.target.checked }))}
+              />
+              Toast alerts on/off
             </label>
             <label style={styles.switchRow}>
-              <input type="checkbox" checked={profile.soundAlerts !== false} onChange={(event) => updateProfile("soundAlerts", event.target.checked)} />
+              <input
+                type="checkbox"
+                checked={notificationPrefs?.sound !== false}
+                onChange={(event) => setNotificationPrefs?.((current) => ({ ...current, sound: event.target.checked }))}
+              />
               Sound alerts on/off
+            </label>
+            <label style={styles.switchRow}>
+              <input
+                type="checkbox"
+                checked={notificationPrefs?.setupAlerts !== false}
+                onChange={(event) => setNotificationPrefs?.((current) => ({ ...current, setupAlerts: event.target.checked }))}
+              />
+              Setup alerts (B+ / A) — recommended on
+            </label>
+            <label style={styles.switchRow}>
+              <input
+                type="checkbox"
+                checked={notificationPrefs?.priceUpdateAlerts === true}
+                onChange={(event) => setNotificationPrefs?.((current) => ({ ...current, priceUpdateAlerts: event.target.checked }))}
+              />
+              Price update alerts (off by default — chart still updates silently)
+            </label>
+            <hr style={{ borderColor: "#1e293b", margin: "12px 0" }} />
+            <label style={styles.switchRow}>
+              <input type="checkbox" checked={profile.voiceAlerts} onChange={(event) => updateProfile("voiceAlerts", event.target.checked)} />
+              Voice alerts on/off (legacy)
             </label>
           </div>
         ) : null}
