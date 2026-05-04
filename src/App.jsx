@@ -7373,13 +7373,20 @@ function ConnectionsPage({
 }
 
 const TRADE_PILOT_PINE_INDICATOR = `//@version=6
-indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
+indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true, max_labels_count=50)
 
-lookback        = input.int(20, "S/R Lookback Bars", minval=5, maxval=200)
-emaFastLen      = input.int(9,  "EMA Fast", minval=2, maxval=50)
-emaSlowLen      = input.int(21, "EMA Slow", minval=5, maxval=200)
-minSetupScore   = input.int(75, "Min Setup Score (B+ = 75)", minval=0, maxval=100)
-sendPriceUpdate = input.bool(true, "Stream price_update on every bar close")
+lookback        = input.int(20, "S/R Lookback Bars", minval=5, maxval=200, group="Engine")
+emaFastLen      = input.int(9,  "EMA Fast", minval=2, maxval=50,           group="Engine")
+emaSlowLen      = input.int(21, "EMA Slow", minval=5, maxval=200,          group="Engine")
+minSetupScore   = input.int(75, "Min Setup Score (B+ = 75)", minval=0, maxval=100, group="Engine")
+maxPerSession   = input.int(2,  "Max signals per direction per session", minval=1, maxval=10, group="Engine")
+cooldownBars    = input.int(8,  "Cooldown bars between signals", minval=0, maxval=200, group="Engine")
+sendPriceUpdate = input.bool(true, "Stream price_update on every bar close", group="Engine")
+
+showSignals = input.bool(true,  "Show Signals", group="Display")
+showZones   = input.bool(true,  "Show Zones",   group="Display")
+showEmas    = input.bool(false, "Show EMAs",    group="Display")
+focusMode   = input.bool(false, "Focus Mode", group="Display")
 
 support         = ta.lowest(low,   lookback)
 resistance      = ta.highest(high, lookback)
@@ -7421,40 +7428,64 @@ shortSetupScore   = shortProximity + shortTrend + shortRRScore + shortMidScore +
 qualifiedLong  = longSetupScore  >= minSetupScore and not nearResistance
 qualifiedShort = shortSetupScore >= minSetupScore and not nearSupport
 
-plotLongA  = qualifiedLong  and longSetupScore  >= 85
-plotLongB  = qualifiedLong  and longSetupScore  <  85
-plotShortA = qualifiedShort and shortSetupScore >= 85
-plotShortB = qualifiedShort and shortSetupScore <  85
+activeLong  = qualifiedLong  and longSetupScore  >  shortSetupScore
+activeShort = qualifiedShort and shortSetupScore >  longSetupScore
 
-plot(resistance, "Resistance", color=color.new(color.red,    0), linewidth=2, style=plot.style_stepline)
-plot(support,    "Support",    color=color.new(color.green,  0), linewidth=2, style=plot.style_stepline)
-plot(emaFast,    "EMA Fast",   color=color.new(color.blue,   60))
-plot(emaSlow,    "EMA Slow",   color=color.new(color.purple, 60))
+var int sessionLongCount  = 0
+var int sessionShortCount = 0
+var int lastLongBar       = -10000
+var int lastShortBar      = -10000
 
-plotshape(plotLongA,  "A Long",   shape.triangleup,   location.belowbar, color.new(color.green, 0),  size=size.normal, text="A LONG")
-plotshape(plotLongB,  "B+ Long",  shape.triangleup,   location.belowbar, color.new(color.green, 30), size=size.small,  text="B+ LONG")
-plotshape(plotShortA, "A Short",  shape.triangledown, location.abovebar, color.new(color.red,   0),  size=size.normal, text="A SHORT")
-plotshape(plotShortB, "B+ Short", shape.triangledown, location.abovebar, color.new(color.red,   30), size=size.small,  text="B+ SHORT")
+if session.isfirstbar
+    sessionLongCount  := 0
+    sessionShortCount := 0
+
+cooldownLongOk  = (bar_index - lastLongBar)  >= cooldownBars
+cooldownShortOk = (bar_index - lastShortBar) >= cooldownBars
+
+fireLong  = activeLong  and cooldownLongOk  and sessionLongCount  < maxPerSession
+fireShort = activeShort and cooldownShortOk and sessionShortCount < maxPerSession
+
+if fireLong
+    lastLongBar := bar_index
+    sessionLongCount += 1
+if fireShort
+    lastShortBar := bar_index
+    sessionShortCount += 1
+
+longGrade  = longSetupScore  >= 85 ? "A" : "B+"
+shortGrade = shortSetupScore >= 85 ? "A" : "B+"
+
+zonesVisible = showZones and not focusMode
+emasVisible  = showEmas  and not focusMode
+
+plot(zonesVisible ? resistance : na, "Resistance", color=color.new(color.red,    65), linewidth=1)
+plot(zonesVisible ? support    : na, "Support",    color=color.new(color.green,  65), linewidth=1)
+plot(emasVisible  ? emaFast    : na, "EMA Fast",   color=color.new(color.blue,   75), linewidth=1)
+plot(emasVisible  ? emaSlow    : na, "EMA Slow",   color=color.new(color.purple, 75), linewidth=1)
+
+bgcolor(focusMode ? color.new(#020617, 80) : na)
+
+if showSignals and fireLong
+    label.new(bar_index, low, text="LONG\\n(" + longGrade + ")", style=label.style_label_up, color=color.new(color.green, 10), textcolor=color.white, size=size.small, yloc=yloc.belowbar)
+
+if showSignals and fireShort
+    label.new(bar_index, high, text="SHORT\\n(" + shortGrade + ")", style=label.style_label_down, color=color.new(color.red, 10), textcolor=color.white, size=size.small, yloc=yloc.abovebar)
 
 ts = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
 
 if sendPriceUpdate
     alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","open":{3,number,#.##########},"high":{4,number,#.##########},"low":{5,number,#.##########},"close":{6,number,#.##########},"volume":{7,number,#.##},"signal":"price_update","timestamp":"{8}"}', syminfo.ticker, close, timeframe.period, open, high, low, close, volume, ts), alert.freq_once_per_bar_close)
-if plotLongA
-    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"long","setupScore":{3,number,#},"grade":"A","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, longSetupScore, ts), alert.freq_once_per_bar_close)
-if plotLongB
-    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"long","setupScore":{3,number,#},"grade":"B+","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, longSetupScore, ts), alert.freq_once_per_bar_close)
-if plotShortA
-    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"short","setupScore":{3,number,#},"grade":"A","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, shortSetupScore, ts), alert.freq_once_per_bar_close)
-if plotShortB
-    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"short","setupScore":{3,number,#},"grade":"B+","timestamp":"{4}"}', syminfo.ticker, close, timeframe.period, shortSetupScore, ts), alert.freq_once_per_bar_close)
 
-alertcondition(true,                     title="TradePilot Price Update",
-    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}')
-alertcondition(plotLongA or plotLongB,   title="TradePilot Long Setup",
-    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"long","timestamp":"{{timenow}}"}')
-alertcondition(plotShortA or plotShortB, title="TradePilot Short Setup",
-    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"short","timestamp":"{{timenow}}"}')
+if fireLong
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"long","setupScore":{3,number,#},"grade":"{4}","timestamp":"{5}"}', syminfo.ticker, close, timeframe.period, longSetupScore, longGrade, ts), alert.freq_once_per_bar_close)
+
+if fireShort
+    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"short","setupScore":{3,number,#},"grade":"{4}","timestamp":"{5}"}', syminfo.ticker, close, timeframe.period, shortSetupScore, shortGrade, ts), alert.freq_once_per_bar_close)
+
+alertcondition(true,      title="TradePilot Price Update", message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}')
+alertcondition(fireLong,  title="TradePilot Long Setup",   message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"long","timestamp":"{{timenow}}"}')
+alertcondition(fireShort, title="TradePilot Short Setup",  message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"short","timestamp":"{{timenow}}"}')
 `;
 
 const TRADE_PILOT_ALERT_MESSAGE = `{
