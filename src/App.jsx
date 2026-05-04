@@ -868,6 +868,7 @@ export default function App() {
   const [activeTimeframe, setActiveTimeframe] = useState("");
   const [tradingViewSignal, setTradingViewSignal] = useState(null);
   const [priceSource, setPriceSource] = useState("manual");
+  const [lastTradeSetup, setLastTradeSetup] = useState(null);
   const [support, setSupport] = useState((marketDefaults[profile.mainMarket] ?? 27400) - 35);
   const [resistance, setResistance] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 50);
   const [entry, setEntry] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 5);
@@ -1335,8 +1336,14 @@ export default function App() {
           if (signalTimeMs > 0 && signalTimeMs === lastWebhookTimestampMs) return;
           lastWebhookTimestampMs = signalTimeMs;
           applyAlert(result.signal);
-          setPriceStatus("TradingView signal received");
-          notify("TradingView signal received.", "success");
+          const incomingSignal = String(result.signal.signal || "").toLowerCase();
+          const incomingScore = Number(result.signal.setupScore);
+          const isQualifiedSetup = incomingSignal === "trade_setup" && (!Number.isFinite(incomingScore) || incomingScore >= 75);
+          if (isQualifiedSetup) {
+            const grade = result.signal.grade || "B+";
+            const direction = result.signal.direction || "setup";
+            notify(`${grade} ${direction} setup received.`, "success");
+          }
         } catch (error) {
           setWebhookDebug((current) => ({
             ...current,
@@ -1716,15 +1723,33 @@ export default function App() {
     const signalTime = alert.created_at || alert.receivedAt || alert.timestamp || new Date().toISOString();
     const tfRaw = alert.timeframe ? String(alert.timeframe).trim() : "";
     if (tfRaw) setActiveTimeframe(tfRaw);
+    const signalKind = alert.signal ? String(alert.signal).toLowerCase() : "";
+    const setupScore = Number.isFinite(Number(alert.setupScore)) ? Number(alert.setupScore) : null;
+    const setupGrade = alert.grade ? String(alert.grade).toUpperCase() : null;
+    const isTradeSetup = signalKind === "trade_setup" && (setupScore === null || setupScore >= 75);
     setTradingViewSignal({
       symbol: resolved.symbol,
       market: nextMarket,
       price: Number.isFinite(nextPrice) ? nextPrice : null,
       timeframe: tfRaw || null,
-      signal: alert.signal ? String(alert.signal).toLowerCase() : null,
+      signal: signalKind || null,
+      setupScore,
+      grade: setupGrade,
+      direction: alert.direction || null,
       timestamp: signalTime,
       candle: alert.candle || null,
     });
+    if (isTradeSetup) {
+      setLastTradeSetup({
+        direction: alert.direction || null,
+        setupScore,
+        grade: setupGrade,
+        price: Number.isFinite(nextPrice) ? nextPrice : null,
+        timestamp: signalTime,
+        symbol: resolved.symbol,
+        timeframe: tfRaw || null,
+      });
+    }
     setPriceSource("TradingView Webhook");
     const candleFromAlert = alert.candle && Number.isFinite(Number(alert.candle.close))
       ? alert.candle
@@ -1899,11 +1924,17 @@ export default function App() {
     }));
     if (dataSource !== "TradingView Webhook") setDataSource("TradingView Webhook");
     if (!autoPrice) setAutoPrice(true);
-    setPriceStatus("TradingView signal received");
-    setFastMessage(!hasSupport && !hasResistance
-      ? `TradingView price received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}. Add levels to generate plan.`
-      : `TradingView signal received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
-    if (activePage !== "connections") setActivePage("dashboard");
+    if (isTradeSetup) {
+      setPriceStatus(`Trade Pilot: ${setupGrade || "B+"} ${alert.direction === "short" ? "short" : "long"} setup (${setupScore ?? "?"})`);
+      setFastMessage(`${setupGrade || "B+"} ${alert.direction === "short" ? "short" : "long"} setup at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
+      if (activePage !== "connections") setActivePage("dashboard");
+    } else if (signalKind === "price_update") {
+      setPriceStatus("Live price updating from TradingView.");
+    } else {
+      setFastMessage(!hasSupport && !hasResistance
+        ? `TradingView price received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}. Add levels to generate plan.`
+        : `TradingView signal received. ${nextMarket} updated at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
+    }
   };
 
   const applyDemoBrokerSnapshot = (snapshot) => {
@@ -2106,29 +2137,42 @@ export default function App() {
     if (lastClosedTradeRef.current === closeKey) return;
     lastClosedTradeRef.current = closeKey;
     const executionGrade = gradeCompletedTrade({ trade: activeTrade, plan: plannedTrade, profile });
+    const closeSetupGrade = getTradeGrade({
+      contracts: activeTrade.contracts,
+      dailyPnl: discipline.dailyPnl,
+      entry: activeTrade.entry,
+      maxContracts: profile.maxContracts,
+      maxDailyLoss: profile.maxDailyLoss,
+      price: activeTrade.currentPrice,
+      rewardRisk: calculateRewardRisk({ plan: plannedTrade || activeTrade, pointValue: marketSpecs[activeTrade.market]?.pointValue || customMarketSpec.pointValue }),
+      resistance,
+      stop: activeTrade.stop,
+      support,
+      zoneDetection: {},
+    });
+    const closeDiscipline = gradeDiscipline({
+      activeTrade,
+      discipline,
+      journalEntries,
+      plan: plannedTrade,
+      profile,
+    });
     addJournalEntry({
       contracts: activeTrade.contracts,
       direction: activeTrade.direction,
+      disciplineScore: closeDiscipline.score,
+      disciplineGrade: closeDiscipline.grade,
       entry: activeTrade.entry,
       executionGrade,
       exit: activeTrade.currentPrice,
+      lesson: closeDiscipline.lesson,
       market: activeTrade.market,
-      note: `${executionGrade.label}. ${executionGrade.lesson}`,
+      mistakes: closeDiscipline.mistakes,
+      nextImprovement: closeDiscipline.nextStep,
+      note: `${executionGrade.label}. ${closeDiscipline.lesson}`,
       pnl: activeTrade.realizedPL || activeTrade.unrealizedPL,
       screenshot: "placeholder",
-      setupGrade: getTradeGrade({
-        contracts: activeTrade.contracts,
-        dailyPnl: discipline.dailyPnl,
-        entry: activeTrade.entry,
-        maxContracts: profile.maxContracts,
-        maxDailyLoss: profile.maxDailyLoss,
-        price: activeTrade.currentPrice,
-        rewardRisk: calculateRewardRisk({ plan: plannedTrade || activeTrade, pointValue: marketSpecs[activeTrade.market]?.pointValue || customMarketSpec.pointValue }),
-        resistance,
-        stop: activeTrade.stop,
-        support,
-        zoneDetection: {},
-      }),
+      setupGrade: closeSetupGrade,
       stop: activeTrade.stop,
       targets: [activeTrade.tp1, activeTrade.tp2, activeTrade.runner],
     });
@@ -3443,6 +3487,45 @@ function DashboardNextStep({ activeTrade, dataSource, hasPlan, support, resistan
   );
 }
 
+function CoachScoreGrid({ coachAction, disciplineGrade, nextStep, setupGrade, tradeBlockedByGrade }) {
+  const setupTone = setupGrade.grade === "A" ? "#10b981" : setupGrade.grade === "B+" || setupGrade.grade === "B" ? "#facc15" : setupGrade.grade === "C" ? "#f97316" : "#ef4444";
+  const discTone = disciplineGrade.grade === "A" ? "#10b981" : disciplineGrade.grade === "B" ? "#facc15" : disciplineGrade.grade === "C" ? "#f97316" : "#ef4444";
+  const action = tradeBlockedByGrade ? "NO TRADE" : coachAction;
+  const mistake = disciplineGrade.mistakes[0] || "No active mistake patterns.";
+  return (
+    <section style={{ display: "grid", gap: "12px", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: "14px" }}>
+      <div style={{ background: "rgba(15,23,42,.78)", border: `1px solid ${setupTone}55`, borderRadius: "14px", padding: "12px 14px" }}>
+        <p style={{ ...styles.cardLabel, margin: 0 }}>Setup Score</p>
+        <div style={{ alignItems: "baseline", display: "flex", gap: "8px", marginTop: "4px" }}>
+          <strong style={{ color: setupTone, fontSize: "26px", fontWeight: 950 }}>{setupGrade.grade}</strong>
+          <span style={{ color: "#cbd5e1", fontSize: "13px" }}>{setupGrade.score}/100</span>
+        </div>
+        <p style={{ color: "#94a3b8", fontSize: "12px", lineHeight: 1.4, margin: "6px 0 0" }}>{setupGrade.reason}</p>
+      </div>
+      <div style={{ background: "rgba(15,23,42,.78)", border: `1px solid ${discTone}55`, borderRadius: "14px", padding: "12px 14px" }}>
+        <p style={{ ...styles.cardLabel, margin: 0 }}>Discipline Score</p>
+        <div style={{ alignItems: "baseline", display: "flex", gap: "8px", marginTop: "4px" }}>
+          <strong style={{ color: discTone, fontSize: "26px", fontWeight: 950 }}>{disciplineGrade.grade}</strong>
+          <span style={{ color: "#cbd5e1", fontSize: "13px" }}>{disciplineGrade.score}/100</span>
+        </div>
+        <p style={{ color: "#94a3b8", fontSize: "12px", lineHeight: 1.4, margin: "6px 0 0" }}>{disciplineGrade.lesson}</p>
+      </div>
+      <div style={{ background: "rgba(15,23,42,.78)", border: "1px solid #334155", borderRadius: "14px", padding: "12px 14px" }}>
+        <p style={{ ...styles.cardLabel, margin: 0 }}>Mistake Watch</p>
+        <p style={{ color: "#fca5a5", fontSize: "13px", fontWeight: 800, margin: "6px 0 0" }}>{mistake}</p>
+        {disciplineGrade.mistakes.length > 1 ? (
+          <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>+{disciplineGrade.mistakes.length - 1} more pattern{disciplineGrade.mistakes.length > 2 ? "s" : ""}</p>
+        ) : null}
+      </div>
+      <div style={{ background: tradeBlockedByGrade ? "rgba(127,29,29,.45)" : "rgba(15,23,42,.78)", border: `1px solid ${tradeBlockedByGrade ? "#ef4444" : "#334155"}`, borderRadius: "14px", padding: "12px 14px" }}>
+        <p style={{ ...styles.cardLabel, margin: 0 }}>Next Best Action</p>
+        <strong style={{ color: tradeBlockedByGrade ? "#fca5a5" : "#e2e8f0", display: "block", fontSize: "16px", margin: "6px 0 4px" }}>{action}</strong>
+        <p style={{ color: "#94a3b8", fontSize: "12px", lineHeight: 1.4, margin: 0 }}>{nextStep}</p>
+      </div>
+    </section>
+  );
+}
+
 function SignalSourceCard({ activeSymbol, candleSeries, currentPrice, dataSource, priceSource, timeframe, tradingViewSignal }) {
   const lastCandle = Array.isArray(candleSeries) && candleSeries.length ? candleSeries[candleSeries.length - 1] : null;
   const sourceLabel = dataSource === "TradingView Webhook"
@@ -3863,6 +3946,35 @@ function Dashboard({
   const displayTradeGrade = activeTradePlan.direction === "none" || activePlanValidation.valid === false
     ? { letter: "No Trade", reason: activePlanValidation.reason || "Waiting for valid setup.", score: 0 }
     : tradeGrade;
+  const setupGrade = useMemo(() => gradeSetup({
+    activeBias,
+    candleCount: liveCandleSeries.length,
+    contracts: visualPlan.contracts ?? contracts,
+    dailyPnl: discipline.dailyPnl,
+    dataFresh: dataSource === "TradingView Webhook" || dataSource === "Demo Broker",
+    direction: visualPlan.direction || "long",
+    entry: visualPlan.entry,
+    hasCandles: liveCandleSeries.length >= 6,
+    hasLevels: Number.isFinite(Number(support)) && Number(support) > 0 && Number.isFinite(Number(resistance)) && Number(resistance) > 0,
+    maxContracts: profile.maxContracts,
+    maxDailyLoss: profile.maxDailyLoss,
+    price,
+    resistance,
+    rewardRisk,
+    stop: visualPlan.stop,
+    support,
+    webhookSetupScore: tradingViewSignal?.setupScore ?? null,
+    webhookSetupGrade: tradingViewSignal?.grade ?? null,
+    zoneDetection: enrichedZoneDetection,
+  }), [activeBias, liveCandleSeries.length, visualPlan.contracts, contracts, discipline.dailyPnl, dataSource, visualPlan.direction, visualPlan.entry, visualPlan.stop, support, resistance, profile.maxContracts, profile.maxDailyLoss, price, rewardRisk, tradingViewSignal, enrichedZoneDetection]);
+  const disciplineGrade = useMemo(() => gradeDiscipline({
+    activeTrade,
+    discipline,
+    journalEntries: safeJournalEntries,
+    plan: visualPlan,
+    profile,
+  }), [activeTrade, discipline, safeJournalEntries, visualPlan, profile]);
+  const tradeBlockedByGrade = setupGrade.grade === "D" || setupGrade.grade === "Invalid";
   const fundedMetrics = getFundedAccountMetrics({ brokerConnection, discipline, profile });
   const fundedWarnings = buildFundedRuleWarnings({
     brokerConnection: {
@@ -3898,6 +4010,10 @@ function Dashboard({
   };
 
   const markTradeActive = () => {
+    if (tradeBlockedByGrade) {
+      notify?.("NO TRADE — setup grade D. Wait for a B+ or A setup.", "failure");
+      return;
+    }
     if (!hasPlan) {
       setMarkActiveModalOpen(true);
       return;
@@ -4048,8 +4164,34 @@ function Dashboard({
       </section>
       <section style={styles.dashboardToolbar}>
         <button onClick={() => setCustomizeOpen((open) => !open)} style={styles.settingsButton}>Customize Dashboard</button>
-        <button onClick={markTradeActive} style={styles.settingsButton}>Mark Trade Active</button>
+        <button
+          onClick={markTradeActive}
+          disabled={tradeBlockedByGrade}
+          style={{ ...styles.settingsButton, opacity: tradeBlockedByGrade ? 0.55 : 1, cursor: tradeBlockedByGrade ? "not-allowed" : "pointer" }}
+          title={tradeBlockedByGrade ? "NO TRADE — setup grade D. Wait for a B+ or A setup." : "Mark this trade active"}
+        >Mark Trade Active</button>
         <button onClick={closeActiveTrade} style={styles.secondaryButton}>Close / Journal Trade</button>
+        <button
+          onClick={async () => {
+            const breakdown = buildTradeBreakdownText({
+              activeTrade,
+              disciplineGrade,
+              market: profile.mainMarket,
+              rewardRisk,
+              setupGrade,
+              setupName,
+              visualPlan,
+            });
+            try {
+              await navigator.clipboard.writeText(breakdown);
+              notify?.("Trade breakdown copied to clipboard.", "success");
+            } catch {
+              notify?.("Clipboard blocked. Breakdown logged to console.", "warn");
+              console.log(breakdown);
+            }
+          }}
+          style={styles.secondaryButton}
+        >Share Breakdown</button>
         <span style={styles.muted}>Layout: {layoutPrefs.mode || "Pro"}</span>
         <span style={styles.muted}>Active Trade: {activeTrade?.isActive ? `${activeTrade.direction.toUpperCase()} ${activeTrade.market}` : "None"}</span>
       </section>
@@ -4069,6 +4211,13 @@ function Dashboard({
         priceSource={priceSource}
         timeframe={activeTimeframe}
         tradingViewSignal={tradingViewSignal}
+      />
+      <CoachScoreGrid
+        coachAction={coachDecision.action}
+        disciplineGrade={disciplineGrade}
+        nextStep={setupGrade.nextStep}
+        setupGrade={setupGrade}
+        tradeBlockedByGrade={tradeBlockedByGrade}
       />
       {markActiveModalOpen ? (
         <MarkTradeActiveModal
@@ -5427,6 +5576,183 @@ function gradeCompletedTrade({ plan, profile, trade }) {
   return { label, lesson, mistake, rMultiple: Number(rMultiple.toFixed(2)), score: boundedScore };
 }
 
+function gradeSetup({
+  activeBias = "neutral",
+  candleCount = 0,
+  contracts,
+  dailyPnl,
+  dataFresh = true,
+  direction = "long",
+  entry,
+  hasCandles = false,
+  hasLevels = false,
+  maxContracts,
+  maxDailyLoss,
+  price,
+  resistance,
+  rewardRisk,
+  stop,
+  support,
+  webhookSetupScore = null,
+  webhookSetupGrade = null,
+  zoneDetection = {},
+}) {
+  const baseGrade = getTradeGrade({
+    activeBias,
+    contracts,
+    dailyPnl,
+    direction,
+    entry,
+    maxContracts,
+    maxDailyLoss,
+    price,
+    rewardRisk,
+    resistance,
+    stop,
+    support,
+    zoneDetection,
+  });
+
+  const reasons = Array.isArray(baseGrade.reasons) ? baseGrade.reasons : [];
+  const strengths = reasons.filter((r) => /(near|strong|aligns|acceptable|reward\/risk|testing|continuation)/i.test(r));
+  const warnings = reasons.filter((r) => /(against|wrong side|chasing|too close|middle|only|exceeds|wider|nearly hit|no clear)/i.test(r));
+
+  let score = baseGrade.score;
+  if (!hasCandles) {
+    score = Math.min(score, 60);
+    warnings.unshift("waiting for candle data from TradingView");
+  }
+  if (!hasLevels) {
+    score = Math.min(score, 60);
+    warnings.unshift("support/resistance levels are missing");
+  }
+  if (!dataFresh) {
+    score = Math.min(score, 70);
+    warnings.unshift("data feed is stale");
+  }
+  if (Number.isFinite(Number(webhookSetupScore))) {
+    score = Math.round((score + Number(webhookSetupScore)) / 2);
+  }
+  score = Math.max(0, Math.min(100, score));
+  const grade = baseGrade.letter === "Invalid"
+    ? "Invalid"
+    : webhookSetupGrade && (webhookSetupGrade === "A" || webhookSetupGrade === "B+")
+      ? webhookSetupGrade
+      : score >= 85 ? "A" : score >= 70 ? "B" : score >= 55 ? "C" : "D";
+
+  let nextStep;
+  if (grade === "Invalid") {
+    nextStep = "Fix the plan: check that targets are on the correct side of entry.";
+  } else if (!hasCandles) {
+    nextStep = "Wait for candle data from TradingView, then re-evaluate.";
+  } else if (!hasLevels) {
+    nextStep = "Add support and resistance — Auto S/R needs at least a few candles.";
+  } else if (grade === "D") {
+    nextStep = "NO TRADE. Wait for a B+ or A setup.";
+  } else if (grade === "C") {
+    nextStep = "Wait for a cleaner location or stronger confirmation candle.";
+  } else if (grade === "B") {
+    nextStep = "Acceptable setup. Confirm the plan is valid, then size into the trade.";
+  } else if (grade === "B+") {
+    nextStep = "B+ setup — the indicator confirms entry quality. Follow the plan.";
+  } else {
+    nextStep = "A setup. Execute your plan. Trim at TP1 and TP2.";
+  }
+
+  const reason = baseGrade.reason || (warnings[0] ? warnings[0] : (strengths[0] || "setup quality is acceptable"));
+
+  return {
+    score,
+    grade,
+    letter: grade,
+    strengths,
+    warnings,
+    reason,
+    nextStep,
+    factors: baseGrade.factors || {},
+    entryQuality: baseGrade.entryQuality,
+    candleCount,
+  };
+}
+
+function gradeDiscipline({ activeTrade, discipline = {}, journalEntries = [], plan, profile = {}, recentMistakes = [] }) {
+  const safeTrade = activeTrade ? normalizeActiveTrade(activeTrade) : null;
+  const trades = safeArray(journalEntries);
+  const mistakes = [];
+  let score = 100;
+
+  const followedPlan = !plan || !safeTrade?.entry || Math.abs(Number(plan.entry) - safeTrade.entry) <= Math.max(2, Math.abs(plan.entry) * 0.0008);
+  if (!followedPlan) { score -= 18; mistakes.push("entry drifted from the plan"); }
+
+  const respectedStop = !safeTrade || safeTrade.status !== "stopped" || safeTrade.realizedPL >= -Math.abs(profile.maxRiskPerTrade || 0) * 1.1;
+  if (!respectedStop) { score -= 20; mistakes.push("loss exceeded planned risk"); }
+
+  const oversized = safeTrade?.contracts > Number(profile.maxContracts || safeTrade?.contracts || 0);
+  if (oversized) { score -= 18; mistakes.push("position size was too high"); }
+
+  const chased = safeTrade && safeTrade.entryQuality === "Chasing";
+  if (chased) { score -= 12; mistakes.push("entered while chasing"); }
+
+  const dailyLoss = Number(discipline.dailyPnl || 0);
+  const maxLoss = Math.abs(Number(profile.maxDailyLoss || 0));
+  const revenge = (discipline.tradesTaken || 0) >= 4 && dailyLoss < 0 && Math.abs(dailyLoss) >= maxLoss * 0.6;
+  if (revenge) { score -= 14; mistakes.push("revenge trading pattern detected"); }
+
+  const trimmed = !safeTrade || safeTrade.status === "tp1_hit" || safeTrade.status === "tp2_hit" || safeTrade.status === "runner" || safeTrade.status === "closed";
+  if (safeTrade && !trimmed) { score -= 8; mistakes.push("did not trim at planned levels"); }
+
+  const journaled = trades.length > 0;
+  if (!journaled) { score -= 8; mistakes.push("no journal entry yet"); }
+
+  for (const recent of recentMistakes) {
+    score -= 6;
+    if (!mistakes.includes(recent)) mistakes.push(recent);
+  }
+
+  const boundedScore = Math.max(0, Math.min(100, Math.round(score)));
+  const grade = boundedScore >= 85 ? "A" : boundedScore >= 70 ? "B" : boundedScore >= 55 ? "C" : "D";
+  const lesson = mistakes[0]
+    ? `Next improvement: ${mistakes[0]}.`
+    : "Discipline holding. Keep following the plan and journaling each trade.";
+  const nextStep = grade === "D"
+    ? "Stop trading for the day. Review the journal."
+    : grade === "C"
+      ? "Take only A setups. Reset before the next entry."
+      : grade === "B"
+        ? "Stay disciplined — one slip away from A."
+        : "Discipline strong. Keep stacking journal entries.";
+
+  return {
+    score: boundedScore,
+    grade,
+    mistakes,
+    lesson,
+    nextStep,
+  };
+}
+
+function buildTradeBreakdownText({ activeTrade, disciplineGrade, market, rewardRisk, setupGrade, setupName, visualPlan }) {
+  const trade = activeTrade ? normalizeActiveTrade(activeTrade) : null;
+  const rr = rewardRisk?.invalid ? "—" : `${Number(rewardRisk?.ratio || 0).toFixed(2)}R`;
+  const lesson = disciplineGrade?.lesson || "Document the lesson next session.";
+  const setupLabel = `${setupGrade?.grade || "—"} (${setupGrade?.score ?? 0}/100)`;
+  const execLabel = `${disciplineGrade?.grade || "—"} (${disciplineGrade?.score ?? 0}/100)`;
+  const direction = trade?.direction || visualPlan?.direction || "—";
+  const entry = formatOptionalPrice(trade?.entry ?? visualPlan?.entry);
+  const stop = formatOptionalPrice(trade?.stop ?? visualPlan?.stop);
+  const target = formatOptionalPrice(visualPlan?.runner ?? visualPlan?.target ?? trade?.runner);
+  return [
+    "Trade Pilot Breakdown",
+    `Market: ${market || "—"}`,
+    `Setup: ${setupName || "—"} (${direction})`,
+    `Entry: ${entry}  Stop: ${stop}  Target: ${target}`,
+    `Grade: ${setupLabel}`,
+    `RR: ${rr}`,
+    `Execution Score: ${execLabel}`,
+    `Lesson: ${lesson}`,
+  ].join("\n");
+}
+
 function formatOptionalPrice(value) {
   return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "Pending";
 }
@@ -6562,47 +6888,109 @@ function ConnectionsPage({
 const TRADE_PILOT_PINE_INDICATOR = `//@version=5
 indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
 
-lookback = input.int(20, "S/R Lookback Bars", minval=5, maxval=200)
+lookback        = input.int(20, "S/R Lookback Bars", minval=5, maxval=200)
+emaFastLen      = input.int(9,  "EMA Fast", minval=2, maxval=50)
+emaSlowLen      = input.int(21, "EMA Slow", minval=5, maxval=200)
+minSetupScore   = input.int(75, "Min Setup Score (B+ = 75)", minval=0, maxval=100)
+sendPriceUpdate = input.bool(true, "Stream price_update on every bar close")
 
-support    = ta.lowest(low,   lookback)
-resistance = ta.highest(high, lookback)
-
+support         = ta.lowest(low,   lookback)
+resistance      = ta.highest(high, lookback)
 priorSupport    = support[1]
 priorResistance = resistance[1]
+emaFast         = ta.ema(close, emaFastLen)
+emaSlow         = ta.ema(close, emaSlowLen)
 
-bullishBreakout     = not na(priorResistance) and close > priorResistance and close[1] <= priorResistance
-bearishBreakdown    = not na(priorSupport)    and close < priorSupport    and close[1] >= priorSupport
-supportBounce       = not na(priorSupport)    and low  <= priorSupport    and close > priorSupport
-resistanceRejection = not na(priorResistance) and high >= priorResistance and close < priorResistance
+rng       = math.max(priorResistance - priorSupport, syminfo.mintick * 4)
+zoneWidth = rng * 0.025
 
-longSetup  = bullishBreakout or supportBounce
-shortSetup = bearishBreakdown or resistanceRejection
+nearSupport    = math.abs(close - priorSupport)    <= rng * 0.18
+nearResistance = math.abs(close - priorResistance) <= rng * 0.18
+inMidRange     = close > priorSupport + rng * 0.30 and close < priorResistance - rng * 0.30
 
-plot(resistance, "Resistance", color=color.new(color.red,   0), linewidth=2, style=plot.style_stepline)
-plot(support,    "Support",    color=color.new(color.green, 0), linewidth=2, style=plot.style_stepline)
+bullishConfirm = close > open and close >= priorSupport    and low  <= priorSupport    + zoneWidth
+bearishConfirm = close < open and close <= priorResistance and high >= priorResistance - zoneWidth
 
-plotshape(longSetup,  "Long Setup",  shape.triangleup,   location.belowbar, color.lime, size=size.small, text="LONG")
-plotshape(shortSetup, "Short Setup", shape.triangledown, location.abovebar, color.red,  size=size.small, text="SHORT")
+longProximity    = nearSupport ? 25.0 : 0.0
+longTrend        = emaFast > emaSlow ? 20.0 : (emaFast < emaSlow ? 0.0 : 10.0)
+longRisk         = math.max(close - priorSupport, syminfo.mintick)
+longReward       = priorResistance - close
+longRR           = longRisk > 0 ? longReward / longRisk : 0.0
+longRRScore      = longRR >= 2.0 ? 25.0 : (longRR >= 1.5 ? 18.0 : (longRR >= 1.0 ? 10.0 : 0.0))
+longMidScore     = inMidRange ? 0.0 : 15.0
+longConfirmScore = bullishConfirm ? 15.0 : 0.0
+longSetupScore   = longProximity + longTrend + longRRScore + longMidScore + longConfirmScore
 
-priceUpdateMsg = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}'
-longSetupMsg   = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"long_setup","timestamp":"{{timenow}}"}'
-shortSetupMsg  = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"short_setup","timestamp":"{{timenow}}"}'
+shortProximity    = nearResistance ? 25.0 : 0.0
+shortTrend        = emaFast < emaSlow ? 20.0 : (emaFast > emaSlow ? 0.0 : 10.0)
+shortRisk         = math.max(priorResistance - close, syminfo.mintick)
+shortReward       = close - priorSupport
+shortRR           = shortRisk > 0 ? shortReward / shortRisk : 0.0
+shortRRScore      = shortRR >= 2.0 ? 25.0 : (shortRR >= 1.5 ? 18.0 : (shortRR >= 1.0 ? 10.0 : 0.0))
+shortMidScore     = inMidRange ? 0.0 : 15.0
+shortConfirmScore = bearishConfirm ? 15.0 : 0.0
+shortSetupScore   = shortProximity + shortTrend + shortRRScore + shortMidScore + shortConfirmScore
 
-alertcondition(true,       title="TradePilot Price Update", message=priceUpdateMsg)
-alertcondition(longSetup,  title="TradePilot Long Setup",   message=longSetupMsg)
-alertcondition(shortSetup, title="TradePilot Short Setup",  message=shortSetupMsg)
+qualifiedLong  = longSetupScore  >= minSetupScore and not nearResistance
+qualifiedShort = shortSetupScore >= minSetupScore and not nearSupport
+
+plotLongA  = qualifiedLong  and longSetupScore  >= 85
+plotLongB  = qualifiedLong  and longSetupScore  <  85
+plotShortA = qualifiedShort and shortSetupScore >= 85
+plotShortB = qualifiedShort and shortSetupScore <  85
+
+plot(resistance, "Resistance", color=color.new(color.red,    0), linewidth=2, style=plot.style_stepline)
+plot(support,    "Support",    color=color.new(color.green,  0), linewidth=2, style=plot.style_stepline)
+plot(emaFast,    "EMA Fast",   color=color.new(color.blue,   60))
+plot(emaSlow,    "EMA Slow",   color=color.new(color.purple, 60))
+
+plotshape(plotLongA,  "A Long",   shape.triangleup,   location.belowbar, color.new(color.green, 0),  size=size.normal, text="A LONG")
+plotshape(plotLongB,  "B+ Long",  shape.triangleup,   location.belowbar, color.new(color.green, 30), size=size.small,  text="B+ LONG")
+plotshape(plotShortA, "A Short",  shape.triangledown, location.abovebar, color.new(color.red,   0),  size=size.normal, text="A SHORT")
+plotshape(plotShortB, "B+ Short", shape.triangledown, location.abovebar, color.new(color.red,   30), size=size.small,  text="B+ SHORT")
+
+isoNow() => str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
+
+buildPriceUpdate() =>
+    '{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close)
+    + ',"timeframe":"' + timeframe.period + '","open":' + str.tostring(open)
+    + ',"high":' + str.tostring(high) + ',"low":' + str.tostring(low)
+    + ',"close":' + str.tostring(close) + ',"volume":' + str.tostring(volume)
+    + ',"signal":"price_update","timestamp":"' + isoNow() + '"}'
+
+buildSetup(direction, score, grade) =>
+    '{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close)
+    + ',"timeframe":"' + timeframe.period + '","signal":"trade_setup","direction":"' + direction
+    + '","setupScore":' + str.tostring(math.round(score))
+    + ',"grade":"' + grade + '","timestamp":"' + isoNow() + '"}'
+
+if sendPriceUpdate
+    alert(buildPriceUpdate(), alert.freq_once_per_bar_close)
+if plotLongA
+    alert(buildSetup("long",  longSetupScore,  "A"),  alert.freq_once_per_bar_close)
+if plotLongB
+    alert(buildSetup("long",  longSetupScore,  "B+"), alert.freq_once_per_bar_close)
+if plotShortA
+    alert(buildSetup("short", shortSetupScore, "A"),  alert.freq_once_per_bar_close)
+if plotShortB
+    alert(buildSetup("short", shortSetupScore, "B+"), alert.freq_once_per_bar_close)
+
+alertcondition(true,                     title="TradePilot Price Update",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}')
+alertcondition(plotLongA or plotLongB,   title="TradePilot Long Setup",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"long","timestamp":"{{timenow}}"}')
+alertcondition(plotShortA or plotShortB, title="TradePilot Short Setup",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"short","timestamp":"{{timenow}}"}')
 `;
 
 const TRADE_PILOT_ALERT_MESSAGE = `{
  "symbol": "{{ticker}}",
  "price": {{close}},
  "timeframe": "{{interval}}",
- "open": {{open}},
- "high": {{high}},
- "low": {{low}},
- "close": {{close}},
- "volume": {{volume}},
- "signal": "price_update",
+ "signal": "trade_setup",
+ "direction": "long",
+ "setupScore": 78,
+ "grade": "B+",
  "timestamp": "{{timenow}}"
 }`;
 

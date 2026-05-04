@@ -1,19 +1,19 @@
 // ============================================================
 // Trade Pilot Signal Engine
-// Version: 2.0
-// Description: Detects support, resistance, breakouts, breakdowns,
-//              bounces, and rejections. Sends JSON alerts to the
-//              Trade Pilot webhook at /api/webhook/tradingview.
+// Version: 3.0
+// Description: Quality-gated long/short signals. Each potential
+// setup gets a 0-100 score. Only B+ (>=75) and A (>=85) setups
+// fire trade_setup alerts and plot markers. price_update is
+// always streamed for the dashboard chart.
 //
 // Setup:
-//   1. Open the TradingView Pine Editor (bottom panel).
-//   2. Paste this entire script.
-//   3. Click Save.
-//   4. Click "Add to chart".
-//   5. Right-click the chart and choose "Add alert".
-//   6. Pick the alert condition (Price Update / Long Setup /
-//      Short Setup), enable Webhook URL, paste the Trade Pilot
-//      webhook URL, and paste the matching JSON message.
+//   1. Pine Editor → paste → Save → Add to chart.
+//   2. Right-click chart → Add alert.
+//   3. Condition: "Trade Pilot Signal Engine".
+//   4. Trigger: "Any alert() function call" (recommended) — one
+//      alert covers price updates and B+/A setups.
+//   5. Webhook URL: https://tradepilottool.com/api/webhook/tradingview
+//   6. Message: leave blank — the script supplies the JSON.
 // ============================================================
 
 //@version=5
@@ -22,48 +22,125 @@ indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
 // ============================================================
 // INPUTS
 // ============================================================
-lookback = input.int(20, "S/R Lookback Bars", minval=5, maxval=200,
-              tooltip="Support uses the lowest low over this many bars; resistance uses the highest high.")
+lookback        = input.int(20, "S/R Lookback Bars", minval=5, maxval=200)
+emaFastLen      = input.int(9,  "EMA Fast", minval=2, maxval=50)
+emaSlowLen      = input.int(21, "EMA Slow", minval=5, maxval=200)
+minSetupScore   = input.int(75, "Min Setup Score (B+ = 75)", minval=0, maxval=100,
+                  tooltip="Only setups at or above this score plot a marker and fire trade_setup alerts.")
+sendPriceUpdate = input.bool(true, "Stream price_update on every bar close",
+                  tooltip="The Trade Pilot dashboard reads price_update for live candles. Leave on.")
 
 // ============================================================
-// SUPPORT & RESISTANCE
+// SUPPORT, RESISTANCE, TREND
 // ============================================================
-support    = ta.lowest(low,   lookback)
-resistance = ta.highest(high, lookback)
-
-// Use the prior bar's S/R so the breakout test compares against
-// the level that was in place before the breakout bar formed.
+support         = ta.lowest(low,   lookback)
+resistance      = ta.highest(high, lookback)
 priorSupport    = support[1]
 priorResistance = resistance[1]
+emaFast         = ta.ema(close, emaFastLen)
+emaSlow         = ta.ema(close, emaSlowLen)
+
+rng       = math.max(priorResistance - priorSupport, syminfo.mintick * 4)
+zoneWidth = rng * 0.025
+
+nearSupport     = math.abs(close - priorSupport)    <= rng * 0.18
+nearResistance  = math.abs(close - priorResistance) <= rng * 0.18
+inMidRange      = close > priorSupport + rng * 0.30 and close < priorResistance - rng * 0.30
+
+// Candle confirmation
+bullishConfirm = close > open and close >= priorSupport    and low  <= priorSupport    + zoneWidth
+bearishConfirm = close < open and close <= priorResistance and high >= priorResistance - zoneWidth
 
 // ============================================================
-// SIGNAL DETECTION
+// LONG SETUP SCORE (0-100)
 // ============================================================
-bullishBreakout     = not na(priorResistance) and close > priorResistance and close[1] <= priorResistance
-bearishBreakdown    = not na(priorSupport)    and close < priorSupport    and close[1] >= priorSupport
-supportBounce       = not na(priorSupport)    and low  <= priorSupport    and close > priorSupport
-resistanceRejection = not na(priorResistance) and high >= priorResistance and close < priorResistance
+longProximity   = nearSupport ? 25.0 : 0.0
+longTrend       = emaFast > emaSlow ? 20.0 : (emaFast < emaSlow ? 0.0 : 10.0)
+longRisk        = math.max(close - priorSupport, syminfo.mintick)
+longReward      = priorResistance - close
+longRR          = longRisk > 0 ? longReward / longRisk : 0.0
+longRRScore     = longRR >= 2.0 ? 25.0 : (longRR >= 1.5 ? 18.0 : (longRR >= 1.0 ? 10.0 : 0.0))
+longMidScore    = inMidRange ? 0.0 : 15.0
+longConfirmScore = bullishConfirm ? 15.0 : 0.0
+longSetupScore  = longProximity + longTrend + longRRScore + longMidScore + longConfirmScore
 
-longSetup  = bullishBreakout or supportBounce
-shortSetup = bearishBreakdown or resistanceRejection
+// ============================================================
+// SHORT SETUP SCORE (0-100)
+// ============================================================
+shortProximity   = nearResistance ? 25.0 : 0.0
+shortTrend       = emaFast < emaSlow ? 20.0 : (emaFast > emaSlow ? 0.0 : 10.0)
+shortRisk        = math.max(priorResistance - close, syminfo.mintick)
+shortReward      = close - priorSupport
+shortRR          = shortRisk > 0 ? shortReward / shortRisk : 0.0
+shortRRScore     = shortRR >= 2.0 ? 25.0 : (shortRR >= 1.5 ? 18.0 : (shortRR >= 1.0 ? 10.0 : 0.0))
+shortMidScore    = inMidRange ? 0.0 : 15.0
+shortConfirmScore = bearishConfirm ? 15.0 : 0.0
+shortSetupScore  = shortProximity + shortTrend + shortRRScore + shortMidScore + shortConfirmScore
+
+// ============================================================
+// QUALIFICATION (B+ >= 75, A >= 85)
+// ============================================================
+qualifiedLong  = longSetupScore  >= minSetupScore and not nearResistance
+qualifiedShort = shortSetupScore >= minSetupScore and not nearSupport
+
+plotLongA  = qualifiedLong  and longSetupScore  >= 85
+plotLongB  = qualifiedLong  and longSetupScore  <  85
+plotShortA = qualifiedShort and shortSetupScore >= 85
+plotShortB = qualifiedShort and shortSetupScore <  85
 
 // ============================================================
 // PLOTS
 // ============================================================
-plot(resistance, "Resistance", color=color.new(color.red,   0), linewidth=2, style=plot.style_stepline)
-plot(support,    "Support",    color=color.new(color.green, 0), linewidth=2, style=plot.style_stepline)
+plot(resistance, "Resistance", color=color.new(color.red,    0), linewidth=2, style=plot.style_stepline)
+plot(support,    "Support",    color=color.new(color.green,  0), linewidth=2, style=plot.style_stepline)
+plot(emaFast,    "EMA Fast",   color=color.new(color.blue,   60))
+plot(emaSlow,    "EMA Slow",   color=color.new(color.purple, 60))
 
-plotshape(longSetup,  "Long Setup",  shape.triangleup,   location.belowbar, color.lime, size=size.small, text="LONG")
-plotshape(shortSetup, "Short Setup", shape.triangledown, location.abovebar, color.red,  size=size.small, text="SHORT")
+plotshape(plotLongA,  "A Long",   shape.triangleup,   location.belowbar, color.new(color.green, 0),  size=size.normal, text="A LONG")
+plotshape(plotLongB,  "B+ Long",  shape.triangleup,   location.belowbar, color.new(color.green, 30), size=size.small,  text="B+ LONG")
+plotshape(plotShortA, "A Short",  shape.triangledown, location.abovebar, color.new(color.red,   0),  size=size.normal, text="A SHORT")
+plotshape(plotShortB, "B+ Short", shape.triangledown, location.abovebar, color.new(color.red,   30), size=size.small,  text="B+ SHORT")
 
 // ============================================================
-// ALERT CONDITIONS
-// Each alert message is JSON shaped for the Trade Pilot webhook.
+// ALERT PAYLOADS — alert() supports runtime-built strings so
+// setupScore/grade can be embedded.
 // ============================================================
-priceUpdateMsg = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}'
-longSetupMsg   = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"long_setup","timestamp":"{{timenow}}"}'
-shortSetupMsg  = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"short_setup","timestamp":"{{timenow}}"}'
+isoNow() => str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
 
-alertcondition(true,       title="TradePilot Price Update", message=priceUpdateMsg)
-alertcondition(longSetup,  title="TradePilot Long Setup",   message=longSetupMsg)
-alertcondition(shortSetup, title="TradePilot Short Setup",  message=shortSetupMsg)
+buildPriceUpdate() =>
+    '{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close)
+    + ',"timeframe":"' + timeframe.period + '","open":' + str.tostring(open)
+    + ',"high":' + str.tostring(high) + ',"low":' + str.tostring(low)
+    + ',"close":' + str.tostring(close) + ',"volume":' + str.tostring(volume)
+    + ',"signal":"price_update","timestamp":"' + isoNow() + '"}'
+
+buildSetup(direction, score, grade) =>
+    '{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close)
+    + ',"timeframe":"' + timeframe.period + '","signal":"trade_setup","direction":"' + direction
+    + '","setupScore":' + str.tostring(math.round(score))
+    + ',"grade":"' + grade + '","timestamp":"' + isoNow() + '"}'
+
+if sendPriceUpdate
+    alert(buildPriceUpdate(), alert.freq_once_per_bar_close)
+
+if plotLongA
+    alert(buildSetup("long",  longSetupScore,  "A"),  alert.freq_once_per_bar_close)
+if plotLongB
+    alert(buildSetup("long",  longSetupScore,  "B+"), alert.freq_once_per_bar_close)
+if plotShortA
+    alert(buildSetup("short", shortSetupScore, "A"),  alert.freq_once_per_bar_close)
+if plotShortB
+    alert(buildSetup("short", shortSetupScore, "B+"), alert.freq_once_per_bar_close)
+
+// ============================================================
+// NAMED ALERTCONDITIONS (for users who prefer per-condition alerts).
+// alertcondition() messages must be constant strings, so setupScore
+// and grade are not embedded here. Use the alert()-based pipeline
+// above for the full payload.
+// ============================================================
+alertcondition(true,                       title="TradePilot Price Update",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}')
+alertcondition(plotLongA or plotLongB,     title="TradePilot Long Setup",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"long","timestamp":"{{timenow}}"}')
+alertcondition(plotShortA or plotShortB,   title="TradePilot Short Setup",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"short","timestamp":"{{timenow}}"}')

@@ -56,6 +56,10 @@ export function normalizeSignal(payload = {}) {
   if (payload.bias) signal.bias = String(payload.bias).trim().toLowerCase();
   if (payload.timeframe) signal.timeframe = String(payload.timeframe).trim();
   if (payload.signal) signal.signal = String(payload.signal).trim().toLowerCase();
+  if (payload.direction) signal.direction = String(payload.direction).trim().toLowerCase();
+  const setupScore = toNumber(payload.setupScore);
+  if (setupScore !== null) signal.setupScore = setupScore;
+  if (payload.grade) signal.grade = String(payload.grade).trim().toUpperCase();
 
   const open = toNumber(payload.open);
   const high = toNumber(payload.high);
@@ -152,6 +156,9 @@ export async function getLatestSignal(symbol = "") {
         timeframe: row.timeframe,
         timestamp: row.created_at,
         signal: raw.signal ? String(raw.signal).trim().toLowerCase() : null,
+        direction: raw.direction ? String(raw.direction).trim().toLowerCase() : null,
+        setupScore: toNumber(raw.setupScore),
+        grade: raw.grade ? String(raw.grade).trim().toUpperCase() : null,
         candle,
       };
     }
