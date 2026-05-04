@@ -35,6 +35,92 @@ const autoZonesStorageKey = "tradePilotAutoZones";
 const connectionModeStorageKey = "tradePilotConnectionMode";
 const candleHistoryStorageKey = "tradePilotCandleHistory";
 const notificationPrefsStorageKey = "tradePilotNotificationPrefs";
+const chartTimeframeStorageKey = "tradePilotChartTimeframe";
+
+const CHART_TIMEFRAME_OPTIONS = [
+  { value: "1", label: "1m" },
+  { value: "2", label: "2m" },
+  { value: "5", label: "5m" },
+  { value: "15", label: "15m" },
+  { value: "30", label: "30m" },
+  { value: "60", label: "1h" },
+];
+
+function parseTimeframeMinutes(value) {
+  if (value === null || value === undefined) return 1;
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) return 1;
+  const numeric = parseFloat(raw);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    if (raw.endsWith("h")) return Math.round(numeric * 60);
+    if (raw.endsWith("d")) return Math.round(numeric * 60 * 24);
+    return Math.max(1, Math.round(numeric));
+  }
+  return 1;
+}
+
+function timeframeLabel(value) {
+  const minutes = parseTimeframeMinutes(value);
+  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
+}
+
+function aggregateCandles(candles, targetMinutes) {
+  if (!Array.isArray(candles) || !candles.length) return [];
+  const minutes = Math.max(1, Math.round(targetMinutes || 1));
+  if (minutes <= 1) {
+    return candles.map((candle) => ({ ...candle }));
+  }
+  const bucketMs = minutes * 60 * 1000;
+  const buckets = new Map();
+  for (const candle of candles) {
+    const ts = new Date(candle.timestamp).getTime();
+    if (!Number.isFinite(ts)) continue;
+    const open = Number(candle.open);
+    const high = Number(candle.high);
+    const low = Number(candle.low);
+    const close = Number(candle.close);
+    if (![open, high, low, close].every(Number.isFinite)) continue;
+    const bucket = Math.floor(ts / bucketMs) * bucketMs;
+    const existing = buckets.get(bucket);
+    const volume = Number(candle.volume);
+    if (!existing) {
+      buckets.set(bucket, {
+        open,
+        high,
+        low,
+        close,
+        volume: Number.isFinite(volume) ? volume : null,
+        timeframe: String(minutes),
+        timestamp: new Date(bucket).toISOString(),
+      });
+    } else {
+      existing.high = Math.max(existing.high, high);
+      existing.low = Math.min(existing.low, low);
+      existing.close = close;
+      if (Number.isFinite(volume)) existing.volume = (existing.volume ?? 0) + volume;
+    }
+  }
+  return Array.from(buckets.values()).sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+  );
+}
+
+function pickFinestCandleSeries(history, symbol) {
+  if (!history || typeof history !== "object") return [];
+  const sym = String(symbol || "").trim().toUpperCase();
+  if (!sym) return [];
+  const matches = Object.entries(history).filter(
+    ([key, value]) => Array.isArray(value) && value.length && (key === sym || key.startsWith(`${sym}|`)),
+  );
+  if (!matches.length) return [];
+  matches.sort((a, b) => {
+    const aTF = a[0].split("|")[1] || "";
+    const bTF = b[0].split("|")[1] || "";
+    return parseTimeframeMinutes(aTF) - parseTimeframeMinutes(bTF);
+  });
+  return matches[0][1];
+}
 
 const NOTIFY_CRITICAL = "critical";
 const NOTIFY_IMPORTANT = "important";
@@ -931,6 +1017,16 @@ export default function App() {
   const [priceSource, setPriceSource] = useState("manual");
   const [lastTradeSetup, setLastTradeSetup] = useState(null);
   const [notificationPrefs, setNotificationPrefs] = useState(() => loadNotificationPrefs());
+  const [chartTimeframe, setChartTimeframe] = useState(() => {
+    try {
+      const stored = localStorage.getItem(chartTimeframeStorageKey);
+      if (!stored) return "5";
+      const minutes = parseTimeframeMinutes(stored);
+      return String(minutes);
+    } catch {
+      return "5";
+    }
+  });
   const lastSignalDedupRef = useRef("");
   const lastNonCriticalNotifyRef = useRef(0);
   const [support, setSupport] = useState((marketDefaults[profile.mainMarket] ?? 27400) - 35);
@@ -963,6 +1059,14 @@ export default function App() {
       // ignore
     }
   }, [notificationPrefs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(chartTimeframeStorageKey, chartTimeframe);
+    } catch {
+      // ignore
+    }
+  }, [chartTimeframe]);
 
   useEffect(() => {
     if (dataSource !== "TradingView Webhook") return;
@@ -2658,7 +2762,9 @@ export default function App() {
             autoPrice={autoPrice}
             brokerConnection={brokerConnection}
             candleHistory={candleHistory}
+            chartTimeframe={chartTimeframe}
             contracts={contracts}
+            setChartTimeframe={setChartTimeframe}
             dataSource={dataSource}
             direction={direction}
             discipline={discipline}
@@ -3863,7 +3969,9 @@ function Dashboard({
   autoPrice,
   brokerConnection,
   candleHistory,
+  chartTimeframe,
   contracts,
+  setChartTimeframe,
   dataSource,
   direction,
   discipline,
@@ -3934,10 +4042,20 @@ function Dashboard({
     resistance,
     support,
   });
-  const liveCandleSeries = useMemo(
-    () => pickCandleSeries(candleHistory, profile.mainMarket, activeTimeframe),
+  const baseCandleSeries = useMemo(
+    () => {
+      const exact = pickCandleSeries(candleHistory, profile.mainMarket, activeTimeframe);
+      if (exact.length) return exact;
+      return pickFinestCandleSeries(candleHistory, profile.mainMarket);
+    },
     [candleHistory, profile.mainMarket, activeTimeframe],
   );
+  const chartTimeframeMinutes = parseTimeframeMinutes(chartTimeframe);
+  const liveCandleSeries = useMemo(
+    () => aggregateCandles(baseCandleSeries, chartTimeframeMinutes),
+    [baseCandleSeries, chartTimeframeMinutes],
+  );
+  const displayedTimeframe = timeframeLabel(chartTimeframe);
   const hasLiveCandles = liveCandleSeries.length >= 6;
   const autoSR = useMemo(() => detectAutoSRZones(liveCandleSeries), [liveCandleSeries]);
   const chartData = useMemo(
@@ -4149,14 +4267,16 @@ function Dashboard({
     alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
       candleSeries={liveCandleSeries}
+      chartTimeframe={chartTimeframe}
       currentPrice={price}
       entry={hasPlan ? visualPlan.entry : undefined}
       runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
+      setChartTimeframe={setChartTimeframe}
       stop={hasPlan ? visualPlan.stop : undefined}
       support={enrichedZoneDetection.supportLevel ?? support}
       resistance={enrichedZoneDetection.resistanceLevel ?? resistance}
       symbol={profile.mainMarket}
-      timeframe={activeTimeframe}
+      timeframe={displayedTimeframe}
       trim1={hasPlan ? visualPlan.trim1 : undefined}
       trim2={hasPlan ? visualPlan.trim2 : undefined}
       zoneDetection={enrichedZoneDetection}
@@ -4233,7 +4353,7 @@ function Dashboard({
           support={enrichedZoneDetection.supportLevel ?? support}
           resistance={enrichedZoneDetection.resistanceLevel ?? resistance}
           symbol={profile.mainMarket}
-          timeframe={activeTimeframe}
+          timeframe={displayedTimeframe}
           trim1={hasPlan ? visualPlan.trim1 : undefined}
           trim2={hasPlan ? visualPlan.trim2 : undefined}
           zoneDetection={enrichedZoneDetection}
@@ -4447,14 +4567,16 @@ function Dashboard({
 
       {effectiveLayout.chart ? <TradeChartPanel
         candleSeries={liveCandleSeries}
+        chartTimeframe={chartTimeframe}
         currentPrice={price}
         entry={visualPlan.entry}
         runner={visualPlan.runner ?? visualPlan.target}
+        setChartTimeframe={setChartTimeframe}
         stop={visualPlan.stop}
         support={enrichedZoneDetection.supportLevel ?? support}
         resistance={enrichedZoneDetection.resistanceLevel ?? resistance}
         symbol={profile.mainMarket}
-        timeframe={activeTimeframe}
+        timeframe={displayedTimeframe}
         trim1={visualPlan.trim1}
         trim2={visualPlan.trim2}
         zoneDetection={enrichedZoneDetection}
@@ -6391,7 +6513,7 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   return `Grade D setup (${score}/100). Do not trade: ${issue || "setup does not meet quality threshold"}.`;
 }
 
-function TradeChartPanel({ candleSeries, currentPrice, entry, runner, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
+function TradeChartPanel({ candleSeries, chartTimeframe, currentPrice, entry, runner, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
   const supportZone = Number.isFinite(Number(zoneDetection.supportZoneLow)) && Number.isFinite(Number(zoneDetection.supportZoneHigh))
     ? { min: Number(zoneDetection.supportZoneLow), max: Number(zoneDetection.supportZoneHigh) }
     : Number.isFinite(Number(support))
@@ -6419,6 +6541,31 @@ function TradeChartPanel({ candleSeries, currentPrice, entry, runner, stop, supp
         </div>
         <strong style={styles.chartPrice}>{Number.isFinite(Number(currentPrice)) ? Number(currentPrice).toFixed(2) : "—"}</strong>
       </div>
+      {setChartTimeframe ? (
+        <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px" }}>
+          {CHART_TIMEFRAME_OPTIONS.map((option) => {
+            const isActive = String(chartTimeframe) === option.value;
+            return (
+              <button
+                key={option.value}
+                onClick={() => setChartTimeframe(option.value)}
+                style={{
+                  background: isActive ? "#2563eb" : "rgba(15,23,42,.6)",
+                  border: `1px solid ${isActive ? "#3b82f6" : "#334155"}`,
+                  borderRadius: "8px",
+                  color: "#e2e8f0",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: 800,
+                  padding: "6px 10px",
+                }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       <div className="tradepilot-chart-wrap" style={styles.chartWrap}>
         <TradingChart
           candles={candles}
