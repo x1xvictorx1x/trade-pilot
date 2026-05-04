@@ -152,6 +152,47 @@ const defaultNotificationPrefs = {
   setupAlerts: true,
 };
 
+function isLocalDevHost() {
+  if (typeof window === "undefined") return false;
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1";
+}
+
+async function safeFetch(url, options = {}, label = "request") {
+  if (typeof url !== "string" || !url) {
+    return { ok: false, error: `${label}: missing URL` };
+  }
+  // Block accidental cross-origin localhost calls in production.
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(url) && !isLocalDevHost()) {
+    if (typeof console !== "undefined") {
+      console.warn(`[TradePilot] Skipped ${label}: localhost URL not callable in production (${url})`);
+    }
+    return { ok: false, error: `${label} skipped: localhost endpoint not available in production`, skipped: true };
+  }
+  try {
+    const res = await fetch(url, options);
+    if (!res.ok) {
+      if (typeof console !== "undefined") {
+        console.warn(`[TradePilot] ${label} → ${url} → HTTP ${res.status}`);
+      }
+      return { ok: false, status: res.status, error: `${label} failed: ${res.status}`, url };
+    }
+    const text = await res.text();
+    if (!text) return { ok: true, data: null };
+    try {
+      return { ok: true, data: JSON.parse(text), status: res.status };
+    } catch {
+      return { ok: true, data: text, status: res.status };
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") return { ok: false, aborted: true };
+    if (typeof console !== "undefined") {
+      console.warn(`[TradePilot] ${label} → ${url} → ${error?.message || "fetch error"}`);
+    }
+    return { ok: false, error: error?.message || `${label} failed`, url };
+  }
+}
+
 function loadNotificationPrefs() {
   try {
     const raw = localStorage.getItem(notificationPrefsStorageKey);
@@ -1050,6 +1091,46 @@ export default function App() {
   const onResetChart = () => setChartResetSignal((current) => current + 1);
   const lastSignalDedupRef = useRef("");
   const lastNonCriticalNotifyRef = useRef(0);
+  const [connectionError, setConnectionError] = useState(null);
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine !== false : true);
+  const connectionErrorRef = useRef(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  const reportConnectionError = (source, message) => {
+    const now = Date.now();
+    setConnectionError((current) => {
+      const previous = current && current.source === source ? current : null;
+      const next = {
+        source,
+        message,
+        count: (previous?.count || 0) + 1,
+        lastSeenAt: now,
+        lastToastAt: previous?.lastToastAt || 0,
+      };
+      connectionErrorRef.current = next;
+      return next;
+    });
+  };
+
+  const clearConnectionError = (source) => {
+    setConnectionError((current) => {
+      if (!current) return current;
+      if (source && current.source !== source) return current;
+      connectionErrorRef.current = null;
+      return null;
+    });
+  };
   const [support, setSupport] = useState((marketDefaults[profile.mainMarket] ?? 27400) - 35);
   const [resistance, setResistance] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 50);
   const [entry, setEntry] = useState((marketDefaults[profile.mainMarket] ?? 27400) + 5);
@@ -1466,9 +1547,10 @@ export default function App() {
         setPriceStatus("Broker stream unavailable. Start the local market server, then reconnect.");
       };
 
-      if (brokerConnection.platform === "Demo Broker") {
+      if (brokerConnection.platform === "Demo Broker" && canUseLocalMarketServer) {
         demoTimer = setInterval(() => {
-          fetch(`${marketServerUrl}/api/broker/demo/tick?symbol=${profile.mainMarket}`).catch(() => {
+          fetch(`${marketServerUrl}/api/broker/demo/tick?symbol=${profile.mainMarket}`).catch((error) => {
+            console.warn("[TradePilot] demo-tick →", `${marketServerUrl}/api/broker/demo/tick`, "→", error?.message || "fetch error");
             setPriceStatus("Demo broker tick unavailable. Start the local market server.");
           });
         }, 1000);
@@ -1482,88 +1564,118 @@ export default function App() {
 
 
     if (dataSource === "Market Data API" && !canUseLocalMarketServer) {
-      let cancelled = false;
+      const controller = new AbortController();
       const refreshServerQuote = async () => {
-        try {
-          const response = await fetch(`/api/market/quote?symbol=${encodeURIComponent(profile.mainMarket)}`);
-          const result = await response.json();
-          if (!response.ok || result.ok === false) throw new Error(result.error || "Market quote unavailable.");
-          if (cancelled) return;
-          const nextPrice = Number(result.price);
-          if (!Number.isFinite(nextPrice)) throw new Error("Market quote missing price.");
-          setPrice(nextPrice);
-          setQuote({
-            bid: Number(result.bid ?? nextPrice - 0.25),
-            ask: Number(result.ask ?? nextPrice + 0.25),
-          });
-          setLastUpdated(result.timestamp ? new Date(result.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString());
-          setPriceStatus(result.delayed ? "Using delayed futures quote. For exact live chart price, connect TradingView Alerts." : "");
-        } catch (error) {
-          if (cancelled) return;
-          setPriceStatus(`${error.message || "Market quote unavailable."} Connect TradingView Alerts for your exact live price.`);
+        if (typeof navigator !== "undefined" && navigator.onLine === false) {
+          setPriceStatus("You appear offline. Reconnecting…");
+          return;
         }
+        const result = await safeFetch(
+          `/api/market/quote?symbol=${encodeURIComponent(profile.mainMarket)}`,
+          { signal: controller.signal },
+          "market-quote",
+        );
+        if (result.aborted) return;
+        if (!result.ok || result.data?.ok === false) {
+          reportConnectionError("market-quote", result.error || result.data?.error || "Market quote unavailable.");
+          setPriceStatus("Market quote temporarily unavailable. Showing last known price.");
+          return;
+        }
+        clearConnectionError("market-quote");
+        const payload = result.data || {};
+        const nextPrice = Number(payload.price);
+        if (!Number.isFinite(nextPrice)) {
+          setPriceStatus("Market quote returned no price. Showing last known price.");
+          return;
+        }
+        setPrice(nextPrice);
+        setQuote({
+          bid: Number(payload.bid ?? nextPrice - 0.25),
+          ask: Number(payload.ask ?? nextPrice + 0.25),
+        });
+        setLastUpdated(payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString());
+        setPriceStatus(payload.delayed ? "Using delayed futures quote. For exact live chart price, connect TradingView Alerts." : "");
       };
 
       refreshServerQuote();
       const timer = setInterval(refreshServerQuote, 10000);
       return () => {
-        cancelled = true;
+        controller.abort();
         clearInterval(timer);
       };
     }
 
     if (dataSource === "TradingView Webhook") {
       let lastWebhookTimestampMs = 0;
+      const controller = new AbortController();
       const refreshTradingViewWebhook = async () => {
-        try {
-          const response = await fetch("/api/webhook/tradingview/latest");
-          const result = await response.json();
-          if (!response.ok || result.ok === false) throw new Error(result.error || "TradingView alerts unavailable.");
-          if (!result.signal) {
-            setWebhookDebug((current) => ({
-              ...current,
-              error: "",
-              received: "No",
-              updated: new Date().toLocaleTimeString(),
-            }));
-            setPriceStatus("Waiting for TradingView alert data.");
-            return;
-          }
-          const signalTime = result.signal.created_at || result.signal.timestamp;
-          const signalTimeMs = signalTime ? new Date(signalTime).getTime() : 0;
-          setWebhookDebug({
-            error: "",
-            price: String(result.signal.price ?? ""),
-            received: "Yes",
-            symbol: result.signal.symbol || "",
-            updated: signalTime ? new Date(signalTime).toLocaleTimeString() : new Date().toLocaleTimeString(),
-          });
-          if (signalTimeMs > 0 && signalTimeMs === lastWebhookTimestampMs) return;
-          lastWebhookTimestampMs = signalTimeMs;
-          applyAlert(result.signal);
-          const incomingSignal = String(result.signal.signal || "").toLowerCase();
-          const incomingScore = Number(result.signal.setupScore);
-          const isQualifiedSetup = incomingSignal === "trade_setup" && (!Number.isFinite(incomingScore) || incomingScore >= 75);
-          if (isQualifiedSetup) {
-            const grade = result.signal.grade || "B+";
-            const direction = result.signal.direction || "setup";
-            const dedupKey = `setup:${result.signal.symbol}:${result.signal.price}:${signalTimeMs}:${incomingSignal}`;
-            notify(`${grade} ${direction} setup received.`, "success", { category: NOTIFY_IMPORTANT, dedupKey });
-          }
-        } catch (error) {
+        if (typeof navigator !== "undefined" && navigator.onLine === false) {
+          setPriceStatus("You appear offline. Reconnecting…");
+          return;
+        }
+        const result = await safeFetch(
+          "/api/webhook/tradingview/latest",
+          { signal: controller.signal },
+          "tradingview-latest",
+        );
+        if (result.aborted) return;
+        if (!result.ok) {
+          reportConnectionError("tradingview", result.error || "TradingView feed unavailable.");
           setWebhookDebug((current) => ({
             ...current,
-            error: error.message || "TradingView webhook error",
+            error: result.error || "TradingView webhook error",
             updated: new Date().toLocaleTimeString(),
           }));
-          setPriceStatus(error.message || "TradingView alerts unavailable.");
-          notify(error.message || "TradingView webhook error", "failure", { category: NOTIFY_CRITICAL });
+          setPriceStatus("TradingView feed temporarily unavailable. Retrying…");
+          return;
+        }
+        const payload = result.data || {};
+        if (payload.ok === false) {
+          reportConnectionError("tradingview", payload.error || "TradingView feed error");
+          setPriceStatus("TradingView feed temporarily unavailable. Retrying…");
+          return;
+        }
+        clearConnectionError("tradingview");
+        if (!payload.signal) {
+          setWebhookDebug((current) => ({
+            ...current,
+            error: "",
+            received: "No",
+            updated: new Date().toLocaleTimeString(),
+          }));
+          setPriceStatus("Waiting for TradingView alert data.");
+          return;
+        }
+        const signal = payload.signal;
+        const signalTime = signal.created_at || signal.timestamp;
+        const signalTimeMs = signalTime ? new Date(signalTime).getTime() : 0;
+        setWebhookDebug({
+          error: "",
+          price: String(signal.price ?? ""),
+          received: "Yes",
+          symbol: signal.symbol || "",
+          updated: signalTime ? new Date(signalTime).toLocaleTimeString() : new Date().toLocaleTimeString(),
+        });
+        if (signalTimeMs > 0 && signalTimeMs === lastWebhookTimestampMs) return;
+        lastWebhookTimestampMs = signalTimeMs;
+        applyAlert(signal);
+        const incomingSignal = String(signal.signal || "").toLowerCase();
+        const incomingScore = Number(signal.setupScore);
+        const isQualifiedSetup = incomingSignal === "trade_setup" && (!Number.isFinite(incomingScore) || incomingScore >= 75);
+        if (isQualifiedSetup) {
+          const grade = signal.grade || "B+";
+          const direction = signal.direction || "setup";
+          const dedupKey = `setup:${signal.symbol}:${signal.price}:${signalTimeMs}:${incomingSignal}`;
+          notify(`${grade} ${direction} setup received.`, "success", { category: NOTIFY_IMPORTANT, dedupKey });
         }
       };
 
       refreshTradingViewWebhook();
-      const timer = setInterval(refreshTradingViewWebhook, 2500);
-      return () => clearInterval(timer);
+      const timer = setInterval(refreshTradingViewWebhook, 5000);
+      return () => {
+        controller.abort();
+        clearInterval(timer);
+      };
     }
 
     if ((dataSource === "Market Data API" || dataSource === "TradingView Webhook") && canUseLocalMarketServer) {
@@ -2307,27 +2419,34 @@ export default function App() {
   };
 
   const startDemoBroker = async () => {
-    try {
-      const response = await fetch(`${marketServerUrl}/api/broker/demo/start`, {
+    if (!isLocalDevHost()) {
+      applyDemoBrokerSnapshot(createLocalDemoBrokerSnapshot());
+      setPriceStatus("Local demo data is active. The market server only runs on localhost:8787.");
+      setActivePage("connections");
+      return;
+    }
+    const result = await safeFetch(
+      `${marketServerUrl}/api/broker/demo/start`,
+      {
         body: JSON.stringify({ symbol: profile.mainMarket }),
         headers: { "Content-Type": "application/json" },
         method: "POST",
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Demo broker unavailable.");
-
+      },
+      "demo-broker-start",
+    );
+    if (result.ok && result.data?.snapshot) {
       applyDemoBrokerSnapshot({
-        ...result.snapshot,
+        ...result.data.snapshot,
         connectionStatus: "Demo Broker Connected",
-        dailyPnl: result.snapshot.dailyPnl ?? result.snapshot.openPnl ?? 0,
+        dailyPnl: result.data.snapshot.dailyPnl ?? result.data.snapshot.openPnl ?? 0,
         source: "Simulated demo data",
       });
       setActivePage("connections");
-    } catch {
-      applyDemoBrokerSnapshot(createLocalDemoBrokerSnapshot());
-      setPriceStatus("Local demo data is active. Start the market server later for streaming ticks.");
-      setActivePage("connections");
+      return;
     }
+    applyDemoBrokerSnapshot(createLocalDemoBrokerSnapshot());
+    setPriceStatus("Local demo data is active. Start the market server later for streaming ticks.");
+    setActivePage("connections");
   };
 
 
@@ -2794,7 +2913,9 @@ export default function App() {
             chartPrefs={chartPrefs}
             chartResetSignal={chartResetSignal}
             chartTimeframe={chartTimeframe}
+            connectionError={connectionError}
             contracts={contracts}
+            isOnline={isOnline}
             onResetChart={onResetChart}
             setChartPrefs={setChartPrefs}
             setChartTimeframe={setChartTimeframe}
@@ -3762,7 +3883,7 @@ function CoachScoreGrid({ coachAction, disciplineGrade, nextStep, setupGrade, tr
   );
 }
 
-function SignalSourceCard({ activeSymbol, candleSeries, currentPrice, dataSource, priceSource, timeframe, tradingViewSignal }) {
+function SignalSourceCard({ activeSymbol, candleSeries, connectionError, currentPrice, dataSource, isOnline = true, priceSource, timeframe, tradingViewSignal }) {
   const lastCandle = Array.isArray(candleSeries) && candleSeries.length ? candleSeries[candleSeries.length - 1] : null;
   const sourceLabel = dataSource === "TradingView Webhook"
     ? "TradingView Webhook"
@@ -3780,13 +3901,37 @@ function SignalSourceCard({ activeSymbol, candleSeries, currentPrice, dataSource
   const priceMismatch = tradingViewSignal && Number.isFinite(tradingViewSignal.price)
     && Number.isFinite(Number(currentPrice))
     && Math.abs(tradingViewSignal.price - Number(currentPrice)) / Math.max(1, Math.abs(tradingViewSignal.price)) > 0.001;
+  let connectionLabel;
+  let connectionTone;
+  if (!isOnline) {
+    connectionLabel = "Offline — reconnecting…";
+    connectionTone = "#fca5a5";
+  } else if (connectionError) {
+    connectionLabel = `Retrying connection (${connectionError.count}× since ${new Date(connectionError.lastSeenAt).toLocaleTimeString()})`;
+    connectionTone = "#fbbf24";
+  } else if (dataSource === "TradingView Webhook" && !tradingViewSignal) {
+    connectionLabel = "Waiting for TradingView alert";
+    connectionTone = "#94a3b8";
+  } else if (dataSource === "TradingView Webhook") {
+    connectionLabel = "Connected · live feed";
+    connectionTone = "#10b981";
+  } else if (dataSource === "Demo Broker") {
+    connectionLabel = "Demo feed active";
+    connectionTone = "#94a3b8";
+  } else {
+    connectionLabel = "Manual mode";
+    connectionTone = "#94a3b8";
+  }
   return (
     <section style={{ background: "rgba(15,23,42,.78)", border: "1px solid #1e293b", borderRadius: "14px", display: "grid", gap: "8px", margin: "0 0 14px", padding: "12px 16px" }}>
-      <div style={{ alignItems: "center", display: "flex", gap: "10px", justifyContent: "space-between" }}>
+      <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "10px", justifyContent: "space-between" }}>
         <p style={{ ...styles.cardLabel, margin: 0 }}>Signal Source</p>
-        <span style={{ color: priceMismatch ? "#fca5a5" : "#10b981", fontSize: "12px", fontWeight: 800 }}>
-          {priceMismatch ? "Mismatch — webhook price differs from displayed price" : "In sync"}
-        </span>
+        <div style={{ alignItems: "center", display: "flex", gap: "10px" }}>
+          <span style={{ color: connectionTone, fontSize: "12px", fontWeight: 800 }}>{connectionLabel}</span>
+          <span style={{ color: priceMismatch ? "#fca5a5" : "#10b981", fontSize: "12px", fontWeight: 800 }}>
+            {priceMismatch ? "Mismatch — webhook price differs from displayed price" : "In sync"}
+          </span>
+        </div>
       </div>
       <div style={{ display: "grid", gap: "4px", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
         <div><span style={styles.cardLabel}>Active Symbol</span><strong style={{ color: "#e2e8f0", display: "block" }}>{activeSymbol || "—"}</strong></div>
@@ -4005,7 +4150,9 @@ function Dashboard({
   chartPrefs,
   chartResetSignal,
   chartTimeframe,
+  connectionError,
   contracts,
+  isOnline,
   onResetChart,
   setChartPrefs,
   setChartTimeframe,
@@ -4464,8 +4611,10 @@ function Dashboard({
       <SignalSourceCard
         activeSymbol={profile.mainMarket}
         candleSeries={liveCandleSeries}
+        connectionError={connectionError}
         currentPrice={price}
         dataSource={dataSource}
+        isOnline={isOnline}
         priceSource={priceSource}
         timeframe={activeTimeframe}
         tradingViewSignal={tradingViewSignal}
@@ -7527,6 +7676,10 @@ function DataSourcePage({ applyAlert }) {
   };
 
   const syncBrokerPreview = async () => {
+    if (!isLocalDevHost()) {
+      setMessage("Broker sync requires the local market server (127.0.0.1:8787) and is disabled in production.");
+      return;
+    }
     try {
       const parsed = JSON.parse(brokerText);
       const response = await fetch(`${marketServerUrl}/api/broker/sync`, {
@@ -8048,14 +8201,20 @@ function AlphaSignup() {
 
     const payload = { ...form, email, timestamp: new Date().toISOString() };
 
-    try {
-      const response = await fetch(`${marketServerUrl}/api/subscribe`, {
-        body: JSON.stringify(payload),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      });
-      if (!response.ok) throw new Error("Subscriber endpoint unavailable.");
-    } catch {
+    if (isLocalDevHost()) {
+      try {
+        const response = await fetch(`${marketServerUrl}/api/subscribe`, {
+          body: JSON.stringify(payload),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        });
+        if (!response.ok) throw new Error("Subscriber endpoint unavailable.");
+      } catch (error) {
+        console.warn("[TradePilot] subscribe →", `${marketServerUrl}/api/subscribe`, "→", error?.message || "fetch error");
+        const saved = loadList(subscriberStorageKey);
+        localStorage.setItem(subscriberStorageKey, JSON.stringify([payload, ...saved]));
+      }
+    } else {
       const saved = loadList(subscriberStorageKey);
       localStorage.setItem(subscriberStorageKey, JSON.stringify([payload, ...saved]));
     }
