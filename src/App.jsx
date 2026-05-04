@@ -2512,11 +2512,13 @@ export default function App() {
         {activePage === "dashboard" ? (
           <Dashboard
             activePosition={activePosition}
+            activeTimeframe={activeTimeframe}
             activeTrade={activeTrade}
             addJournalEntry={addJournalEntry}
             applyQuickSetup={applyQuickSetup}
             autoPrice={autoPrice}
             brokerConnection={brokerConnection}
+            candleHistory={candleHistory}
             contracts={contracts}
             dataSource={dataSource}
             direction={direction}
@@ -2530,10 +2532,12 @@ export default function App() {
             notify={notify}
             price={price}
             priceHistory={priceHistory}
+            priceSource={priceSource}
             priceStatus={priceStatus}
             plannedTrade={plannedTrade}
             profile={profile}
             quote={quote}
+            tradingViewSignal={tradingViewSignal}
             breakoutLevel={breakoutLevel}
             levelBias={levelBias}
             pullbackSupport={pullbackSupport}
@@ -3672,11 +3676,13 @@ function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resista
 
 function Dashboard({
   activePosition,
+  activeTimeframe,
   activeTrade,
   addJournalEntry,
   applyQuickSetup,
   autoPrice,
   brokerConnection,
+  candleHistory,
   contracts,
   dataSource,
   direction,
@@ -3690,6 +3696,7 @@ function Dashboard({
   notify,
   price,
   priceHistory,
+  priceSource,
   priceStatus,
   plannedTrade,
   profile,
@@ -3720,6 +3727,7 @@ function Dashboard({
   setSupport,
   streamerMode,
   support,
+  tradingViewSignal,
   updateDiscipline,
   updateProfile,
   watchlist,
