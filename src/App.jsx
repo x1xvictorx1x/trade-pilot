@@ -7223,7 +7223,7 @@ function ConnectionsPage({
   );
 }
 
-const TRADE_PILOT_PINE_INDICATOR = `//@version=5
+const TRADE_PILOT_PINE_INDICATOR = `//@version=6
 indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
 
 lookback        = input.int(20, "S/R Lookback Bars", minval=5, maxval=200)
