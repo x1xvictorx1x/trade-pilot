@@ -115,16 +115,19 @@ function ensurePriceLine(series, ref, key, options) {
 }
 
 export default function TradingChart({
+  autoFit = true,
   candles,
   currentPrice,
-  supportZone,
-  resistanceZone,
-  plan,
+  emptyMessage = "Waiting for TradingView candle data.",
+  height = 380,
+  lockPriceScale = false,
   markers,
+  plan,
+  resetSignal = 0,
+  resistanceZone,
+  supportZone,
   symbol,
   timeframe,
-  height = 380,
-  emptyMessage = "Waiting for TradingView candle data.",
 }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -169,13 +172,30 @@ export default function TradingChart({
       rightPriceScale: {
         borderColor: CHART_THEME.border,
         scaleMargins: { top: 0.15, bottom: 0.15 },
+        autoScale: true,
       },
       timeScale: {
         borderColor: CHART_THEME.border,
         timeVisible: true,
         secondsVisible: false,
+        rightOffset: 6,
       },
       crosshair: { mode: 1 },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
+      },
+      kineticScroll: {
+        touch: true,
+        mouse: false,
+      },
     });
     const series = chart.addSeries(CandlestickSeries, {
       upColor: CHART_THEME.up,
@@ -214,10 +234,47 @@ export default function TradingChart({
   useEffect(() => {
     if (!seriesRef.current) return;
     seriesRef.current.setData(candleData);
-    if (candleData.length && chartRef.current) {
+    if (candleData.length && chartRef.current && autoFit) {
       chartRef.current.timeScale().fitContent();
     }
-  }, [candleData]);
+  }, [candleData, autoFit]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.applyOptions({
+      handleScale: {
+        axisPressedMouseMove: !lockPriceScale,
+        mouseWheel: true,
+        pinch: true,
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: !lockPriceScale,
+      },
+      rightPriceScale: {
+        autoScale: lockPriceScale,
+      },
+    });
+  }, [lockPriceScale]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !resetSignal) return;
+    try {
+      chart.timeScale().fitContent();
+      chart.applyOptions({
+        rightPriceScale: {
+          autoScale: true,
+          scaleMargins: { top: 0.15, bottom: 0.15 },
+        },
+      });
+    } catch {
+      // ignore
+    }
+  }, [resetSignal]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -359,8 +416,8 @@ export default function TradingChart({
   }, [currentPrice, supportZone?.min, supportZone?.max, resistanceZone?.min, resistanceZone?.max, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner]);
 
   return (
-    <div style={{ position: "relative", width: "100%", height }}>
-      <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+    <div style={{ position: "relative", width: "100%", height, touchAction: "none" }}>
+      <div ref={containerRef} style={{ width: "100%", height: "100%", touchAction: "none" }} />
       {usingDemo ? (
         <div
           style={{

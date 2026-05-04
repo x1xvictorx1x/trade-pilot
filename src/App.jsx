@@ -36,6 +36,24 @@ const connectionModeStorageKey = "tradePilotConnectionMode";
 const candleHistoryStorageKey = "tradePilotCandleHistory";
 const notificationPrefsStorageKey = "tradePilotNotificationPrefs";
 const chartTimeframeStorageKey = "tradePilotChartTimeframe";
+const chartPrefsStorageKey = "tradePilotChartPrefs";
+
+const defaultChartPrefs = {
+  autoFit: true,
+  lockPriceScale: false,
+};
+
+function loadChartPrefs() {
+  try {
+    const raw = localStorage.getItem(chartPrefsStorageKey);
+    if (!raw) return { ...defaultChartPrefs };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return { ...defaultChartPrefs };
+    return { ...defaultChartPrefs, ...parsed };
+  } catch {
+    return { ...defaultChartPrefs };
+  }
+}
 
 const CHART_TIMEFRAME_OPTIONS = [
   { value: "1", label: "1m" },
@@ -1027,6 +1045,9 @@ export default function App() {
       return "5";
     }
   });
+  const [chartPrefs, setChartPrefs] = useState(() => loadChartPrefs());
+  const [chartResetSignal, setChartResetSignal] = useState(0);
+  const onResetChart = () => setChartResetSignal((current) => current + 1);
   const lastSignalDedupRef = useRef("");
   const lastNonCriticalNotifyRef = useRef(0);
   const [support, setSupport] = useState((marketDefaults[profile.mainMarket] ?? 27400) - 35);
@@ -1067,6 +1088,14 @@ export default function App() {
       // ignore
     }
   }, [chartTimeframe]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(chartPrefsStorageKey, JSON.stringify(chartPrefs));
+    } catch {
+      // ignore
+    }
+  }, [chartPrefs]);
 
   useEffect(() => {
     if (dataSource !== "TradingView Webhook") return;
@@ -2762,8 +2791,12 @@ export default function App() {
             autoPrice={autoPrice}
             brokerConnection={brokerConnection}
             candleHistory={candleHistory}
+            chartPrefs={chartPrefs}
+            chartResetSignal={chartResetSignal}
             chartTimeframe={chartTimeframe}
             contracts={contracts}
+            onResetChart={onResetChart}
+            setChartPrefs={setChartPrefs}
             setChartTimeframe={setChartTimeframe}
             dataSource={dataSource}
             direction={direction}
@@ -3969,8 +4002,12 @@ function Dashboard({
   autoPrice,
   brokerConnection,
   candleHistory,
+  chartPrefs,
+  chartResetSignal,
   chartTimeframe,
   contracts,
+  onResetChart,
+  setChartPrefs,
   setChartTimeframe,
   dataSource,
   direction,
@@ -4267,10 +4304,14 @@ function Dashboard({
     alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
       candleSeries={liveCandleSeries}
+      chartPrefs={chartPrefs}
       chartTimeframe={chartTimeframe}
       currentPrice={price}
       entry={hasPlan ? visualPlan.entry : undefined}
+      onResetChart={onResetChart}
+      resetSignal={chartResetSignal}
       runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
+      setChartPrefs={setChartPrefs}
       setChartTimeframe={setChartTimeframe}
       stop={hasPlan ? visualPlan.stop : undefined}
       support={enrichedZoneDetection.supportLevel ?? support}
@@ -4567,10 +4608,14 @@ function Dashboard({
 
       {effectiveLayout.chart ? <TradeChartPanel
         candleSeries={liveCandleSeries}
+        chartPrefs={chartPrefs}
         chartTimeframe={chartTimeframe}
         currentPrice={price}
         entry={visualPlan.entry}
+        onResetChart={onResetChart}
+        resetSignal={chartResetSignal}
         runner={visualPlan.runner ?? visualPlan.target}
+        setChartPrefs={setChartPrefs}
         setChartTimeframe={setChartTimeframe}
         stop={visualPlan.stop}
         support={enrichedZoneDetection.supportLevel ?? support}
@@ -6513,7 +6558,7 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   return `Grade D setup (${score}/100). Do not trade: ${issue || "setup does not meet quality threshold"}.`;
 }
 
-function TradeChartPanel({ candleSeries, chartTimeframe, currentPrice, entry, runner, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
+function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPrice, entry, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
   const supportZone = Number.isFinite(Number(zoneDetection.supportZoneLow)) && Number.isFinite(Number(zoneDetection.supportZoneHigh))
     ? { min: Number(zoneDetection.supportZoneLow), max: Number(zoneDetection.supportZoneHigh) }
     : Number.isFinite(Number(support))
@@ -6564,18 +6609,70 @@ function TradeChartPanel({ candleSeries, chartTimeframe, currentPrice, entry, ru
               </button>
             );
           })}
+          <span style={{ flex: 1 }} />
+          {onResetChart ? (
+            <button
+              onClick={onResetChart}
+              style={{
+                background: "rgba(15,23,42,.6)",
+                border: "1px solid #334155",
+                borderRadius: "8px",
+                color: "#e2e8f0",
+                cursor: "pointer",
+                fontSize: "12px",
+                fontWeight: 800,
+                padding: "6px 10px",
+              }}
+              title="Refit candles and reset price scale"
+            >Reset View</button>
+          ) : null}
+          {setChartPrefs ? (
+            <>
+              <button
+                onClick={() => setChartPrefs((current) => ({ ...current, autoFit: !current.autoFit }))}
+                style={{
+                  background: chartPrefs?.autoFit ? "#0f766e" : "rgba(15,23,42,.6)",
+                  border: `1px solid ${chartPrefs?.autoFit ? "#14b8a6" : "#334155"}`,
+                  borderRadius: "8px",
+                  color: "#e2e8f0",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: 800,
+                  padding: "6px 10px",
+                }}
+                title="Keep chart fit to latest candles"
+              >{chartPrefs?.autoFit ? "Auto Fit ✓" : "Auto Fit"}</button>
+              <button
+                onClick={() => setChartPrefs((current) => ({ ...current, lockPriceScale: !current.lockPriceScale }))}
+                style={{
+                  background: chartPrefs?.lockPriceScale ? "#7c2d12" : "rgba(15,23,42,.6)",
+                  border: `1px solid ${chartPrefs?.lockPriceScale ? "#f97316" : "#334155"}`,
+                  borderRadius: "8px",
+                  color: "#e2e8f0",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: 800,
+                  padding: "6px 10px",
+                }}
+                title="Prevent vertical price-scale dragging"
+              >{chartPrefs?.lockPriceScale ? "🔒 Price" : "🔓 Price"}</button>
+            </>
+          ) : null}
         </div>
       ) : null}
       <div className="tradepilot-chart-wrap" style={styles.chartWrap}>
         <TradingChart
+          autoFit={chartPrefs?.autoFit !== false}
           candles={candles}
           currentPrice={currentPrice}
-          supportZone={supportZone}
-          resistanceZone={resistanceZone}
+          height={360}
+          lockPriceScale={chartPrefs?.lockPriceScale === true}
           plan={plan}
+          resetSignal={resetSignal || 0}
+          resistanceZone={resistanceZone}
+          supportZone={supportZone}
           symbol={symbol}
           timeframe={timeframe}
-          height={360}
         />
       </div>
     </section>
