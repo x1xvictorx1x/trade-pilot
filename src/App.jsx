@@ -6180,6 +6180,48 @@ function ConnectionsPage({
   );
 }
 
+const TRADE_PILOT_PINE_INDICATOR = `//@version=5
+indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
+
+lookback = input.int(20, "S/R Lookback Bars", minval=5, maxval=200)
+
+support    = ta.lowest(low,   lookback)
+resistance = ta.highest(high, lookback)
+
+priorSupport    = support[1]
+priorResistance = resistance[1]
+
+bullishBreakout     = not na(priorResistance) and close > priorResistance and close[1] <= priorResistance
+bearishBreakdown    = not na(priorSupport)    and close < priorSupport    and close[1] >= priorSupport
+supportBounce       = not na(priorSupport)    and low  <= priorSupport    and close > priorSupport
+resistanceRejection = not na(priorResistance) and high >= priorResistance and close < priorResistance
+
+longSetup  = bullishBreakout or supportBounce
+shortSetup = bearishBreakdown or resistanceRejection
+
+plot(resistance, "Resistance", color=color.new(color.red,   0), linewidth=2, style=plot.style_stepline)
+plot(support,    "Support",    color=color.new(color.green, 0), linewidth=2, style=plot.style_stepline)
+
+plotshape(longSetup,  "Long Setup",  shape.triangleup,   location.belowbar, color.lime, size=size.small, text="LONG")
+plotshape(shortSetup, "Short Setup", shape.triangledown, location.abovebar, color.red,  size=size.small, text="SHORT")
+
+priceUpdateMsg = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"price_update","timestamp":"{{timenow}}"}'
+longSetupMsg   = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"long_setup","timestamp":"{{timenow}}"}'
+shortSetupMsg  = '{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"short_setup","timestamp":"{{timenow}}"}'
+
+alertcondition(true,       title="TradePilot Price Update", message=priceUpdateMsg)
+alertcondition(longSetup,  title="TradePilot Long Setup",   message=longSetupMsg)
+alertcondition(shortSetup, title="TradePilot Short Setup",  message=shortSetupMsg)
+`;
+
+const TRADE_PILOT_ALERT_MESSAGE = `{
+ "symbol": "{{ticker}}",
+ "price": {{close}},
+ "timeframe": "{{interval}}",
+ "signal": "price_update",
+ "timestamp": "{{timenow}}"
+}`;
+
 function TradingViewAlertWizard({ onClose, onSendTest }) {
   const [step, setStep] = useState(1);
   const [market, setMarket] = useState("NQ");
@@ -6187,11 +6229,6 @@ function TradingViewAlertWizard({ onClose, onSendTest }) {
   const [testStatus, setTestStatus] = useState("");
   const webhookUrl = "https://tradepilottool.com/api/webhook/tradingview";
   const TOTAL_STEPS = 6;
-
-  const indicatorCode = `//@version=5
-indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
-// Paste the full indicator from:
-// tradepilottool.com/indicator`;
 
   const copyText = async (text) => {
     try {
@@ -6234,40 +6271,54 @@ indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
 
         {step === 1 ? (
           <section style={styles.subPanel}>
-            <p style={styles.cardLabel}>Step 1 — Open Pine Script Editor</p>
-            <h3 style={styles.sectionTitle}>Paste the Indicator</h3>
-            <p style={styles.muted}>In TradingView, open the Pine Script Editor (bottom panel). Create a new script, delete all existing code, then paste the Trade Pilot Signal Engine code.</p>
-            <pre style={{ ...styles.sharePreview, fontSize: "11px" }}>{indicatorCode}</pre>
+            <p style={styles.cardLabel}>Step 1 — Open Pine Editor</p>
+            <h3 style={styles.sectionTitle}>Open the TradingView Pine Editor</h3>
+            <p style={styles.muted}>In TradingView, open the chart for the symbol you want to trade, then click <strong>Pine Editor</strong> in the bottom panel. If you have an existing draft open, click the <strong>+</strong> tab and choose <strong>New blank indicator</strong>. Delete every line of starter code so the editor is empty.</p>
             <div style={styles.installBannerActions}>
-              <button onClick={() => copyText(indicatorCode)} style={styles.secondaryButton}>Copy Snippet</button>
+              <button onClick={() => window.open("https://www.tradingview.com/chart/", "_blank", "noopener,noreferrer")} style={styles.secondaryButton}>Open TradingView</button>
               <button onClick={() => window.open("https://www.tradingview.com/pine-script-docs/en/v5/Introduction.html", "_blank", "noopener,noreferrer")} style={styles.secondaryButton}>Pine Editor Guide</button>
-            </div>
-            <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
-              The full indicator code is in <strong>tradingview/TradePilotSignalEngine.pine</strong> in your Trade Pilot project files.
             </div>
           </section>
         ) : null}
 
         {step === 2 ? (
           <section style={styles.subPanel}>
-            <p style={styles.cardLabel}>Step 2 — Add to Chart</p>
-            <h3 style={styles.sectionTitle}>Publish the Indicator</h3>
-            <p style={styles.muted}>After pasting the code in the Pine Editor, click <strong>Add to chart</strong> (play button at top-right of the editor). The indicator will appear on your chart showing:</p>
-            <ul style={{ ...styles.muted, paddingLeft: "20px", lineHeight: "2" }}>
-              <li>Orange line — Resistance level</li>
-              <li>Teal line — Support level</li>
-              <li>Blue / Purple lines — EMA 9 and EMA 21</li>
-              <li>Triangle shapes — Breakout signals</li>
-              <li>X shapes — Rejection / bounce signals</li>
-            </ul>
+            <p style={styles.cardLabel}>Step 2 — Paste Full Indicator Code</p>
+            <h3 style={styles.sectionTitle}>Paste the Trade Pilot Signal Engine</h3>
+            <p style={styles.muted}>Copy the full indicator below and paste it into the empty Pine Editor.</p>
+            <pre style={{ ...styles.sharePreview, fontSize: "11px", maxHeight: "260px", overflow: "auto" }}>{TRADE_PILOT_PINE_INDICATOR}</pre>
+            <div style={styles.installBannerActions}>
+              <button onClick={() => copyText(TRADE_PILOT_PINE_INDICATOR)} style={styles.settingsButton}>Copy Full Indicator</button>
+            </div>
+            <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
+              The same code lives in <strong>tradingview/TradePilotSignalEngine.pine</strong> in your Trade Pilot repository.
+            </div>
           </section>
         ) : null}
 
         {step === 3 ? (
           <section style={styles.subPanel}>
-            <p style={styles.cardLabel}>Step 3 — Choose Market</p>
-            <h3 style={styles.sectionTitle}>Select Your Instrument</h3>
-            <p style={styles.muted}>Load your futures contract in TradingView, then select it here so the test signal uses the right symbol.</p>
+            <p style={styles.cardLabel}>Step 3 — Save Script</p>
+            <h3 style={styles.sectionTitle}>Save the Script</h3>
+            <p style={styles.muted}>Click <strong>Save</strong> in the top-right corner of the Pine Editor. Name the script <strong>Trade Pilot Signal Engine</strong> and confirm. TradingView will compile it — you should see "Saved successfully" and zero errors.</p>
+            <ul style={{ ...styles.muted, paddingLeft: "20px", lineHeight: "1.9" }}>
+              <li>If you see a compile error, re-copy the full indicator from Step 2.</li>
+              <li>Saving lets TradingView find the script later when you create alerts.</li>
+            </ul>
+          </section>
+        ) : null}
+
+        {step === 4 ? (
+          <section style={styles.subPanel}>
+            <p style={styles.cardLabel}>Step 4 — Add to Chart</p>
+            <h3 style={styles.sectionTitle}>Add the Indicator to Your Chart</h3>
+            <p style={styles.muted}>Click <strong>Add to chart</strong> (play icon at the top of the Pine Editor). The indicator will overlay your chart and you should see:</p>
+            <ul style={{ ...styles.muted, paddingLeft: "20px", lineHeight: "1.9" }}>
+              <li>Red stepline — resistance (highest high over 20 bars)</li>
+              <li>Green stepline — support (lowest low over 20 bars)</li>
+              <li>Green up triangles — long setups (breakouts and bounces)</li>
+              <li>Red down triangles — short setups (breakdowns and rejections)</li>
+            </ul>
             <div style={styles.sourceGrid}>
               {["NQ", "MNQ", "ES", "MES"].map((option) => (
                 <button key={option} onClick={() => setMarket(option)} style={{ ...styles.sourceButton, borderColor: market === option ? "#38bdf8" : "#334155" }}>
@@ -6279,17 +6330,17 @@ indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
           </section>
         ) : null}
 
-        {step === 4 ? (
+        {step === 5 ? (
           <section style={styles.subPanel}>
-            <p style={styles.cardLabel}>Step 4 — Create Alert</p>
-            <h3 style={styles.sectionTitle}>Set Up the Alert</h3>
-            <p style={styles.muted}>In TradingView, right-click the chart and select <strong>Add alert</strong>. Use these settings:</p>
+            <p style={styles.cardLabel}>Step 5 — Create Alert</p>
+            <h3 style={styles.sectionTitle}>Create the TradingView Alert</h3>
+            <p style={styles.muted}>Right-click the chart and choose <strong>Add alert</strong> (or press Alt + A). Use these settings:</p>
             <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "12px" }}>
               {[
                 ["Condition", "Trade Pilot Signal Engine"],
-                ["Trigger", "Any alert() function call"],
-                ["Notifications", "Webhook URL (check the box)"],
-                ["Message", "(leave blank — the script sends JSON automatically)"],
+                ["Alert", "TradePilot Price Update / Long Setup / Short Setup"],
+                ["Trigger", "Once Per Bar Close"],
+                ["Expiration", "Open-ended"],
               ].map(([label, value]) => (
                 <div key={label} style={{ display: "flex", gap: "10px", alignItems: "flex-start" }}>
                   <span style={{ color: "#94a3b8", fontSize: "12px", minWidth: "110px", paddingTop: "2px" }}>{label}</span>
@@ -6297,35 +6348,36 @@ indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true)
                 </div>
               ))}
             </div>
-          </section>
-        ) : null}
-
-        {step === 5 ? (
-          <section style={styles.subPanel}>
-            <p style={styles.cardLabel}>Step 5 — Set Webhook URL</p>
-            <h3 style={styles.sectionTitle}>Copy the Webhook URL</h3>
-            <p style={styles.muted}>Paste this URL into the Webhook URL field of your TradingView alert.</p>
-            <pre style={styles.sharePreview}>{webhookUrl}</pre>
-            <button onClick={() => copyText(webhookUrl)} style={styles.settingsButton}>Copy Webhook URL</button>
-            <p style={{ ...styles.muted, marginTop: "12px" }}>Click <strong>Create</strong> in TradingView to save the alert. The indicator will now send price, support, resistance, and signal type to Trade Pilot on every detected event.</p>
+            <p style={{ ...styles.muted, marginTop: "12px" }}>Create one alert per condition you want to receive (Price Update for live price, Long/Short Setup for tradeable signals).</p>
           </section>
         ) : null}
 
         {step === 6 ? (
           <section style={styles.subPanel}>
-            <p style={styles.cardLabel}>Step 6 — Test and Verify</p>
-            <h3 style={styles.sectionTitle}>Send a Test Signal</h3>
-            <p style={styles.muted}>Click the button below to send a test signal for <strong>{market}</strong>. The dashboard should update instantly with a price and signal type.</p>
+            <p style={styles.cardLabel}>Step 6 — Paste Webhook URL and Alert Message</p>
+            <h3 style={styles.sectionTitle}>Wire Up the Webhook</h3>
+            <p style={styles.muted}>In the alert's <strong>Notifications</strong> tab, enable <strong>Webhook URL</strong> and paste:</p>
+            <pre style={styles.sharePreview}>{webhookUrl}</pre>
             <div style={styles.installBannerActions}>
+              <button onClick={() => copyText(webhookUrl)} style={styles.settingsButton}>Copy Webhook URL</button>
+            </div>
+            <p style={{ ...styles.muted, marginTop: "14px" }}>Then in the alert's <strong>Message</strong> field paste the JSON template below (the indicator already supplies the right one for each condition — copy this if you build a custom alert):</p>
+            <pre style={{ ...styles.sharePreview, fontSize: "11px" }}>{TRADE_PILOT_ALERT_MESSAGE}</pre>
+            <div style={styles.installBannerActions}>
+              <button onClick={() => copyText(TRADE_PILOT_ALERT_MESSAGE)} style={styles.secondaryButton}>Copy Alert Message</button>
+              <button onClick={() => window.open("https://www.tradingview.com/chart/", "_blank", "noopener,noreferrer")} style={styles.secondaryButton}>Open TradingView</button>
+            </div>
+            <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
+              <strong>Verify:</strong> click <strong>Create</strong> in TradingView, then send a test signal below. The dashboard should update instantly with the price for <strong>{market}</strong>.
+            </div>
+            <div style={{ ...styles.installBannerActions, marginTop: "10px" }}>
               <button disabled={sendingTest} onClick={handleSendTest} style={{ ...styles.settingsButton, opacity: sendingTest ? 0.7 : 1 }}>
                 {sendingTest ? "Sending..." : `Send Test Signal (${market})`}
               </button>
-              <button onClick={() => window.open("https://www.tradingview.com/chart/", "_blank", "noopener,noreferrer")} style={styles.secondaryButton}>Open TradingView</button>
             </div>
             {testStatus ? (
               <div style={{ ...styles.coachPrompt, marginTop: "12px" }}>{testStatus}</div>
             ) : null}
-            <p style={{ ...styles.muted, marginTop: "16px" }}>Once a live alert fires from TradingView, the dashboard chart will update with real prices and the "Demo chart" note will disappear.</p>
           </section>
         ) : null}
 
