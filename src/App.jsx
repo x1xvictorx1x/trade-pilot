@@ -65,6 +65,42 @@ function loadCandleHistory() {
   }
 }
 
+function aggregatePriceTick(history, key, price, timestamp, timeframe) {
+  if (!key || !Number.isFinite(Number(price))) return history;
+  const ts = timestamp ? new Date(timestamp).getTime() : Date.now();
+  if (!Number.isFinite(ts)) return history;
+  const bucketMs = 60 * 1000;
+  const bucket = Math.floor(ts / bucketMs) * bucketMs;
+  const numericPrice = Number(price);
+  const existing = Array.isArray(history[key]) ? history[key] : [];
+  const last = existing[existing.length - 1];
+  const lastBucket = last ? Math.floor(new Date(last.timestamp).getTime() / bucketMs) * bucketMs : null;
+  if (last && lastBucket === bucket) {
+    const updated = {
+      ...last,
+      high: Math.max(Number(last.high), numericPrice),
+      low: Math.min(Number(last.low), numericPrice),
+      close: numericPrice,
+      synthetic: last.synthetic !== false,
+    };
+    const next = [...existing.slice(0, -1), updated];
+    return { ...history, [key]: next };
+  }
+  const newCandle = {
+    open: numericPrice,
+    high: numericPrice,
+    low: numericPrice,
+    close: numericPrice,
+    volume: null,
+    timeframe: timeframe || "1",
+    timestamp: new Date(bucket).toISOString(),
+    synthetic: true,
+  };
+  let next = [...existing, newCandle];
+  if (next.length > MAX_CANDLES_PER_KEY) next = next.slice(next.length - MAX_CANDLES_PER_KEY);
+  return { ...history, [key]: next };
+}
+
 function appendCandle(history, key, candle) {
   if (!key || !candle) return history;
   const open = Number(candle.open);
@@ -1759,6 +1795,9 @@ export default function App() {
     if (candleFromAlert) {
       const key = candleHistoryKey(nextMarket, tfRaw);
       if (key) setCandleHistory((current) => appendCandle(current, key, { ...candleFromAlert, timestamp: signalTime, timeframe: tfRaw || candleFromAlert.timeframe || null }));
+    } else if (Number.isFinite(nextPrice)) {
+      const key = candleHistoryKey(nextMarket, tfRaw || "1");
+      if (key) setCandleHistory((current) => aggregatePriceTick(current, key, nextPrice, signalTime, tfRaw || "1"));
     }
     const hasSupport = Number.isFinite(Number(alert.support));
     const hasResistance = Number.isFinite(Number(alert.resistance));
@@ -6334,9 +6373,6 @@ function TradeChartPanel({ candleSeries, currentPrice, entry, runner, stop, supp
           height={360}
         />
       </div>
-      {candles.length === 0 ? (
-        <p style={styles.chartNote}>Waiting for TradingView candle data. Add the Trade Pilot indicator and create a Price Update alert.</p>
-      ) : null}
     </section>
   );
 }
