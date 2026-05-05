@@ -136,6 +136,7 @@ export default function TradingChart({
   const resistanceAreaRef = useRef(null);
   const markersRef = useRef(null);
   const priceLinesRef = useRef({});
+  const hasInitiallyFitRef = useRef(false);
 
   const realCandles = useMemo(() => buildCandleSeriesData(candles), [candles]);
   const usingDemo = realCandles.length < 20;
@@ -234,8 +235,9 @@ export default function TradingChart({
   useEffect(() => {
     if (!seriesRef.current) return;
     seriesRef.current.setData(candleData);
-    if (candleData.length && chartRef.current && autoFit) {
+    if (!hasInitiallyFitRef.current && candleData.length && chartRef.current && autoFit) {
       chartRef.current.timeScale().fitContent();
+      hasInitiallyFitRef.current = true;
     }
   }, [candleData, autoFit]);
 
@@ -271,6 +273,7 @@ export default function TradingChart({
           scaleMargins: { top: 0.15, bottom: 0.15 },
         },
       });
+      hasInitiallyFitRef.current = true;
     } catch {
       // ignore
     }

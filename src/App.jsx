@@ -143,7 +143,7 @@ function pickFinestCandleSeries(history, symbol) {
 const NOTIFY_CRITICAL = "critical";
 const NOTIFY_IMPORTANT = "important";
 const NOTIFY_INFO = "info";
-const NOTIFY_THROTTLE_MS = 30_000;
+const NOTIFY_THROTTLE_MS = 60_000;
 
 const defaultNotificationPrefs = {
   toast: true,
@@ -1094,6 +1094,7 @@ export default function App() {
   const [connectionError, setConnectionError] = useState(null);
   const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine !== false : true);
   const connectionErrorRef = useRef(null);
+  const wasConnectedRef = useRef(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -1543,6 +1544,7 @@ export default function App() {
 
       stream.onerror = () => {
         stream.close();
+        wasConnectedRef.current = false;
         setBrokerConnection((current) => ({ ...current, connected: false, connectionStatus: "Stream disconnected" }));
         setPriceStatus("Broker stream unavailable. Start the local market server, then reconnect.");
       };
@@ -1606,7 +1608,7 @@ export default function App() {
     }
 
     if (dataSource === "TradingView Webhook") {
-      let lastWebhookTimestampMs = 0;
+      let lastWebhookKey = "";
       const controller = new AbortController();
       const refreshTradingViewWebhook = async () => {
         if (typeof navigator !== "undefined" && navigator.onLine === false) {
@@ -1656,17 +1658,23 @@ export default function App() {
           symbol: signal.symbol || "",
           updated: signalTime ? new Date(signalTime).toLocaleTimeString() : new Date().toLocaleTimeString(),
         });
-        if (signalTimeMs > 0 && signalTimeMs === lastWebhookTimestampMs) return;
-        lastWebhookTimestampMs = signalTimeMs;
-        applyAlert(signal);
         const incomingSignal = String(signal.signal || "").toLowerCase();
         const incomingScore = Number(signal.setupScore);
-        const isQualifiedSetup = incomingSignal === "trade_setup" && (!Number.isFinite(incomingScore) || incomingScore >= 75);
-        if (isQualifiedSetup) {
-          const grade = signal.grade || "B+";
+        const incomingGrade = signal.grade ? String(signal.grade).toUpperCase() : "";
+        const dedupeKey = `${signal.symbol || ""}:${signal.price ?? ""}:${signalTimeMs}:${incomingSignal}`;
+        if (dedupeKey === lastWebhookKey) return;
+        lastWebhookKey = dedupeKey;
+        applyAlert(signal);
+        const isEliteSetup = incomingSignal === "trade_setup"
+          && Number.isFinite(incomingScore)
+          && incomingScore >= 85
+          && (incomingGrade === "A" || incomingGrade === "B+");
+        if (isEliteSetup) {
           const direction = signal.direction || "setup";
-          const dedupKey = `setup:${signal.symbol}:${signal.price}:${signalTimeMs}:${incomingSignal}`;
-          notify(`${grade} ${direction} setup received.`, "success", { category: NOTIFY_IMPORTANT, dedupKey });
+          notify(`${incomingGrade} ${direction} setup received.`, "success", {
+            category: NOTIFY_IMPORTANT,
+            dedupKey: `setup:${dedupeKey}`,
+          });
         }
       };
 
@@ -2250,10 +2258,14 @@ export default function App() {
         });
       });
     }
+    if (!wasConnectedRef.current) {
+      wasConnectedRef.current = true;
+      notify("TradingView feed active.", "success", { category: NOTIFY_IMPORTANT, dedupKey: "tv-feed-active" });
+    }
     setBrokerConnection((current) => ({
       ...current,
       connected: true,
-      connectionStatus: "TradingView signal received",
+      connectionStatus: "TradingView feed active",
       error: "",
       lastSignalAt: signalTime,
       platform: "TradingView Webhook",
@@ -2386,6 +2398,7 @@ export default function App() {
     setDataSource("Manual Mode");
     updateProfile("accountType", "Personal Trading Account");
     updateProfile("fundedPlatform", "Manual Mode");
+    wasConnectedRef.current = false;
     setBrokerConnection((current) => ({
       ...current,
       connected: false,
@@ -2404,6 +2417,7 @@ export default function App() {
     setAutoPrice(true);
     setDataSource("TradingView Webhook");
     updateProfile("fundedPlatform", "TradingView Webhook");
+    wasConnectedRef.current = false;
     setBrokerConnection((current) => ({
       ...current,
       connected: false,
@@ -2414,7 +2428,6 @@ export default function App() {
     }));
     setFastMessage("Waiting for TradingView alert data.");
     setPriceStatus("");
-    notify("Waiting for TradingView Alerts");
     setActivePage("connections");
   };
 
@@ -3893,7 +3906,9 @@ function SignalSourceCard({ activeSymbol, candleSeries, connectionError, current
         ? "Market Data API (delayed)"
         : "Manual";
   const lastSignalText = tradingViewSignal
-    ? `${tradingViewSignal.signal || "price_update"} · ${Number(tradingViewSignal.price).toFixed(2)}${tradingViewSignal.timestamp ? ` · ${new Date(tradingViewSignal.timestamp).toLocaleTimeString()}` : ""}`
+    ? (tradingViewSignal.timestamp
+        ? `Last signal: ${new Date(tradingViewSignal.timestamp).toLocaleTimeString()} · ${Number(tradingViewSignal.price).toFixed(2)}`
+        : `Last signal: ${Number(tradingViewSignal.price).toFixed(2)}`)
     : "Not received yet";
   const lastCandleText = lastCandle
     ? `O ${Number(lastCandle.open).toFixed(2)} · H ${Number(lastCandle.high).toFixed(2)} · L ${Number(lastCandle.low).toFixed(2)} · C ${Number(lastCandle.close).toFixed(2)}${lastCandle.timestamp ? ` · ${new Date(lastCandle.timestamp).toLocaleTimeString()}` : ""}`
@@ -3913,7 +3928,7 @@ function SignalSourceCard({ activeSymbol, candleSeries, connectionError, current
     connectionLabel = "Waiting for TradingView alert";
     connectionTone = "#94a3b8";
   } else if (dataSource === "TradingView Webhook") {
-    connectionLabel = "Connected · live feed";
+    connectionLabel = "TradingView feed active";
     connectionTone = "#10b981";
   } else if (dataSource === "Demo Broker") {
     connectionLabel = "Demo feed active";
@@ -6997,8 +7012,8 @@ function getConnectionStateMessage({ brokerConnection, dataSource, profile }) {
   if (platform === "Demo Broker" || dataSource === "Demo Broker") return "Demo Broker Connected - simulated data.";
   if (platform === "Manual Mode" || dataSource === "Manual Mode") return "Manual Mode Active - enter price and levels yourself.";
   if (platform === "TradingView Webhook" || dataSource === "TradingView Webhook") {
-    return brokerConnection?.connectionStatus === "TradingView signal received"
-      ? "TradingView signal received"
+    return brokerConnection?.connectionStatus === "TradingView feed active"
+      ? "TradingView feed active"
       : "Waiting for TradingView alert data.";
   }
   if (platform?.includes("Tradovate") || profile.fundedPlatform === "Tradovate") return "Tradovate API credentials are not configured yet. Add Vercel env vars first.";
@@ -8181,7 +8196,7 @@ function QAChecklistPage({ activeTrade, brokerConnection, dataSource, isSupabase
     ["Webhook latest signal received", webhookDebug?.received === "Yes"],
     ["Demo broker works", brokerConnection?.platform === "Demo Broker" || dataSource === "Demo Broker"],
     ["Manual mode works", dataSource === "Manual Mode"],
-    ["TradingView mode works", dataSource === "TradingView Webhook" && brokerConnection?.connectionStatus === "TradingView signal received"],
+    ["TradingView mode works", dataSource === "TradingView Webhook" && brokerConnection?.connectionStatus === "TradingView feed active"],
     ["Layout saved", Boolean(layoutPrefs?.mode)],
     ["Sound enabled", profile.soundAlerts !== false],
     ["Active trade detected", Boolean(activeTrade?.isActive)],

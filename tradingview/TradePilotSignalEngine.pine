@@ -27,10 +27,11 @@ emaFastLen      = input.int(9,     "EMA Fast",                                mi
 emaSlowLen      = input.int(21,    "EMA Slow",                                minval=5,   maxval=200,  group="Engine")
 atrLen          = input.int(14,    "ATR Length (stop buffer)",                minval=2,   maxval=100,  group="Engine")
 bufferAtrMult   = input.float(0.25,"Stop Buffer (× ATR)",                     minval=0.0, maxval=2.0,  step=0.05, group="Engine")
-minSetupScore   = input.int(75,    "Min Setup Score (B+ = 75, A = 85)",       minval=0,   maxval=100,  group="Engine")
-minRR           = input.float(2.0, "Min Reward / Risk",                       minval=1.0, maxval=10.0, step=0.1,  group="Engine")
-maxPerSession   = input.int(2,     "Max signals per direction per session",   minval=1,   maxval=10,   group="Engine")
-cooldownBars    = input.int(20,    "Cooldown bars between signals",           minval=0,   maxval=200,  group="Engine")
+minSetupScore   = input.int(85,    "Min Setup Score (elite = 85)",            minval=0,   maxval=100,  group="Engine")
+minRR           = input.float(2.5, "Min Reward / Risk",                       minval=1.0, maxval=10.0, step=0.1,  group="Engine")
+maxPerSession   = input.int(1,     "Max signals per direction per session",   minval=1,   maxval=10,   group="Engine")
+cooldownBars    = input.int(30,    "Cooldown bars between signals",           minval=0,   maxval=200,  group="Engine")
+oppositeCooldown = input.int(5,    "Min bars between opposite-direction signals", minval=0, maxval=50, group="Engine")
 sendPriceUpdate = input.bool(true, "Stream price_update on every bar close",  group="Engine")
 
 // ============================================================
@@ -65,8 +66,25 @@ inMidRange     = close > priorSupport + rng * 0.30 and close < priorResistance -
 bullishConfirm = close > open
 bearishConfirm = close < open
 
+// Pin-bar style strong rejection: dominant wick into the level + bullish/bearish body.
+barRange  = math.max(high - low, syminfo.mintick)
+body      = math.abs(close - open)
+lowerWick = math.min(open, close) - low
+upperWick = high - math.max(open, close)
+
+strongBullishRejection = bullishConfirm and lowerWick >= body and lowerWick >= barRange * 0.4
+strongBearishRejection = bearishConfirm and upperWick >= body and upperWick >= barRange * 0.4
+
+// Close strength: closing in the top/bottom 35% of the bar's range.
+closeStrengthLong  = (close - low) >= barRange * 0.65
+closeStrengthShort = (high - close) >= barRange * 0.65
+
+// No-trade structural filters: tight chop and narrow S/R range.
+tightChop = barRange < atr * 0.5
+narrowSR  = rng      < atr * 3.0
+
 // ============================================================
-// TRIGGER PATHS — support/resistance touch + breakout retest
+// TRIGGER PATHS — strong rejection at level OR clean structure break + retest
 // ============================================================
 oldResLvl = priorResistance[lookback]
 oldSupLvl = priorSupport[lookback]
@@ -74,10 +92,14 @@ oldSupLvl = priorSupport[lookback]
 brokeAboveRecently = not na(oldResLvl) and oldResLvl > 0 and ta.highest(high, lookback) > oldResLvl
 brokeBelowRecently = not na(oldSupLvl) and oldSupLvl > 0 and ta.lowest(low,  lookback) < oldSupLvl
 
-longSupportBounce    = nearSupport    and bullishConfirm and low  <= priorSupport    + zoneWidth * 4
-longBreakoutRetest   = brokeAboveRecently and bullishConfirm and math.abs(close - oldResLvl) <= rng * 0.10
-shortResRejection    = nearResistance and bearishConfirm and high >= priorResistance - zoneWidth * 4
-shortBreakdownRetest = brokeBelowRecently and bearishConfirm and math.abs(close - oldSupLvl) <= rng * 0.10
+// "Clean" break = a closing bar pushed beyond the old level by at least one ATR buffer.
+cleanBreakAbove = brokeAboveRecently and ta.highest(close, lookback) >= oldResLvl + buffer
+cleanBreakBelow = brokeBelowRecently and ta.lowest(close,  lookback) <= oldSupLvl - buffer
+
+longSupportBounce    = nearSupport    and strongBullishRejection and closeStrengthLong  and low  <= priorSupport    + zoneWidth * 4
+longBreakoutRetest   = cleanBreakAbove and bullishConfirm           and closeStrengthLong  and math.abs(close - oldResLvl) <= rng * 0.10 and close >= oldResLvl
+shortResRejection    = nearResistance and strongBearishRejection and closeStrengthShort and high >= priorResistance - zoneWidth * 4
+shortBreakdownRetest = cleanBreakBelow and bearishConfirm           and closeStrengthShort and math.abs(close - oldSupLvl) <= rng * 0.10 and close <= oldSupLvl
 
 longTriggered  = longSupportBounce or longBreakoutRetest
 shortTriggered = shortResRejection or shortBreakdownRetest
@@ -123,11 +145,12 @@ shortSetupScore   = shortProximity + shortTrend + shortRRScore + shortMidScore +
 
 // ============================================================
 // QUALIFICATION — pick at most ONE active side per bar
-// All hard filters: trigger fired, not on opposite zone, not mid-range,
-// >= minRR, EMA trend permissive, score >= minSetupScore (75 = B+).
+// Hard filters: trigger fired, not on opposite zone, not mid-range,
+// not tight chop, not narrow S/R, >= minRR, strict EMA trend, score >= minSetupScore.
+// (Opposite-direction cooldown is enforced below alongside same-side cooldown.)
 // ============================================================
-qualifiedLong  = longTriggered  and not nearResistance and not inMidRange and longRR  >= minRR and emaFast >= emaSlow and longSetupScore  >= minSetupScore
-qualifiedShort = shortTriggered and not nearSupport    and not inMidRange and shortRR >= minRR and emaFast <= emaSlow and shortSetupScore >= minSetupScore
+qualifiedLong  = longTriggered  and not nearResistance and not inMidRange and not tightChop and not narrowSR and longRR  >= minRR and emaFast > emaSlow and longSetupScore  >= minSetupScore
+qualifiedShort = shortTriggered and not nearSupport    and not inMidRange and not tightChop and not narrowSR and shortRR >= minRR and emaFast < emaSlow and shortSetupScore >= minSetupScore
 
 activeLong  = qualifiedLong  and longSetupScore  >  shortSetupScore
 activeShort = qualifiedShort and shortSetupScore >  longSetupScore
@@ -144,11 +167,13 @@ if session.isfirstbar
     sessionLongCount  := 0
     sessionShortCount := 0
 
-cooldownLongOk  = (bar_index - lastLongBar)  >= cooldownBars
-cooldownShortOk = (bar_index - lastShortBar) >= cooldownBars
+cooldownLongOk     = (bar_index - lastLongBar)  >= cooldownBars
+cooldownShortOk    = (bar_index - lastShortBar) >= cooldownBars
+oppositeOkForLong  = (bar_index - lastShortBar) >= oppositeCooldown
+oppositeOkForShort = (bar_index - lastLongBar)  >= oppositeCooldown
 
-fireLong  = activeLong  and cooldownLongOk  and sessionLongCount  < maxPerSession
-fireShort = activeShort and cooldownShortOk and sessionShortCount < maxPerSession
+fireLong  = activeLong  and cooldownLongOk  and oppositeOkForLong  and sessionLongCount  < maxPerSession
+fireShort = activeShort and cooldownShortOk and oppositeOkForShort and sessionShortCount < maxPerSession
 
 if fireLong
     lastLongBar := bar_index
@@ -211,7 +236,7 @@ if barstate.islast
 // ============================================================
 if showSignals and fireLong
     label.new(bar_index, low,
-              text="LONG\n(" + longGrade + ")",
+              text="LONG " + longGrade,
               style=label.style_label_up,
               color=color.new(color.green, 10),
               textcolor=color.white,
@@ -220,7 +245,7 @@ if showSignals and fireLong
 
 if showSignals and fireShort
     label.new(bar_index, high,
-              text="SHORT\n(" + shortGrade + ")",
+              text="SHORT " + shortGrade,
               style=label.style_label_down,
               color=color.new(color.red, 10),
               textcolor=color.white,
