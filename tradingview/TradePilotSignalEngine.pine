@@ -1,14 +1,14 @@
 //@version=6
-indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true, max_labels_count=50)
+indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true, max_labels_count=50, max_lines_count=50)
 
 // ============================================================
-// Trade Pilot Signal Engine — minimal/clean variant
-// Version: 4.0
+// Trade Pilot Signal Engine — pro-level
+// Version: 5.0
 //
-// One active idea at a time. Only the strongest side per bar
-// qualifies, with a cooldown between signals and a session cap so
-// the chart never spams. price_update still streams every bar for
-// the dashboard.
+// Sends complete trade setups (entry, stop, tp1, tp2, runner,
+// score, grade, reason) for B+ or A grade only. One active
+// idea, ATR-based stop buffer, session cap + cooldown so the
+// chart never spams. price_update streams every bar.
 //
 // Setup:
 //   1. Pine Editor -> paste -> Save -> Add to chart.
@@ -22,24 +22,29 @@ indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true, max_labe
 // ============================================================
 // INPUTS — Engine
 // ============================================================
-lookback        = input.int(20, "S/R Lookback Bars", minval=5, maxval=200, group="Engine")
-emaFastLen      = input.int(9,  "EMA Fast", minval=2, maxval=50,           group="Engine")
-emaSlowLen      = input.int(21, "EMA Slow", minval=5, maxval=200,          group="Engine")
-minSetupScore   = input.int(75, "Min Setup Score (B+ = 75)", minval=0, maxval=100, group="Engine")
-maxPerSession   = input.int(2,  "Max signals per direction per session", minval=1, maxval=10, group="Engine")
-cooldownBars    = input.int(8,  "Cooldown bars between signals", minval=0, maxval=200, group="Engine")
-sendPriceUpdate = input.bool(true, "Stream price_update on every bar close", group="Engine")
+lookback        = input.int(20,    "S/R Lookback Bars",                       minval=5,   maxval=200,  group="Engine")
+emaFastLen      = input.int(9,     "EMA Fast",                                minval=2,   maxval=50,   group="Engine")
+emaSlowLen      = input.int(21,    "EMA Slow",                                minval=5,   maxval=200,  group="Engine")
+atrLen          = input.int(14,    "ATR Length (stop buffer)",                minval=2,   maxval=100,  group="Engine")
+bufferAtrMult   = input.float(0.25,"Stop Buffer (× ATR)",                     minval=0.0, maxval=2.0,  step=0.05, group="Engine")
+minSetupScore   = input.int(75,    "Min Setup Score (B+ = 75, A = 85)",       minval=0,   maxval=100,  group="Engine")
+minRR           = input.float(2.0, "Min Reward / Risk",                       minval=1.0, maxval=10.0, step=0.1,  group="Engine")
+maxPerSession   = input.int(2,     "Max signals per direction per session",   minval=1,   maxval=10,   group="Engine")
+cooldownBars    = input.int(20,    "Cooldown bars between signals",           minval=0,   maxval=200,  group="Engine")
+sendPriceUpdate = input.bool(true, "Stream price_update on every bar close",  group="Engine")
 
 // ============================================================
 // INPUTS — Display
 // ============================================================
-showSignals = input.bool(true,  "Show Signals", group="Display")
-showZones   = input.bool(true,  "Show Zones",   group="Display")
-showEmas    = input.bool(false, "Show EMAs",    group="Display")
-focusMode   = input.bool(false, "Focus Mode (hide everything except active idea + price + key level)", group="Display")
+showSignals     = input.bool(true,  "Show Signals",       group="Display")
+showZones       = input.bool(true,  "Show Zones",         group="Display")
+showEmas        = input.bool(false, "Show EMAs",          group="Display")
+showTradeLevels = input.bool(true,  "Show Trade Levels",  group="Display")
+showCoach       = input.bool(true,  "Show Coach Overlay", group="Display")
+focusMode       = input.bool(false, "Focus Mode (active idea + price + key level only)", group="Display")
 
 // ============================================================
-// SUPPORT, RESISTANCE, TREND
+// SUPPORT, RESISTANCE, TREND, ATR
 // ============================================================
 support         = ta.lowest(low,   lookback)
 resistance      = ta.highest(high, lookback)
@@ -47,6 +52,8 @@ priorSupport    = nz(support[1],    support)
 priorResistance = nz(resistance[1], resistance)
 emaFast         = ta.ema(close, emaFastLen)
 emaSlow         = ta.ema(close, emaSlowLen)
+atr             = ta.atr(atrLen)
+buffer          = atr * bufferAtrMult
 
 rng       = math.max(priorResistance - priorSupport, syminfo.mintick * 4)
 zoneWidth = rng * 0.025
@@ -55,39 +62,73 @@ nearSupport    = math.abs(close - priorSupport)    <= rng * 0.18
 nearResistance = math.abs(close - priorResistance) <= rng * 0.18
 inMidRange     = close > priorSupport + rng * 0.30 and close < priorResistance - rng * 0.30
 
-bullishConfirm = close > open and close >= priorSupport    and low  <= priorSupport    + zoneWidth
-bearishConfirm = close < open and close <= priorResistance and high >= priorResistance - zoneWidth
+bullishConfirm = close > open
+bearishConfirm = close < open
+
+// ============================================================
+// TRIGGER PATHS — support/resistance touch + breakout retest
+// ============================================================
+oldResLvl = priorResistance[lookback]
+oldSupLvl = priorSupport[lookback]
+
+brokeAboveRecently = not na(oldResLvl) and oldResLvl > 0 and ta.highest(high, lookback) > oldResLvl
+brokeBelowRecently = not na(oldSupLvl) and oldSupLvl > 0 and ta.lowest(low,  lookback) < oldSupLvl
+
+longSupportBounce    = nearSupport    and bullishConfirm and low  <= priorSupport    + zoneWidth * 4
+longBreakoutRetest   = brokeAboveRecently and bullishConfirm and math.abs(close - oldResLvl) <= rng * 0.10
+shortResRejection    = nearResistance and bearishConfirm and high >= priorResistance - zoneWidth * 4
+shortBreakdownRetest = brokeBelowRecently and bearishConfirm and math.abs(close - oldSupLvl) <= rng * 0.10
+
+longTriggered  = longSupportBounce or longBreakoutRetest
+shortTriggered = shortResRejection or shortBreakdownRetest
+
+longReason  = longSupportBounce ? "support bounce" : longBreakoutRetest ? "breakout retest" : ""
+shortReason = shortResRejection ? "resistance rejection" : shortBreakdownRetest ? "breakdown retest" : ""
+
+// ============================================================
+// TRADE LEVELS — entry / stop / tp1 / tp2 / runner
+// ============================================================
+longEntry    = close
+longStop     = priorSupport - buffer
+longRiskPts  = math.max(longEntry - longStop, syminfo.mintick)
+longTp1      = longEntry + longRiskPts * 2
+longTp2      = longEntry + longRiskPts * 3
+longRunner   = priorResistance
+longRR       = (priorResistance - longEntry) / longRiskPts
+
+shortEntry   = close
+shortStop    = priorResistance + buffer
+shortRiskPts = math.max(shortStop - shortEntry, syminfo.mintick)
+shortTp1     = shortEntry - shortRiskPts * 2
+shortTp2     = shortEntry - shortRiskPts * 3
+shortRunner  = priorSupport
+shortRR      = (shortEntry - priorSupport) / shortRiskPts
 
 // ============================================================
 // SCORES (0-100)
 // ============================================================
 longProximity    = nearSupport ? 25.0 : 0.0
 longTrend        = emaFast > emaSlow ? 20.0 : (emaFast < emaSlow ? 0.0 : 10.0)
-longRisk         = math.max(close - priorSupport, syminfo.mintick)
-longReward       = priorResistance - close
-longRR           = longRisk > 0 ? longReward / longRisk : 0.0
 longRRScore      = longRR >= 2.0 ? 25.0 : (longRR >= 1.5 ? 18.0 : (longRR >= 1.0 ? 10.0 : 0.0))
 longMidScore     = inMidRange ? 0.0 : 15.0
-longConfirmScore = bullishConfirm ? 15.0 : 0.0
+longConfirmScore = longTriggered ? 15.0 : 0.0
 longSetupScore   = longProximity + longTrend + longRRScore + longMidScore + longConfirmScore
 
 shortProximity    = nearResistance ? 25.0 : 0.0
 shortTrend        = emaFast < emaSlow ? 20.0 : (emaFast > emaSlow ? 0.0 : 10.0)
-shortRisk         = math.max(priorResistance - close, syminfo.mintick)
-shortReward       = close - priorSupport
-shortRR           = shortRisk > 0 ? shortReward / shortRisk : 0.0
 shortRRScore      = shortRR >= 2.0 ? 25.0 : (shortRR >= 1.5 ? 18.0 : (shortRR >= 1.0 ? 10.0 : 0.0))
 shortMidScore     = inMidRange ? 0.0 : 15.0
-shortConfirmScore = bearishConfirm ? 15.0 : 0.0
+shortConfirmScore = shortTriggered ? 15.0 : 0.0
 shortSetupScore   = shortProximity + shortTrend + shortRRScore + shortMidScore + shortConfirmScore
 
 // ============================================================
 // QUALIFICATION — pick at most ONE active side per bar
+// All hard filters: trigger fired, not on opposite zone, not mid-range,
+// >= minRR, EMA trend permissive, score >= minSetupScore (75 = B+).
 // ============================================================
-qualifiedLong  = longSetupScore  >= minSetupScore and not nearResistance
-qualifiedShort = shortSetupScore >= minSetupScore and not nearSupport
+qualifiedLong  = longTriggered  and not nearResistance and not inMidRange and longRR  >= minRR and emaFast >= emaSlow and longSetupScore  >= minSetupScore
+qualifiedShort = shortTriggered and not nearSupport    and not inMidRange and shortRR >= minRR and emaFast <= emaSlow and shortSetupScore >= minSetupScore
 
-// Stronger side wins; ties go to neither.
 activeLong  = qualifiedLong  and longSetupScore  >  shortSetupScore
 activeShort = qualifiedShort and shortSetupScore >  longSetupScore
 
@@ -120,20 +161,54 @@ longGrade  = longSetupScore  >= 85 ? "A" : "B+"
 shortGrade = shortSetupScore >= 85 ? "A" : "B+"
 
 // ============================================================
+// CURRENT IDEA — sticky until a new signal of either side fires
+// ============================================================
+var string currentIdea  = "NO TRADE"
+var string currentGrade = ""
+var color  currentColor = color.new(color.gray, 30)
+
+if fireLong
+    currentIdea  := "LONG"
+    currentGrade := longGrade
+    currentColor := color.new(color.green, 20)
+if fireShort
+    currentIdea  := "SHORT"
+    currentGrade := shortGrade
+    currentColor := color.new(color.red, 20)
+
+isLongIdea  = currentIdea == "LONG"
+isShortIdea = currentIdea == "SHORT"
+
+// ============================================================
 // PLOTS — minimal, locale-clean
 // ============================================================
-zonesVisible = showZones and not focusMode
-emasVisible  = showEmas  and not focusMode
+showResistance = showZones and (not focusMode or isShortIdea)
+showSupport    = showZones and (not focusMode or isLongIdea)
+emasVisible    = showEmas  and not focusMode
 
-plot(zonesVisible ? resistance : na, "Resistance", color=color.new(color.red,    65), linewidth=1)
-plot(zonesVisible ? support    : na, "Support",    color=color.new(color.green,  65), linewidth=1)
-plot(emasVisible  ? emaFast    : na, "EMA Fast",   color=color.new(color.blue,   75), linewidth=1)
-plot(emasVisible  ? emaSlow    : na, "EMA Slow",   color=color.new(color.purple, 75), linewidth=1)
+plot(showResistance ? resistance : na, "Resistance", color=color.new(color.red,    65), linewidth=1)
+plot(showSupport    ? support    : na, "Support",    color=color.new(color.green,  65), linewidth=1)
+plot(emasVisible    ? emaFast    : na, "EMA Fast",   color=color.new(color.blue,   75), linewidth=1)
+plot(emasVisible    ? emaSlow    : na, "EMA Slow",   color=color.new(color.purple, 75), linewidth=1)
 
-// Focus mode dims the background so the active idea pops.
-bgcolor(focusMode ? color.new(#020617, 80) : na)
+bgcolor(focusMode ? color.new(#020617, 88) : na)
 
-// Use label.new for dynamic LONG / SHORT text with grade subline.
+// ============================================================
+// COACH OVERLAY — top-right state pill
+// ============================================================
+var table coachTable = table.new(position.top_right, 1, 1, border_width=1, border_color=color.new(color.gray, 60))
+
+if barstate.islast
+    if showCoach
+        coachText = currentIdea == "NO TRADE" ? "NO TRADE" : currentIdea + " (" + currentGrade + ")"
+        coachBg   = currentIdea == "NO TRADE" ? color.new(color.gray, 30) : currentColor
+        table.cell(coachTable, 0, 0, coachText, text_color=color.white, bgcolor=coachBg, text_size=size.normal)
+    else
+        table.clear(coachTable, 0, 0, 0, 0)
+
+// ============================================================
+// SIGNAL LABELS — single LONG / SHORT badge per fire
+// ============================================================
 if showSignals and fireLong
     label.new(bar_index, low,
               text="LONG\n(" + longGrade + ")",
@@ -153,18 +228,53 @@ if showSignals and fireShort
               yloc=yloc.abovebar)
 
 // ============================================================
-// ALERTS — single-line str.format, no multi-line concat
+// TRADE LEVEL LINES — re-drawn on each new signal
 // ============================================================
-ts = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
+var line entryLine  = na
+var line stopLine   = na
+var line tp1Line    = na
+var line tp2Line    = na
+var line runnerLine = na
+
+if showTradeLevels and (fireLong or fireShort)
+    line.delete(entryLine)
+    line.delete(stopLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(runnerLine)
+
+    eVal  = fireLong ? longEntry  : shortEntry
+    sVal  = fireLong ? longStop   : shortStop
+    t1Val = fireLong ? longTp1    : shortTp1
+    t2Val = fireLong ? longTp2    : shortTp2
+    rnVal = fireLong ? longRunner : shortRunner
+
+    entryLine  := line.new(bar_index, eVal,  bar_index + 1, eVal,  color=color.new(color.yellow, 10), width=1, style=line.style_solid,  extend=extend.right)
+    stopLine   := line.new(bar_index, sVal,  bar_index + 1, sVal,  color=color.new(color.red,    20), width=1, style=line.style_dashed, extend=extend.right)
+    tp1Line    := line.new(bar_index, t1Val, bar_index + 1, t1Val, color=color.new(color.green,  30), width=1, style=line.style_dotted, extend=extend.right)
+    tp2Line    := line.new(bar_index, t2Val, bar_index + 1, t2Val, color=color.new(color.green,  10), width=1, style=line.style_dotted, extend=extend.right)
+    runnerLine := line.new(bar_index, rnVal, bar_index + 1, rnVal, color=color.new(color.aqua,   40), width=1, style=line.style_dotted, extend=extend.right)
+
+if not showTradeLevels
+    line.delete(entryLine)
+    line.delete(stopLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(runnerLine)
+
+// ============================================================
+// ALERTS — pure string concatenation only
+// ============================================================
+ts = str.tostring(time)
 
 if sendPriceUpdate
-    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","open":{3,number,#.##########},"high":{4,number,#.##########},"low":{5,number,#.##########},"close":{6,number,#.##########},"volume":{7,number,#.##},"signal":"price_update","timestamp":"{8}"}', syminfo.ticker, close, timeframe.period, open, high, low, close, volume, ts), alert.freq_once_per_bar_close)
+    alert('{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"timeframe":"' + timeframe.period + '","open":' + str.tostring(open) + ',"high":' + str.tostring(high) + ',"low":' + str.tostring(low) + ',"close":' + str.tostring(close) + ',"volume":' + str.tostring(volume) + ',"signal":"price_update","timestamp":"' + ts + '"}', alert.freq_once_per_bar_close)
 
 if fireLong
-    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"long","setupScore":{3,number,#},"grade":"{4}","timestamp":"{5}"}', syminfo.ticker, close, timeframe.period, longSetupScore, longGrade, ts), alert.freq_once_per_bar_close)
+    alert('{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"timeframe":"' + timeframe.period + '","signal":"trade_setup","direction":"long","entry":' + str.tostring(longEntry) + ',"stop":' + str.tostring(longStop) + ',"tp1":' + str.tostring(longTp1) + ',"tp2":' + str.tostring(longTp2) + ',"runner":' + str.tostring(longRunner) + ',"setupScore":' + str.tostring(longSetupScore) + ',"grade":"' + longGrade + '","reason":"' + longReason + '","timestamp":"' + ts + '"}', alert.freq_once_per_bar_close)
 
 if fireShort
-    alert(str.format('{"symbol":"{0}","price":{1,number,#.##########},"timeframe":"{2}","signal":"trade_setup","direction":"short","setupScore":{3,number,#},"grade":"{4}","timestamp":"{5}"}', syminfo.ticker, close, timeframe.period, shortSetupScore, shortGrade, ts), alert.freq_once_per_bar_close)
+    alert('{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"timeframe":"' + timeframe.period + '","signal":"trade_setup","direction":"short","entry":' + str.tostring(shortEntry) + ',"stop":' + str.tostring(shortStop) + ',"tp1":' + str.tostring(shortTp1) + ',"tp2":' + str.tostring(shortTp2) + ',"runner":' + str.tostring(shortRunner) + ',"setupScore":' + str.tostring(shortSetupScore) + ',"grade":"' + shortGrade + '","reason":"' + shortReason + '","timestamp":"' + ts + '"}', alert.freq_once_per_bar_close)
 
 // ============================================================
 // NAMED ALERTCONDITIONS

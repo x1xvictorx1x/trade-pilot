@@ -49,10 +49,16 @@ export function normalizeSignal(payload = {}) {
   const resistance = toNumber(payload.resistance);
   const entry = toNumber(payload.entry);
   const stop = toNumber(payload.stop);
+  const tp1 = toNumber(payload.tp1);
+  const tp2 = toNumber(payload.tp2);
+  const runner = toNumber(payload.runner);
   if (support !== null) signal.support = support;
   if (resistance !== null) signal.resistance = resistance;
   if (entry !== null) signal.entry = entry;
   if (stop !== null) signal.stop = stop;
+  if (tp1 !== null) signal.tp1 = tp1;
+  if (tp2 !== null) signal.tp2 = tp2;
+  if (runner !== null) signal.runner = runner;
   if (payload.bias) signal.bias = String(payload.bias).trim().toLowerCase();
   if (payload.timeframe) signal.timeframe = String(payload.timeframe).trim();
   if (payload.signal) signal.signal = String(payload.signal).trim().toLowerCase();
@@ -60,6 +66,7 @@ export function normalizeSignal(payload = {}) {
   const setupScore = toNumber(payload.setupScore);
   if (setupScore !== null) signal.setupScore = setupScore;
   if (payload.grade) signal.grade = String(payload.grade).trim().toUpperCase();
+  if (payload.reason) signal.reason = String(payload.reason).trim();
 
   const open = toNumber(payload.open);
   const high = toNumber(payload.high);
@@ -159,6 +166,10 @@ export async function getLatestSignal(symbol = "") {
         direction: raw.direction ? String(raw.direction).trim().toLowerCase() : null,
         setupScore: toNumber(raw.setupScore),
         grade: raw.grade ? String(raw.grade).trim().toUpperCase() : null,
+        tp1: toNumber(raw.tp1),
+        tp2: toNumber(raw.tp2),
+        runner: toNumber(raw.runner),
+        reason: raw.reason ? String(raw.reason).trim() : null,
         candle,
       };
     }
