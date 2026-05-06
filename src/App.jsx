@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -321,32 +321,110 @@ function pickCandleSeries(history, symbol, timeframe) {
   return [];
 }
 
-function detectAutoSRZones(candleSeries) {
-  const candles = Array.isArray(candleSeries) ? candleSeries.slice(-SR_LOOKBACK_CANDLES) : [];
-  if (candles.length < 6) {
-    return {
-      supportZone: null,
-      resistanceZone: null,
-      sessionHigh: null,
-      sessionLow: null,
-      trend: "neutral",
-      candleCount: candles.length,
-    };
+function getMinZoneDistance(market, timeframeMinutes) {
+  const tf = Math.max(1, Math.round(Number(timeframeMinutes) || 1));
+  const sym = String(market || "").toUpperCase();
+  const nqDefault = tf >= 15 ? 50 : tf >= 5 ? 30 : 20;
+  if (!sym || sym === "NQ" || sym === "MNQ" || sym.startsWith("NQ") || sym.startsWith("MNQ")) {
+    return nqDefault;
   }
+  if (sym === "ES" || sym === "MES") return tf >= 15 ? 12 : tf >= 5 ? 8 : 5;
+  if (sym === "YM" || sym === "MYM") return tf >= 15 ? 200 : tf >= 5 ? 120 : 80;
+  if (sym === "RTY" || sym === "M2K") return tf >= 15 ? 8 : tf >= 5 ? 5 : 3;
+  if (sym === "CL") return tf >= 15 ? 0.5 : tf >= 5 ? 0.3 : 0.2;
+  if (sym === "GC") return tf >= 15 ? 12 : tf >= 5 ? 8 : 5;
+  if (sym.startsWith("BTC")) return tf >= 15 ? 400 : tf >= 5 ? 250 : 150;
+  if (sym.startsWith("ETH")) return tf >= 15 ? 25 : tf >= 5 ? 15 : 10;
+  if (sym === "SPY" || sym === "QQQ") return tf >= 15 ? 1.5 : tf >= 5 ? 1 : 0.5;
+  return nqDefault;
+}
+
+function validateZones({ supportZone, resistanceZone, currentPrice, market, timeframeMinutes }) {
+  const price = Number(currentPrice);
+  if (!supportZone || !resistanceZone || !Number.isFinite(price) || price <= 0) {
+    return { valid: false, reason: "Insufficient data to detect zones." };
+  }
+  const supportCenter = Number(supportZone.center);
+  const resistanceCenter = Number(resistanceZone.center);
+  if (!Number.isFinite(supportCenter) || !Number.isFinite(resistanceCenter)) {
+    return { valid: false, reason: "Invalid zone values." };
+  }
+  if (supportCenter >= price) {
+    return { valid: false, reason: "Support is at or above current price." };
+  }
+  if (resistanceCenter <= price) {
+    return { valid: false, reason: "Resistance is at or below current price." };
+  }
+  const minDist = getMinZoneDistance(market, timeframeMinutes);
+  if (resistanceCenter - supportCenter < minDist) {
+    return { valid: false, reason: `Zones too compressed (need ${minDist} pts on this timeframe).` };
+  }
+  return { valid: true, reason: "" };
+}
+
+function detectAutoSRZones(candleSeries, options = {}) {
+  const { currentPrice, market, timeframeMinutes } = options;
+  const candles = Array.isArray(candleSeries) ? candleSeries.slice(-SR_LOOKBACK_CANDLES) : [];
+  const empty = {
+    supportZone: null,
+    resistanceZone: null,
+    sessionHigh: null,
+    sessionLow: null,
+    trend: "neutral",
+    candleCount: candles.length,
+    zonesValid: false,
+    zoneReason: "Insufficient candle data to detect structure.",
+    compressed: false,
+  };
+  if (candles.length < 12) return empty;
+
   let highest = -Infinity;
   let lowest = Infinity;
+  let rangeSum = 0;
+  let rangeCount = 0;
   for (const c of candles) {
     if (Number.isFinite(c.high) && c.high > highest) highest = c.high;
     if (Number.isFinite(c.low) && c.low < lowest) lowest = c.low;
+    if (Number.isFinite(c.high) && Number.isFinite(c.low)) {
+      rangeSum += c.high - c.low;
+      rangeCount += 1;
+    }
   }
-  const range = Math.max(highest - lowest, 0.0001);
-  const zoneWidth = Math.max(range * 0.025, 0.0001);
-  const lowsSorted = candles.map((c) => c.low).filter(Number.isFinite).sort((a, b) => a - b);
-  const highsSorted = candles.map((c) => c.high).filter(Number.isFinite).sort((a, b) => b - a);
-  const lowQuantile = lowsSorted[Math.min(lowsSorted.length - 1, Math.floor(lowsSorted.length * 0.1))];
-  const highQuantile = highsSorted[Math.min(highsSorted.length - 1, Math.floor(highsSorted.length * 0.1))];
-  const supportCenter = lowQuantile ?? lowest;
-  const resistanceCenter = highQuantile ?? highest;
+  if (!Number.isFinite(highest) || !Number.isFinite(lowest)) return empty;
+  const sessionRange = Math.max(highest - lowest, 0.0001);
+  const avgCandleRange = rangeCount > 0 ? rangeSum / rangeCount : sessionRange / 20;
+
+  // 3-bar swing pivots
+  const swingHighs = [];
+  const swingLows = [];
+  for (let i = 2; i < candles.length - 2; i += 1) {
+    const c = candles[i];
+    if (!Number.isFinite(c.high) || !Number.isFinite(c.low)) continue;
+    if (c.high >= candles[i - 1].high && c.high >= candles[i - 2].high && c.high >= candles[i + 1].high && c.high >= candles[i + 2].high) {
+      swingHighs.push({ price: c.high, idx: i });
+    }
+    if (c.low <= candles[i - 1].low && c.low <= candles[i - 2].low && c.low <= candles[i + 1].low && c.low <= candles[i + 2].low) {
+      swingLows.push({ price: c.low, idx: i });
+    }
+  }
+
+  const refPrice = Number.isFinite(Number(currentPrice)) && Number(currentPrice) > 0
+    ? Number(currentPrice)
+    : Number(candles.at(-1)?.close);
+
+  const highsAbove = swingHighs.filter((s) => s.price > refPrice).map((s) => s.price);
+  const lowsBelow = swingLows.filter((s) => s.price < refPrice).map((s) => s.price);
+
+  // Resistance: lowest swing high above price (closest meaningful), fall back to session high
+  let resistanceCenter = highsAbove.length ? Math.min(...highsAbove) : (highest > refPrice ? highest : null);
+  // Support: highest swing low below price, fall back to session low
+  let supportCenter = lowsBelow.length ? Math.max(...lowsBelow) : (lowest < refPrice ? lowest : null);
+
+  if (!Number.isFinite(resistanceCenter) || !Number.isFinite(supportCenter)) {
+    return { ...empty, sessionHigh: highest, sessionLow: lowest, zoneReason: "No qualifying swing structure on this timeframe." };
+  }
+
+  const zoneWidth = Math.max(avgCandleRange * 0.6, sessionRange * 0.01, 0.0001);
   const supportZone = {
     min: Number((supportCenter - zoneWidth / 2).toFixed(4)),
     max: Number((supportCenter + zoneWidth / 2).toFixed(4)),
@@ -357,15 +435,37 @@ function detectAutoSRZones(candleSeries) {
     max: Number((resistanceCenter + zoneWidth / 2).toFixed(4)),
     center: Number(resistanceCenter.toFixed(4)),
   };
+
   const half = Math.floor(candles.length / 2);
-  const firstHalf = candles.slice(0, half);
-  const secondHalf = candles.slice(half);
   const avg = (arr) => arr.reduce((sum, c) => sum + ((c.high + c.low) / 2), 0) / Math.max(1, arr.length);
-  const firstAvg = avg(firstHalf);
-  const secondAvg = avg(secondHalf);
+  const firstAvg = avg(candles.slice(0, half));
+  const secondAvg = avg(candles.slice(half));
   let trend = "neutral";
-  if (secondAvg > firstAvg + range * 0.05) trend = "bullish";
-  else if (secondAvg < firstAvg - range * 0.05) trend = "bearish";
+  if (secondAvg > firstAvg + sessionRange * 0.05) trend = "bullish";
+  else if (secondAvg < firstAvg - sessionRange * 0.05) trend = "bearish";
+
+  const validation = validateZones({
+    supportZone,
+    resistanceZone,
+    currentPrice: refPrice,
+    market,
+    timeframeMinutes,
+  });
+
+  if (!validation.valid) {
+    return {
+      supportZone: null,
+      resistanceZone: null,
+      sessionHigh: highest,
+      sessionLow: lowest,
+      trend,
+      candleCount: candles.length,
+      zonesValid: false,
+      zoneReason: validation.reason,
+      compressed: validation.reason.startsWith("Zones too compressed"),
+    };
+  }
+
   return {
     supportZone,
     resistanceZone,
@@ -373,6 +473,9 @@ function detectAutoSRZones(candleSeries) {
     sessionLow: lowest,
     trend,
     candleCount: candles.length,
+    zonesValid: true,
+    zoneReason: "",
+    compressed: false,
   };
 }
 
@@ -1184,9 +1287,13 @@ export default function App() {
   useEffect(() => {
     if (dataSource !== "TradingView Webhook") return;
     const series = pickCandleSeries(candleHistory, profile.mainMarket, activeTimeframe);
-    if (series.length < 6) return;
-    const zones = detectAutoSRZones(series);
-    if (!zones.supportZone || !zones.resistanceZone) return;
+    if (series.length < 12) return;
+    const zones = detectAutoSRZones(series, {
+      currentPrice: price,
+      market: profile.mainMarket,
+      timeframeMinutes: parseTimeframeMinutes(activeTimeframe),
+    });
+    if (!zones.zonesValid || !zones.supportZone || !zones.resistanceZone) return;
     setSupport((current) => {
       const target = zones.supportZone.center;
       if (!Number.isFinite(target)) return current;
@@ -1199,7 +1306,7 @@ export default function App() {
       if (Math.abs(Number(current) - target) < target * 0.0005) return current;
       return Number(target.toFixed(4));
     });
-  }, [candleHistory, profile.mainMarket, activeTimeframe, dataSource]);
+  }, [candleHistory, profile.mainMarket, activeTimeframe, dataSource, price]);
 
   useEffect(() => {
     localStorage.setItem(disciplineStorageKey, JSON.stringify(discipline));
@@ -2951,6 +3058,7 @@ export default function App() {
           watchlist={watchlist}
         >
         {!streamerMode ? <div style={styles.alphaBanner}>Trade Pilot Alpha - educational tool. Not financial advice.</div> : null}
+        {!streamerMode ? <AlphaSignup /> : null}
         {!streamerMode && !session?.user ? (
           <div style={styles.guestPrompt}>
             <span>Create a free account to save your trading workspace.</span>
@@ -3135,7 +3243,6 @@ export default function App() {
             webhookDebug={webhookDebug}
           />
         ) : null}
-        {!streamerMode ? <AlphaSignup /> : null}
         <AppFooter />
         </DashboardFrame>
       </div>
@@ -4027,7 +4134,7 @@ function SignalSourceCard({ activeSymbol, candleSeries, connectionError, current
   );
 }
 
-function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resistance, setActiveTrade, setActivePosition, setPlannedTrade, support, onClose }) {
+function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resistance, setActiveTrade, setActivePosition, setPlannedTrade, support, onAddLevels, onClose }) {
   const [view, setView] = useState("checklist");
   const [form, setForm] = useState({
     contracts: String(profile.defaultContracts || 1),
@@ -4084,7 +4191,7 @@ function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resista
     setPlannedTrade?.({ ...normalized, status: "active" });
     setActiveTrade(nextTrade);
     setActivePosition({ ...normalized, openedAt: nextTrade.openedAt, status: "active" });
-    notify("Plan generated and trade marked active.", "success");
+    notify("Trade plan generated", "success");
     onClose();
   };
 
@@ -4172,6 +4279,7 @@ function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resista
             <div style={{ display: "grid", gap: "8px" }}>
               {btn("Auto Generate Plan", handleAutoGenerate, "primary")}
               {btn("Manual Plan Builder", () => setView("manual"), "secondary")}
+              {onAddLevels ? btn("Add Levels", onAddLevels, "secondary") : null}
               {btn("Cancel", onClose, "ghost")}
             </div>
           </>
@@ -4215,6 +4323,77 @@ function MarkTradeActiveModal({ applyQuickSetup, notify, price, profile, resista
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function LevelsModal({ notify, resistance, setResistance, setSupport, support, onClose }) {
+  const [supportInput, setSupportInput] = useState(Number.isFinite(Number(support)) && Number(support) > 0 ? String(support) : "");
+  const [resistanceInput, setResistanceInput] = useState(Number.isFinite(Number(resistance)) && Number(resistance) > 0 ? String(resistance) : "");
+
+  const handleSave = () => {
+    const nextSupport = Number(supportInput);
+    const nextResistance = Number(resistanceInput);
+    if (!Number.isFinite(nextSupport) || nextSupport <= 0 || !Number.isFinite(nextResistance) || nextResistance <= 0) {
+      notify?.("Enter valid support and resistance prices.", "failure");
+      return;
+    }
+    if (nextResistance <= nextSupport) {
+      notify?.("Resistance must be above support.", "failure");
+      return;
+    }
+    setSupport(nextSupport);
+    setResistance(nextResistance);
+    notify?.("Levels saved.", "success");
+    onClose();
+  };
+
+  return (
+    <div
+      style={{ alignItems: "center", background: "rgba(0,0,0,.82)", display: "flex", inset: 0, justifyContent: "center", padding: "16px", position: "fixed", zIndex: 10000 }}
+      onClick={onClose}
+    >
+      <div
+        style={{ background: "#05070d", border: "1px solid #1e293b", borderRadius: "20px", boxShadow: "0 32px 80px rgba(0,0,0,.7)", maxWidth: "440px", padding: "28px", width: "100%" }}
+        onClick={(ev) => ev.stopPropagation()}
+      >
+        <p style={{ color: "#f8fafc", fontSize: "18px", fontWeight: 950, margin: "0 0 6px" }}>Add Levels</p>
+        <p style={{ color: "#64748b", fontSize: "13px", margin: "0 0 20px" }}>Set support and resistance so the auto plan can size entry, stop, and targets.</p>
+        <div style={{ display: "grid", gap: "12px", marginBottom: "16px" }}>
+          <label style={{ color: "#a1a1aa", display: "grid", fontSize: "13px", gap: "4px" }}>
+            Support
+            <input
+              placeholder="e.g. 22480"
+              step="0.25"
+              style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: "8px", color: "#f8fafc", fontSize: "14px", fontWeight: 700, padding: "8px 12px", width: "100%" }}
+              type="number"
+              value={supportInput}
+              onChange={(ev) => setSupportInput(ev.target.value)}
+            />
+          </label>
+          <label style={{ color: "#a1a1aa", display: "grid", fontSize: "13px", gap: "4px" }}>
+            Resistance
+            <input
+              placeholder="e.g. 22520"
+              step="0.25"
+              style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: "8px", color: "#f8fafc", fontSize: "14px", fontWeight: 700, padding: "8px 12px", width: "100%" }}
+              type="number"
+              value={resistanceInput}
+              onChange={(ev) => setResistanceInput(ev.target.value)}
+            />
+          </label>
+        </div>
+        <div style={{ display: "grid", gap: "8px" }}>
+          <button
+            onClick={handleSave}
+            style={{ background: "#2563eb", border: "1px solid #3b82f6", borderRadius: "10px", color: "#f8fafc", cursor: "pointer", fontSize: "14px", fontWeight: 900, padding: "11px 18px" }}
+          >Save Levels</button>
+          <button
+            onClick={onClose}
+            style={{ background: "transparent", border: "none", color: "#64748b", cursor: "pointer", fontSize: "13px", fontWeight: 700, padding: "8px" }}
+          >Cancel</button>
+        </div>
       </div>
     </div>
   );
@@ -4323,7 +4502,14 @@ function Dashboard({
   );
   const displayedTimeframe = timeframeLabel(chartTimeframe);
   const hasLiveCandles = liveCandleSeries.length >= 6;
-  const autoSR = useMemo(() => detectAutoSRZones(liveCandleSeries), [liveCandleSeries]);
+  const autoSR = useMemo(
+    () => detectAutoSRZones(liveCandleSeries, {
+      currentPrice: price,
+      market: profile.mainMarket,
+      timeframeMinutes: chartTimeframeMinutes,
+    }),
+    [liveCandleSeries, price, profile.mainMarket, chartTimeframeMinutes],
+  );
   const chartData = useMemo(
     () => priceHistory.length >= 2
       ? priceHistory
@@ -4350,22 +4536,94 @@ function Dashboard({
       liquiditySweepHigh: marketStructure.liquiditySweepHigh,
       liquiditySweepLow: marketStructure.liquiditySweepLow,
       marketStructure: marketStructure.marketStructure,
+      zonesValid: true,
+      zoneReason: "",
     };
-    if (autoSR.supportZone && autoSR.resistanceZone) {
+
+    const clearZoneFields = () => {
+      delete base.supportZoneLow;
+      delete base.supportZoneHigh;
+      delete base.supportLevel;
+      delete base.resistanceZoneLow;
+      delete base.resistanceZoneHigh;
+      delete base.resistanceLevel;
+      delete base.supportZone;
+      delete base.resistanceZone;
+      delete base.middleZone;
+      delete base.middleZoneLow;
+      delete base.middleZoneHigh;
+    };
+
+    if (autoSR.zonesValid && autoSR.supportZone && autoSR.resistanceZone) {
       base.supportZoneLow = autoSR.supportZone.min;
       base.supportZoneHigh = autoSR.supportZone.max;
       base.supportLevel = autoSR.supportZone.center;
       base.resistanceZoneLow = autoSR.resistanceZone.min;
       base.resistanceZoneHigh = autoSR.resistanceZone.max;
       base.resistanceLevel = autoSR.resistanceZone.center;
+      base.supportZone = `${autoSR.supportZone.min.toFixed(2)} - ${autoSR.supportZone.max.toFixed(2)}`;
+      base.resistanceZone = `${autoSR.resistanceZone.min.toFixed(2)} - ${autoSR.resistanceZone.max.toFixed(2)}`;
+      const midLow = Number((autoSR.supportZone.center + (autoSR.resistanceZone.center - autoSR.supportZone.center) * 0.38).toFixed(2));
+      const midHigh = Number((autoSR.supportZone.center + (autoSR.resistanceZone.center - autoSR.supportZone.center) * 0.62).toFixed(2));
+      base.middleZoneLow = midLow;
+      base.middleZoneHigh = midHigh;
+      base.middleZone = `${midLow.toFixed(2)} - ${midHigh.toFixed(2)}`;
       base.sessionHigh = autoSR.sessionHigh ?? base.sessionHigh;
       base.sessionLow = autoSR.sessionLow ?? base.sessionLow;
       base.candleTrend = autoSR.trend;
       base.candleCount = autoSR.candleCount;
       base.source = "tradingview-candles";
+    } else if (autoSR.zoneReason) {
+      base.zonesValid = false;
+      base.zoneReason = autoSR.zoneReason;
+      base.compressed = autoSR.compressed === true;
+      base.sessionHigh = autoSR.sessionHigh ?? base.sessionHigh;
+      base.sessionLow = autoSR.sessionLow ?? base.sessionLow;
+      clearZoneFields();
     }
+
+    // Final unified validation against current price + minimum distance.
+    // Catches: support above price, resistance below price, zones too compressed.
+    if (base.zonesValid !== false) {
+      const finalCheck = validateZones({
+        supportZone: { center: Number(base.supportLevel) },
+        resistanceZone: { center: Number(base.resistanceLevel) },
+        currentPrice: Number(price),
+        market: profile.mainMarket,
+        timeframeMinutes: chartTimeframeMinutes,
+      });
+      if (!finalCheck.valid) {
+        base.zonesValid = false;
+        base.zoneReason = finalCheck.reason;
+        base.compressed = finalCheck.reason.startsWith("Zones too compressed");
+        clearZoneFields();
+      }
+    }
+
+    // Validate manual support/resistance state against current price + min distance.
+    // If state values are bad and we don't already have valid auto zones, surface that.
+    const manualSupport = Number(support);
+    const manualResistance = Number(resistance);
+    const hasManualLevels = Number.isFinite(manualSupport) && manualSupport > 0
+      && Number.isFinite(manualResistance) && manualResistance > 0;
+    if (hasManualLevels && Number.isFinite(Number(price)) && Number(price) > 0 && base.zonesValid !== true) {
+      const manualValidation = validateZones({
+        supportZone: { center: manualSupport },
+        resistanceZone: { center: manualResistance },
+        currentPrice: Number(price),
+        market: profile.mainMarket,
+        timeframeMinutes: chartTimeframeMinutes,
+      });
+      if (!manualValidation.valid) {
+        base.zonesValid = false;
+        base.zoneReason = manualValidation.reason;
+        base.compressed = manualValidation.reason.startsWith("Zones too compressed");
+        clearZoneFields();
+      }
+    }
+
     return base;
-  }, [zoneDetection, marketStructure, autoSR]);
+  }, [zoneDetection, marketStructure, autoSR, support, resistance, price, profile.mainMarket, chartTimeframeMinutes]);
   const marketSpec = marketSpecs[profile.mainMarket] ?? customMarketSpec;
   const activeBias = normalizeActiveBias(levelBias);
   const autoTradePlan = getAutoTradePlan({
@@ -4469,7 +4727,134 @@ function Dashboard({
   const setupName = activeTradePlan.source || (plannedTrade || activePosition ? `${setupType} ${setupDirection}` : "Auto Zone");
   const hasPlan = activeTradePlan.direction !== "none" && activePlanValidation.valid && !rewardRisk.invalid;
   const coachDecision = getCoachDecision({ activeBias, activePosition, activeTradePlan, price, resistance, support, validation: activePlanValidation });
-  const liveCoach = getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, support, resistance, tradeGrade: displayTradeGrade, visualPlan });
+  const liveCoach = getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, support, resistance, tradeGrade: displayTradeGrade, visualPlan, zoneDetection: enrichedZoneDetection });
+
+  // ── Unified trade state ─────────────────────────────────────────────
+  // Single source of truth. All dashboard cards must derive from this
+  // object so they cannot disagree (e.g. "Plan: Waiting" + "Active: TP2").
+  const tradeState = useMemo(() => {
+    const plan = activeTradePlan;
+    const direction = plan?.direction === "short" ? "short" : "long";
+    const validationOk = activePlanValidation.valid === true && plan?.direction !== "none" && !rewardRisk.invalid;
+
+    const planLevels = {
+      entry: Number(plan?.entry),
+      stop: Number(plan?.stop),
+      tp1: Number(plan?.trim1 ?? plan?.tp1),
+      tp2: Number(plan?.trim2 ?? plan?.tp2),
+      runner: Number(plan?.runner ?? plan?.target),
+    };
+    const allLevelsPresent = Object.values(planLevels).every((v) => Number.isFinite(v) && v > 0);
+    const isValidPlan = validationOk && allLevelsPresent;
+    const levels = isValidPlan ? planLevels : { entry: null, stop: null, tp1: null, tp2: null, runner: null };
+
+    const priceValue = Number(price);
+    const hit = (target) => isValidPlan && Number.isFinite(priceValue) && Number.isFinite(target) && (direction === "long" ? priceValue >= target : priceValue <= target);
+    const stopHit = isValidPlan && Number.isFinite(levels.stop) && (direction === "long" ? priceValue <= levels.stop : priceValue >= levels.stop);
+    const tp1Hit = hit(levels.tp1);
+    const tp2Hit = hit(levels.tp2);
+    const runnerHit = hit(levels.runner);
+
+    const closedFlag = activeTrade?.status === "closed";
+    const tradeIsActive = Boolean(activeTrade?.isActive) && isValidPlan && !closedFlag;
+
+    let status;
+    let manageMessage;
+    if (plan?.direction === "none") {
+      status = "WAITING";
+      manageMessage = "No active trade.";
+    } else if (!isValidPlan) {
+      status = "INVALID";
+      manageMessage = "Plan invalid. Reset and rebuild.";
+    } else if (!tradeIsActive) {
+      status = "READY";
+      manageMessage = "No active trade.";
+    } else if (stopHit) {
+      status = "COMPLETE";
+      manageMessage = "Trade stopped.";
+    } else if (runnerHit) {
+      status = "COMPLETE";
+      manageMessage = "Trade complete. Runner hit.";
+    } else if (tp2Hit) {
+      status = "MANAGING";
+      manageMessage = "Manage runner.";
+    } else if (tp1Hit) {
+      status = "MANAGING";
+      manageMessage = "Move stop to breakeven.";
+    } else {
+      status = "ACTIVE";
+      manageMessage = "Manage risk. Watching TP1.";
+    }
+
+    return {
+      signal: tradingViewSignal || null,
+      plan,
+      validation: activePlanValidation,
+      hasPlan: isValidPlan,
+      levels,
+      direction,
+      progress: { tp1Hit, tp2Hit, runnerHit, stopHit },
+      activeTrade: tradeIsActive ? activeTrade : null,
+      position: tradeIsActive ? activePosition : null,
+      status,
+      manageMessage,
+      coach: liveCoach,
+    };
+  }, [activeTradePlan, activePlanValidation, rewardRisk, price, activeTrade, activePosition, liveCoach, tradingViewSignal]);
+
+  const resetTradeState = useCallback((reason) => {
+    setActiveTrade((current) => {
+      if (!current?.isActive && current?.status === "waiting_entry" && !current?.realizedPL && !current?.unrealizedPL) {
+        return current;
+      }
+      return normalizeActiveTrade({
+        ...current,
+        isActive: false,
+        status: "waiting_entry",
+        realizedPL: 0,
+        unrealizedPL: 0,
+      });
+    });
+    setActivePosition((current) => (current === null ? current : null));
+    setPlannedTrade((current) => (current === null ? current : null));
+    if (reason && typeof console !== "undefined") {
+      // eslint-disable-next-line no-console
+      console.log("[tradeState] reset:", reason);
+    }
+  }, [setActiveTrade, setActivePosition, setPlannedTrade]);
+
+  // Auto-clear stale active trade when plan becomes invalid.
+  useEffect(() => {
+    if (tradeState.status === "INVALID" && activeTrade?.isActive) {
+      resetTradeState("plan invalid");
+    }
+  }, [tradeState.status, activeTrade?.isActive, resetTradeState]);
+
+  // Reset on timeframe change.
+  const previousTimeframeRef = useRef(chartTimeframeMinutes);
+  useEffect(() => {
+    if (previousTimeframeRef.current !== chartTimeframeMinutes) {
+      previousTimeframeRef.current = chartTimeframeMinutes;
+      resetTradeState(`timeframe changed to ${chartTimeframeMinutes}m`);
+    }
+  }, [chartTimeframeMinutes, resetTradeState]);
+
+  // Reset when symbol changes (defense in depth — applyAlert clears state too).
+  const previousSymbolRef = useRef(profile.mainMarket);
+  useEffect(() => {
+    if (previousSymbolRef.current !== profile.mainMarket) {
+      previousSymbolRef.current = profile.mainMarket;
+      resetTradeState(`symbol changed to ${profile.mainMarket}`);
+    }
+  }, [profile.mainMarket, resetTradeState]);
+
+  // Debug logging.
+  useEffect(() => {
+    if (typeof console === "undefined") return;
+    // eslint-disable-next-line no-console
+    console.log("tradeState", tradeState);
+  }, [tradeState.status, tradeState.manageMessage, tradeState.hasPlan, tradeState.activeTrade?.isActive]);
+
   const riskStatus = engine.disciplineWarnings.some((warning) => warning.includes("Stop") || warning.includes("loss limit reached") || warning.includes("exceeded"))
     ? "Stop Trading"
     : engine.disciplineWarnings.some((warning) => warning.includes("Warning") || warning.includes("approaching") || warning.includes("High risk") || warning.includes("too large") || warning.includes("Contracts"))
@@ -4483,6 +4868,61 @@ function Dashboard({
     else applyQuickSetup(setupName);
   };
 
+  const [levelsModalOpen, setLevelsModalOpen] = useState(false);
+
+  const handleAutoGeneratePlan = () => {
+    if (!(price > 0)) {
+      notify?.("Connect a data source to get the current price.", "failure");
+      return;
+    }
+    const hasSupportLevel = Number.isFinite(Number(support)) && Number(support) > 0;
+    const hasResistanceLevel = Number.isFinite(Number(resistance)) && Number(resistance) > 0;
+    const hasZones = Boolean(enrichedZoneDetection?.supportZone && enrichedZoneDetection?.resistanceZone);
+
+    if (!hasSupportLevel && !hasResistanceLevel && !hasZones) {
+      notify?.("Add support/resistance or wait for enough candle data to auto-detect zones.", "failure");
+      return;
+    }
+
+    if (autoTradePlan && !autoTradePlan.noTrade) {
+      const candidatePlan = normalizeTradePlan({
+        contracts,
+        direction: autoTradePlan.direction,
+        entry: autoTradePlan.entry,
+        runner: autoTradePlan.runner,
+        setupType: autoTradePlan.setupType || "Auto Zone",
+        sourceMode: dataSource,
+        status: "planned",
+        stop: autoTradePlan.stop,
+        target: autoTradePlan.runner,
+        trim1: autoTradePlan.trim1,
+        trim2: autoTradePlan.trim2,
+      }, {
+        contracts,
+        direction: autoTradePlan.direction,
+        entry: autoTradePlan.entry,
+        stop: autoTradePlan.stop,
+      });
+      const validation = validateTradePlan(candidatePlan);
+      if (validation.valid) {
+        setPlannedTrade(candidatePlan);
+        setActivePosition(null);
+        notify?.("Trade plan generated", "success");
+        return;
+      }
+    }
+
+    const fallbackBias = activeBias === "bearish" ? "short" : activeBias === "bullish" ? "long" : direction;
+    const fallbackSetup = fallbackBias === "short"
+      ? (hasSupportLevel && price < Number(support) ? "Breakdown Short" : "Pullback Short")
+      : (hasResistanceLevel && price > Number(resistance) ? "Breakout Long" : "Pullback Long");
+    applyQuickSetup(fallbackSetup);
+    notify?.("Trade plan generated", "success");
+  };
+
+  const handleOpenManualBuilder = () => setMarkActiveModalOpen(true);
+  const handleOpenLevelsModal = () => setLevelsModalOpen(true);
+
   const saveDashboardNote = (event) => {
     event.preventDefault();
     if (!journalNote.trim()) return;
@@ -4495,8 +4935,15 @@ function Dashboard({
       notify?.("NO TRADE — setup grade D. Wait for a B+ or A setup.", "failure");
       return;
     }
-    if (!hasPlan) {
+    // Require fully-validated tradeState before allowing activation.
+    // Entry, stop, tp1, tp2, runner all required, plus reward/risk valid.
+    if (!tradeState.hasPlan || !hasPlan) {
+      notify?.("Plan is incomplete. Need entry, stop, TP1, TP2, and runner before marking active.", "failure");
       setMarkActiveModalOpen(true);
+      return;
+    }
+    if (rewardRisk.invalid || !(Number(rewardRisk.ratio) > 0)) {
+      notify?.("Reward/Risk invalid. Adjust stop or targets first.", "failure");
       return;
     }
     const nextTrade = activeTradeFromPlan(visualPlan, {
@@ -4530,7 +4977,7 @@ function Dashboard({
 
   const cardOrder = normalizeCardOrder(effectiveLayout.cardOrder);
   const dashboardCards = {
-    alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} /> : null,
+    alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} onAddLevels={handleOpenLevelsModal} onClearZones={() => { setSupport(0); setResistance(0); notify?.("Auto zones cleared.", "success"); }} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
       candleSeries={liveCandleSeries}
       chartPrefs={chartPrefs}
@@ -4595,7 +5042,7 @@ function Dashboard({
     performanceStats: effectiveLayout.performanceStats ? <PerformanceStatsCard discipline={discipline} journalEntries={safeJournalEntries} tradeGrade={displayTradeGrade} /> : null,
     propFirmRules: effectiveLayout.propFirmRules ? <PropFirmRulesCard fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} /> : null,
     risk: effectiveLayout.risk ? <RiskGuardCard discipline={discipline} fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} riskStatus={riskStatus} /> : null,
-    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard activeBias={activeBias} activeTradePlan={activeTradePlan} autoTradePlan={autoTradePlan} hasPlan={hasPlan} missedEntry={missedEntry} planValidation={activePlanValidation} profile={profile} rewardRisk={rewardRisk} setupName={setupName} tradeGrade={displayTradeGrade} visualPlan={visualPlan} /> : null,
+    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard activeBias={activeBias} activeTradePlan={activeTradePlan} autoTradePlan={autoTradePlan} hasPlan={hasPlan} missedEntry={missedEntry} onAutoGenerate={handleAutoGeneratePlan} onAddLevels={handleOpenLevelsModal} onOpenManualBuilder={handleOpenManualBuilder} planValidation={activePlanValidation} profile={profile} rewardRisk={rewardRisk} setupName={setupName} tradeGrade={displayTradeGrade} visualPlan={visualPlan} /> : null,
     watchlist: effectiveLayout.watchlist ? <WatchlistCard price={price} profile={profile} watchlist={safeWatchlist} /> : null,
   };
 
@@ -4719,7 +5166,18 @@ function Dashboard({
           setActivePosition={setActivePosition}
           setPlannedTrade={setPlannedTrade}
           support={support}
+          onAddLevels={() => { setMarkActiveModalOpen(false); setLevelsModalOpen(true); }}
           onClose={() => setMarkActiveModalOpen(false)}
+        />
+      ) : null}
+      {levelsModalOpen ? (
+        <LevelsModal
+          notify={notify}
+          resistance={resistance}
+          setResistance={setResistance}
+          setSupport={setSupport}
+          support={support}
+          onClose={() => setLevelsModalOpen(false)}
         />
       ) : null}
       {customizeOpen ? (
@@ -4730,10 +5188,10 @@ function Dashboard({
         <div style={styles.rulesGrid}>
           <Metric label="1. Market" value={profile.mainMarket} />
           <Metric label="2. Data Source" value={dataSource} />
-          <Metric label="3. Plan" value={hasPlan ? "Ready" : "Waiting"} tone={hasPlan ? "good" : "warn"} />
-          <Metric label="4. Active Trade" value={activeTrade?.isActive ? activeTrade.status : "Waiting entry"} tone={activeTrade?.isActive ? "good" : "warn"} />
-          <Metric label="5. Manage" value={activeTrade?.isActive ? getTargetProgressMessage({ activePosition, plan: visualPlan, price }) : "Not active"} />
-          <Metric label="6. Journal" value="Auto on close" />
+          <Metric label="3. Plan" value={tradeState.status === "WAITING" ? "Waiting" : tradeState.status === "INVALID" ? "Invalid" : "Ready"} tone={tradeState.hasPlan ? "good" : "warn"} />
+          <Metric label="4. Active Trade" value={tradeState.activeTrade ? tradeState.activeTrade.status : tradeState.status === "READY" ? "Waiting entry" : "None"} tone={tradeState.activeTrade ? "good" : "warn"} />
+          <Metric label="5. Manage" value={tradeState.manageMessage} tone={tradeState.status === "MANAGING" || tradeState.status === "ACTIVE" ? "good" : tradeState.status === "INVALID" ? "bad" : "warn"} />
+          <Metric label="6. Status" value={tradeState.status} tone={tradeState.status === "ACTIVE" || tradeState.status === "MANAGING" ? "good" : tradeState.status === "INVALID" ? "bad" : "warn"} />
         </div>
       </section>
       <section
@@ -5267,22 +5725,28 @@ function ManualLiveWorkflow({
   );
 }
 
-function AutoZonePanel({ zoneDetection }) {
+function AutoZonePanel({ zoneDetection, onClearZones, onAddLevels }) {
   const repeatedRejectionHighs = Array.isArray(zoneDetection?.repeatedRejectionHighs)
     ? zoneDetection.repeatedRejectionHighs
     : [];
   const repeatedRejectionLows = Array.isArray(zoneDetection?.repeatedRejectionLows)
     ? zoneDetection.repeatedRejectionLows
     : [];
+  const zonesValid = zoneDetection?.zonesValid !== false;
 
   return (
     <section style={styles.card}>
       <p style={styles.cardLabel}>Auto Zone Detector</p>
       <h2 style={styles.sectionTitle}>Support / Resistance</h2>
+      {!zonesValid ? (
+        <div style={{ background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.3)", borderRadius: "10px", color: "#fde68a", fontSize: "12px", marginBottom: "10px", padding: "8px 12px" }}>
+          {zoneDetection.compressed ? "Compressed / no valid zones." : "No valid zones detected."} {zoneDetection.zoneReason || ""}
+        </div>
+      ) : null}
       <div style={styles.metricGrid}>
-        <Metric label="Support Zone" value={zoneDetection.supportZone || "Manual"} tone="good" />
-        <Metric label="Resistance Zone" value={zoneDetection.resistanceZone || "Manual"} tone="warn" />
-        <Metric label="Middle Zone" value={zoneDetection.middleZone || "Wait"} />
+        <Metric label="Support Zone" value={zonesValid ? (zoneDetection.supportZone || "Manual") : "—"} tone="good" />
+        <Metric label="Resistance Zone" value={zonesValid ? (zoneDetection.resistanceZone || "Manual") : "—"} tone="warn" />
+        <Metric label="Middle Zone" value={zonesValid ? (zoneDetection.middleZone || "Wait") : "—"} />
         <Metric label="Session High" value={formatOptionalPrice(zoneDetection.sessionHigh)} />
         <Metric label="Session Low" value={formatOptionalPrice(zoneDetection.sessionLow)} />
         <Metric label="Open Range" value={zoneDetection.openRange || "Pending"} />
@@ -5292,12 +5756,28 @@ function AutoZonePanel({ zoneDetection }) {
       <div style={{ ...styles.coachPrompt, marginTop: "12px" }}>
         Rejection zones: highs {repeatedRejectionHighs.length ? repeatedRejectionHighs.join(", ") : "none yet"} · lows {repeatedRejectionLows.length ? repeatedRejectionLows.join(", ") : "none yet"}
       </div>
+      {(onAddLevels || onClearZones) ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "12px" }}>
+          {onAddLevels ? (
+            <button
+              onClick={onAddLevels}
+              style={{ background: "#2563eb", border: "1px solid #3b82f6", borderRadius: "8px", color: "#f8fafc", cursor: "pointer", fontSize: "12px", fontWeight: 800, padding: "8px 12px" }}
+            >Add Levels</button>
+          ) : null}
+          {onClearZones ? (
+            <button
+              onClick={onClearZones}
+              style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: "8px", color: "#f8fafc", cursor: "pointer", fontSize: "12px", fontWeight: 800, padding: "8px 12px" }}
+            >Clear Auto Zones</button>
+          ) : null}
+        </div>
+      ) : null}
       <p style={{ ...styles.muted, marginTop: "12px" }}>{zoneDetection.message}</p>
     </section>
   );
 }
 
-function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, missedEntry, planValidation, profile, rewardRisk, setupName, tradeGrade, visualPlan }) {
+function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, missedEntry, onAutoGenerate, onAddLevels, onOpenManualBuilder, planValidation, profile, rewardRisk, setupName, tradeGrade, visualPlan }) {
   const planSource = activeTradePlan?.source || "Auto Zone";
   const planStatus = activeTradePlan?.status === "managing_trade"
     ? "Managing trade"
@@ -5308,6 +5788,28 @@ function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, mi
         : "Planned";
   const planDate = activeTradePlan?.lastUpdated ? new Date(activeTradePlan.lastUpdated) : null;
   const planUpdated = planDate && Number.isFinite(planDate.getTime()) ? planDate.toLocaleTimeString() : activeTradePlan?.lastUpdated || "Just now";
+  const planActions = (onAutoGenerate || onOpenManualBuilder || onAddLevels) ? (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "14px" }}>
+      {onAutoGenerate ? (
+        <button
+          onClick={onAutoGenerate}
+          style={{ background: "#2563eb", border: "1px solid #3b82f6", borderRadius: "10px", color: "#f8fafc", cursor: "pointer", flex: "1 1 160px", fontSize: "13px", fontWeight: 900, padding: "10px 14px" }}
+        >Auto Generate Plan</button>
+      ) : null}
+      {onOpenManualBuilder ? (
+        <button
+          onClick={onOpenManualBuilder}
+          style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: "10px", color: "#f8fafc", cursor: "pointer", flex: "1 1 160px", fontSize: "13px", fontWeight: 900, padding: "10px 14px" }}
+        >Manual Plan Builder</button>
+      ) : null}
+      {onAddLevels ? (
+        <button
+          onClick={onAddLevels}
+          style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: "10px", color: "#f8fafc", cursor: "pointer", flex: "1 1 160px", fontSize: "13px", fontWeight: 900, padding: "10px 14px" }}
+        >Add Levels</button>
+      ) : null}
+    </div>
+  ) : null;
   return (
     <section style={styles.tradePlanHero}>
       <p style={styles.cardLabel}>Trade Plan</p>
@@ -5340,9 +5842,13 @@ function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, mi
           ) : null}
           {rewardRisk.invalid || !planValidation?.valid ? <div style={styles.priceWarning}>{planValidation?.reason || rewardRisk.reason || "Invalid plan: targets are on the wrong side of entry."}</div> : null}
           {missedEntry ? <div style={styles.missedEntry}>{missedEntry}</div> : null}
+          {planActions}
         </>
       ) : (
-        <p style={styles.emptyPlan}>{activeTradePlan?.message || "No trade. Wait for confirmation."}</p>
+        <>
+          <p style={styles.emptyPlan}>{activeTradePlan?.message || "No trade. Wait for confirmation."}</p>
+          {planActions}
+        </>
       )}
     </section>
   );
@@ -6740,7 +7246,7 @@ function buildChartData({ price, entry, stop, support, resistance, trim1, trim2,
   });
 }
 
-function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, support, resistance, tradeGrade, visualPlan }) {
+function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTradePlan, autoTradePlan, discipline, engine, price, profile, support, resistance, tradeGrade, visualPlan, zoneDetection = {} }) {
   if (discipline.dailyPnl <= -Math.abs(profile.maxDailyLoss)) return "Daily loss limit reached. Stop trading today.";
 
   const isInTrade = activeTrade?.isActive || activePosition || activeTradePlan?.status === "managing_trade";
@@ -6750,6 +7256,10 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
     if (stopHit) return "Stop area reached. Respect your plan and exit.";
     const progressMsg = getTargetProgressMessage({ activePosition, plan: activeTradePlan || visualPlan, price });
     if (progressMsg) return progressMsg;
+  }
+
+  if (zoneDetection?.zonesValid === false) {
+    return "Price connected, but zones are too tight. Wait for clearer structure or add levels manually.";
   }
 
   if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message || "No trade. Wait for confirmation.";
@@ -6790,16 +7300,15 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
 }
 
 function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPrice, entry, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
-  const supportZone = Number.isFinite(Number(zoneDetection.supportZoneLow)) && Number.isFinite(Number(zoneDetection.supportZoneHigh))
+  const zonesValid = zoneDetection.zonesValid !== false;
+  // Trust validated zone numerics from enrichedZoneDetection only.
+  // No raw support/resistance fallback — that path produced one-tick "zones" near current price.
+  const supportZone = zonesValid && Number.isFinite(Number(zoneDetection.supportZoneLow)) && Number.isFinite(Number(zoneDetection.supportZoneHigh))
     ? { min: Number(zoneDetection.supportZoneLow), max: Number(zoneDetection.supportZoneHigh) }
-    : Number.isFinite(Number(support))
-      ? { min: Number(support), max: Number(support) }
-      : null;
-  const resistanceZone = Number.isFinite(Number(zoneDetection.resistanceZoneLow)) && Number.isFinite(Number(zoneDetection.resistanceZoneHigh))
+    : null;
+  const resistanceZone = zonesValid && Number.isFinite(Number(zoneDetection.resistanceZoneLow)) && Number.isFinite(Number(zoneDetection.resistanceZoneHigh))
     ? { min: Number(zoneDetection.resistanceZoneLow), max: Number(zoneDetection.resistanceZoneHigh) }
-    : Number.isFinite(Number(resistance))
-      ? { min: Number(resistance), max: Number(resistance) }
-      : null;
+    : null;
   const candles = Array.isArray(candleSeries) ? candleSeries : [];
   const plan = {
     entry: Number.isFinite(Number(entry)) ? Number(entry) : null,
@@ -6889,6 +7398,11 @@ function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPric
               >{chartPrefs?.lockPriceScale ? "🔒 Price" : "🔓 Price"}</button>
             </>
           ) : null}
+        </div>
+      ) : null}
+      {!zonesValid ? (
+        <div style={{ background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.3)", borderRadius: "10px", color: "#fde68a", fontSize: "12px", marginBottom: "10px", padding: "8px 12px" }}>
+          Waiting for better support/resistance structure. {zoneDetection.zoneReason || ""}
         </div>
       ) : null}
       <div className="tradepilot-chart-wrap" style={styles.chartWrap}>
