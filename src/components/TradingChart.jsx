@@ -45,39 +45,6 @@ function buildCandleSeriesData(candles) {
   return Array.from(seen.values()).sort((a, b) => a.time - b.time);
 }
 
-function generateDemoCandles(currentPrice, count = 80) {
-  const anchor = Number.isFinite(Number(currentPrice)) && Number(currentPrice) > 0 ? Number(currentPrice) : 100;
-  const volatility = anchor * 0.0015;
-  const nowSec = Math.floor(Date.now() / 1000);
-  const startSec = nowSec - count * 60;
-  let last = anchor - volatility * count * 0.05;
-  const out = [];
-  for (let i = 0; i < count; i += 1) {
-    const time = startSec + i * 60;
-    const open = last;
-    const drift = Math.sin(i / 6) * volatility * 0.7 + (Math.random() - 0.5) * volatility;
-    const close = Math.max(0.0001, open + drift);
-    const high = Math.max(open, close) + Math.random() * volatility * 0.6;
-    const low = Math.min(open, close) - Math.random() * volatility * 0.6;
-    out.push({ time, open, high, low, close });
-    last = close;
-  }
-  // ensure final close lands near currentPrice
-  if (out.length) {
-    const final = out[out.length - 1];
-    const adjust = anchor - final.close;
-    if (Math.abs(adjust) > volatility) {
-      out[out.length - 1] = {
-        ...final,
-        close: anchor,
-        high: Math.max(final.high, anchor),
-        low: Math.min(final.low, anchor),
-      };
-    }
-  }
-  return out;
-}
-
 function buildZoneAreaData(zone, candles) {
   if (!zone || !Number.isFinite(Number(zone.min)) || !Number.isFinite(Number(zone.max))) return null;
   if (!Array.isArray(candles) || !candles.length) return null;
@@ -139,22 +106,23 @@ export default function TradingChart({
   const hasInitiallyFitRef = useRef(false);
 
   const realCandles = useMemo(() => buildCandleSeriesData(candles), [candles]);
-  const usingDemo = realCandles.length < 20;
-  const demoCandles = useMemo(
-    () => (usingDemo ? generateDemoCandles(currentPrice, Math.max(60, 80 - realCandles.length)) : []),
-    [usingDemo, currentPrice, realCandles.length],
-  );
-  const candleData = useMemo(() => {
-    if (!usingDemo) return realCandles;
-    if (!realCandles.length) return demoCandles;
-    const lastDemoTime = demoCandles.length ? demoCandles[demoCandles.length - 1].time : 0;
-    const offset = Math.max(0, lastDemoTime - realCandles[0].time + 60);
-    const merged = [
-      ...demoCandles,
-      ...realCandles.map((c) => ({ ...c, time: c.time + offset })),
-    ];
-    return merged.sort((a, b) => a.time - b.time);
-  }, [usingDemo, realCandles, demoCandles]);
+  const candleData = realCandles;
+  const waitingForCandles = realCandles.length < 5;
+  // Reject zones when support and resistance would collide on the same line —
+  // collapses to "no zone shown" rather than two duplicates at one price.
+  const cleanSupport = supportZone && resistanceZone
+    && Number.isFinite(Number(supportZone.center)) && Number.isFinite(Number(resistanceZone.center))
+    && Number(supportZone.center) >= Number(resistanceZone.center)
+      ? null
+      : supportZone;
+  const cleanResistance = supportZone && resistanceZone
+    && Number.isFinite(Number(supportZone.center)) && Number.isFinite(Number(resistanceZone.center))
+    && Number(supportZone.center) >= Number(resistanceZone.center)
+      ? null
+      : resistanceZone;
+  const planValid = Boolean(plan)
+    && Number.isFinite(Number(plan.entry)) && Number.isFinite(Number(plan.stop))
+    && Number(plan.entry) > 0 && Number(plan.stop) > 0;
 
   useEffect(() => {
     if (!containerRef.current) return undefined;
@@ -216,8 +184,17 @@ export default function TradingChart({
     };
     window.addEventListener("resize", handleResize);
 
+    // ResizeObserver gives us responsive resizing when the parent layout
+    // changes (sidebar collapse, drawer open) — not just window resize.
+    let observer = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(handleResize);
+      observer.observe(containerRef.current);
+    }
+
     return () => {
       window.removeEventListener("resize", handleResize);
+      if (observer) observer.disconnect();
       try {
         chart.remove();
       } catch {
@@ -309,9 +286,9 @@ export default function TradingChart({
       }
       ref.current.setData(data);
     };
-    upsertArea(supportAreaRef, supportZone, CHART_THEME.support);
-    upsertArea(resistanceAreaRef, resistanceZone, CHART_THEME.resistance);
-  }, [candleData, supportZone?.min, supportZone?.max, resistanceZone?.min, resistanceZone?.max]);
+    upsertArea(supportAreaRef, cleanSupport, CHART_THEME.support);
+    upsertArea(resistanceAreaRef, cleanResistance, CHART_THEME.resistance);
+  }, [candleData, cleanSupport?.min, cleanSupport?.max, cleanResistance?.min, cleanResistance?.max]);
 
   useEffect(() => {
     const series = seriesRef.current;
@@ -352,79 +329,78 @@ export default function TradingChart({
       title: "Price",
     } : null);
 
-    ensurePriceLine(series, priceLinesRef, "supportTop", supportZone?.max ? {
-      price: Number(supportZone.max),
+    // One support line + one resistance line — never duplicates that visually
+    // collapse to the same price.
+    const supportCenter = cleanSupport && Number.isFinite(Number(cleanSupport.center))
+      ? Number(cleanSupport.center)
+      : (cleanSupport && Number.isFinite(Number(cleanSupport.min)) && Number.isFinite(Number(cleanSupport.max))
+        ? (Number(cleanSupport.min) + Number(cleanSupport.max)) / 2
+        : null);
+    const resistanceCenter = cleanResistance && Number.isFinite(Number(cleanResistance.center))
+      ? Number(cleanResistance.center)
+      : (cleanResistance && Number.isFinite(Number(cleanResistance.min)) && Number.isFinite(Number(cleanResistance.max))
+        ? (Number(cleanResistance.min) + Number(cleanResistance.max)) / 2
+        : null);
+    ensurePriceLine(series, priceLinesRef, "support", Number.isFinite(supportCenter) ? {
+      price: supportCenter,
       color: CHART_THEME.support,
-      lineStyle: 0,
+      lineStyle: 2,
       lineWidth: 2,
-      title: "Support ▲",
+      title: "Support",
     } : null);
-    ensurePriceLine(series, priceLinesRef, "supportBottom", supportZone?.min && supportZone.min !== supportZone.max ? {
-      price: Number(supportZone.min),
-      color: CHART_THEME.support,
-      lineStyle: 0,
-      lineWidth: 2,
-      title: "Support ▼",
-    } : null);
-    ensurePriceLine(series, priceLinesRef, "resistanceTop", resistanceZone?.max ? {
-      price: Number(resistanceZone.max),
+    ensurePriceLine(series, priceLinesRef, "resistance", Number.isFinite(resistanceCenter) && resistanceCenter !== supportCenter ? {
+      price: resistanceCenter,
       color: CHART_THEME.resistance,
-      lineStyle: 0,
+      lineStyle: 2,
       lineWidth: 2,
-      title: "Resistance ▲",
-    } : null);
-    ensurePriceLine(series, priceLinesRef, "resistanceBottom", resistanceZone?.min && resistanceZone.min !== resistanceZone.max ? {
-      price: Number(resistanceZone.min),
-      color: CHART_THEME.resistance,
-      lineStyle: 0,
-      lineWidth: 2,
-      title: "Resistance ▼",
+      title: "Resistance",
     } : null);
 
-    ensurePriceLine(series, priceLinesRef, "entry", plan?.entry ? {
+    // Plan price lines only when the plan itself has at least entry + stop.
+    ensurePriceLine(series, priceLinesRef, "entry", planValid ? {
       price: Number(plan.entry),
       color: CHART_THEME.entry,
       lineStyle: 0,
       lineWidth: 2,
       title: "Entry",
     } : null);
-    ensurePriceLine(series, priceLinesRef, "stop", plan?.stop ? {
+    ensurePriceLine(series, priceLinesRef, "stop", planValid ? {
       price: Number(plan.stop),
       color: CHART_THEME.stop,
       lineStyle: 0,
       lineWidth: 2,
       title: "Stop",
     } : null);
-    ensurePriceLine(series, priceLinesRef, "tp1", plan?.tp1 ? {
+    ensurePriceLine(series, priceLinesRef, "tp1", planValid && Number.isFinite(Number(plan.tp1)) ? {
       price: Number(plan.tp1),
       color: CHART_THEME.tp,
       lineStyle: 0,
       lineWidth: 1,
       title: "TP1",
     } : null);
-    ensurePriceLine(series, priceLinesRef, "tp2", plan?.tp2 ? {
+    ensurePriceLine(series, priceLinesRef, "tp2", planValid && Number.isFinite(Number(plan.tp2)) ? {
       price: Number(plan.tp2),
       color: CHART_THEME.tp,
       lineStyle: 0,
       lineWidth: 1,
       title: "TP2",
     } : null);
-    ensurePriceLine(series, priceLinesRef, "runner", plan?.runner ? {
+    ensurePriceLine(series, priceLinesRef, "runner", planValid && Number.isFinite(Number(plan.runner)) ? {
       price: Number(plan.runner),
       color: CHART_THEME.runner,
       lineStyle: 0,
       lineWidth: 1,
       title: "Runner",
     } : null);
-  }, [currentPrice, supportZone?.min, supportZone?.max, resistanceZone?.min, resistanceZone?.max, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner]);
+  }, [currentPrice, cleanSupport?.min, cleanSupport?.max, cleanSupport?.center, cleanResistance?.min, cleanResistance?.max, cleanResistance?.center, planValid, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner]);
 
   return (
     <div style={{ position: "relative", width: "100%", height, touchAction: "none" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%", touchAction: "none" }} />
-      {usingDemo ? (
+      {waitingForCandles ? (
         <div
           style={{
-            background: "rgba(2, 6, 23, 0.65)",
+            background: "rgba(2, 6, 23, 0.85)",
             border: "1px solid rgba(148, 163, 184, 0.2)",
             borderRadius: "10px",
             color: "#cbd5e1",
@@ -435,9 +411,9 @@ export default function TradingChart({
             top: "10px",
           }}
         >
-          <strong style={{ color: "#e2e8f0" }}>{symbol || "Demo"}{timeframe ? ` · ${timeframe}` : ""}</strong>
+          <strong style={{ color: "#e2e8f0" }}>{symbol || "Live"}{timeframe ? ` · ${timeframe}` : ""}</strong>
           <span style={{ color: "#94a3b8", marginLeft: "8px" }}>
-            {realCandles.length === 0 ? emptyMessage : "Waiting for more TradingView candle data."}
+            {realCandles.length === 0 ? emptyMessage : "Waiting for more candle data."}
           </span>
         </div>
       ) : null}

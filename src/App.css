@@ -6,6 +6,28 @@
   overflow-x: hidden;
 }
 
+button {
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 120ms ease, opacity 160ms ease, box-shadow 160ms ease;
+}
+button:not(:disabled):hover {
+  filter: brightness(1.08);
+}
+button:not(:disabled):active {
+  transform: translateY(1px);
+}
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* Section / card hover lift gives a "professional" feel without animating layout. */
+section[class*="card"], .dashboard-card-slot > section {
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+
+/* Tighter line-height on metric labels and section titles. */
+h1, h2, h3 { line-height: 1.18; }
+p { line-height: 1.5; }
+
 .app-container,
 .page-container,
 .dashboard-container {
