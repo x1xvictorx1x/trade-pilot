@@ -3180,7 +3180,7 @@ export default function App() {
             <button onClick={() => setAuthModal("signup")} style={styles.authButton}>Sign Up</button>
           </div>
         ) : null}
-        {!streamerMode && activePage !== "home" && !installBannerDismissed ? (
+        {!streamerMode && activePage === "dashboard" && !installBannerDismissed ? (
           <InstallBanner
             canInstall={Boolean(installPrompt)}
             onDismiss={dismissInstallBanner}
@@ -4146,14 +4146,13 @@ function DashboardNextStep({ activeTrade, dataSource, hasPlan, support, resistan
   );
 }
 
-function CoachScoreGrid({ coachAction, disciplineGrade, nextStep, setupGrade, tradeBlockedByGrade }) {
+function CoachScoreGrid({ disciplineGrade, setupGrade }) {
   const setupTone = setupGrade.grade === "A" ? "#10b981"
     : setupGrade.grade === "B+" || setupGrade.grade === "B" ? "#facc15"
     : setupGrade.grade === "C" ? "#f97316"
     : setupGrade.state === "no_data" || setupGrade.state === "price_only" || setupGrade.state === "no_zones" || setupGrade.state === "waiting_for_setup" ? "#64748b"
     : "#ef4444";
   const discTone = disciplineGrade.grade === "A" ? "#10b981" : disciplineGrade.grade === "B" ? "#facc15" : disciplineGrade.grade === "C" ? "#f97316" : "#ef4444";
-  const action = tradeBlockedByGrade ? "NO TRADE" : coachAction;
   const mistake = disciplineGrade.mistakes[0] || "No active mistake patterns.";
   // For pre-grade states (no data, no zones, etc) suppress the "0/100" pill
   // since it's misleading — show only the friendly label/reason.
@@ -4182,11 +4181,6 @@ function CoachScoreGrid({ coachAction, disciplineGrade, nextStep, setupGrade, tr
         {disciplineGrade.mistakes.length > 1 ? (
           <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>+{disciplineGrade.mistakes.length - 1} more pattern{disciplineGrade.mistakes.length > 2 ? "s" : ""}</p>
         ) : null}
-      </div>
-      <div style={{ background: tradeBlockedByGrade ? "rgba(127,29,29,.45)" : "rgba(15,23,42,.78)", border: `1px solid ${tradeBlockedByGrade ? "#ef4444" : "#334155"}`, borderRadius: "14px", padding: "12px 14px" }}>
-        <p style={{ ...styles.cardLabel, margin: 0 }}>Next Best Action</p>
-        <strong style={{ color: tradeBlockedByGrade ? "#fca5a5" : "#e2e8f0", display: "block", fontSize: "16px", margin: "6px 0 4px" }}>{action}</strong>
-        <p style={{ color: "#94a3b8", fontSize: "12px", lineHeight: 1.4, margin: 0 }}>{nextStep}</p>
       </div>
     </section>
   );
@@ -5365,8 +5359,6 @@ function Dashboard({
           style={{ ...styles.secondaryButton, opacity: tradeState.hasPlan ? 1 : 0.45, cursor: tradeState.hasPlan ? "pointer" : "not-allowed" }}
           title={tradeState.hasPlan ? "Copy plan + grade to clipboard" : "No plan to share yet."}
         >Share Breakdown</button>
-        <span style={styles.muted}>Layout: {layoutPrefs.mode || "Pro"}</span>
-        <span style={styles.muted}>Active Trade: {tradeState.activeTrade ? `${(tradeState.activeTrade.direction || tradeState.direction || "").toUpperCase()} ${tradeState.activeTrade.market || profile.mainMarket}` : "None"}</span>
       </section>
       <DashboardNextStep
         activeTrade={activeTrade}
@@ -5376,24 +5368,7 @@ function Dashboard({
         resistance={resistance}
         onMarkActive={() => setMarkActiveModalOpen(true)}
       />
-      <SignalSourceCard
-        activeSymbol={profile.mainMarket}
-        candleSeries={liveCandleSeries}
-        connectionError={connectionError}
-        currentPrice={price}
-        dataSource={dataSource}
-        isOnline={isOnline}
-        priceSource={priceSource}
-        timeframe={activeTimeframe}
-        tradingViewSignal={tradingViewSignal}
-      />
-      <CoachScoreGrid
-        coachAction={coachDecision.action}
-        disciplineGrade={disciplineGrade}
-        nextStep={setupGrade.nextStep}
-        setupGrade={setupGrade}
-        tradeBlockedByGrade={tradeBlockedByGrade}
-      />
+      <CoachScoreGrid disciplineGrade={disciplineGrade} setupGrade={setupGrade} />
       {markActiveModalOpen ? (
         <MarkTradeActiveModal
           applyQuickSetup={applyQuickSetup}
@@ -5422,17 +5397,6 @@ function Dashboard({
       {customizeOpen ? (
         <CustomizeDashboardPanel layoutPrefs={layoutPrefs} notify={notify} setLayoutPrefs={setLayoutPrefs} />
       ) : null}
-      <section style={styles.card}>
-        <p style={styles.cardLabel}>Execution Flow</p>
-        <div style={styles.rulesGrid}>
-          <Metric label="1. Market" value={profile.mainMarket} />
-          <Metric label="2. Data Source" value={dataSource} />
-          <Metric label="3. Plan" value={tradeState.status === "WAITING" ? "Waiting" : tradeState.status === "INVALID" ? "Invalid" : "Ready"} tone={tradeState.hasPlan ? "good" : "warn"} />
-          <Metric label="4. Active Trade" value={tradeState.activeTrade ? tradeState.activeTrade.status : tradeState.status === "READY" ? "Waiting entry" : "None"} tone={tradeState.activeTrade ? "good" : "warn"} />
-          <Metric label="5. Manage" value={tradeState.manageMessage} tone={tradeState.status === "MANAGING" || tradeState.status === "ACTIVE" ? "good" : tradeState.status === "INVALID" ? "bad" : "warn"} />
-          <Metric label="6. Status" value={tradeState.status} tone={tradeState.status === "ACTIVE" || tradeState.status === "MANAGING" ? "good" : tradeState.status === "INVALID" ? "bad" : "warn"} />
-        </div>
-      </section>
       <section
         className={`dashboard-card-board mode-${String(effectiveLayout.mode || "Pro").toLowerCase().replace(/\s+/g, "-")}`}
         style={styles.dashboardCardBoard}
@@ -5458,6 +5422,18 @@ function Dashboard({
         currentPrice={price}
         dataSource={dataSource}
         lastUpdated={lastUpdated}
+        priceSource={priceSource}
+        timeframe={activeTimeframe}
+        tradingViewSignal={tradingViewSignal}
+      />
+
+      <SignalSourceCard
+        activeSymbol={profile.mainMarket}
+        candleSeries={liveCandleSeries}
+        connectionError={connectionError}
+        currentPrice={price}
+        dataSource={dataSource}
+        isOnline={isOnline}
         priceSource={priceSource}
         timeframe={activeTimeframe}
         tradingViewSignal={tradingViewSignal}
@@ -9555,15 +9531,16 @@ const styles = {
   },
   installBanner: {
     alignItems: "center",
-    background: "rgba(15, 23, 42, .94)",
-    border: "1px solid #38bdf8",
-    borderRadius: "14px",
+    background: "rgba(15, 23, 42, .85)",
+    border: "1px solid rgba(56, 189, 248, .45)",
+    borderRadius: "10px",
     display: "flex",
-    gap: "14px",
+    fontSize: "13px",
+    gap: "10px",
     justifyContent: "space-between",
-    marginBottom: "16px",
+    marginBottom: "12px",
     maxWidth: "100%",
-    padding: "14px",
+    padding: "8px 14px",
     flexWrap: "wrap",
     width: "100%",
   },
@@ -9838,7 +9815,7 @@ const styles = {
     background: "rgba(15, 23, 42, .9)",
     border: "1px solid #243b55",
     borderRadius: "14px",
-    display: "none",
+    display: "grid",
     gap: "10px",
     gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
     marginBottom: "14px",
