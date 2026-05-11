@@ -125,6 +125,115 @@ function aggregateCandles(candles, targetMinutes) {
   );
 }
 
+// Acceptable distance of a candle high/low from currentPrice. Anything beyond
+// this is treated as stale data from a previous symbol/session and rejected.
+function getCandlePriceBand(symbol, timeframeMinutes, currentPrice) {
+  const tf = Math.max(1, Math.round(Number(timeframeMinutes) || 1));
+  const sym = String(symbol || "").toUpperCase();
+  const tightTf = tf <= 5;
+  if (!sym || sym === "NQ" || sym === "MNQ" || sym.startsWith("NQ") || sym.startsWith("MNQ")) {
+    return tightTf ? 500 : 1000;
+  }
+  if (sym === "ES" || sym === "MES") return tightTf ? 80 : 160;
+  if (sym === "YM" || sym === "MYM") return tightTf ? 1500 : 3000;
+  if (sym === "RTY" || sym === "M2K") return tightTf ? 60 : 120;
+  if (sym === "CL") return tightTf ? 4 : 8;
+  if (sym === "GC") return tightTf ? 80 : 160;
+  if (sym.startsWith("BTC")) return tightTf ? 4000 : 8000;
+  if (sym.startsWith("ETH")) return tightTf ? 250 : 500;
+  // Stocks / custom — 5% of price (per spec).
+  const px = Number(currentPrice);
+  return Number.isFinite(px) && px > 0 ? Math.max(1, px * 0.05) : Infinity;
+}
+
+// Single candle validator. Returns true when OHLC is sane and the bar is
+// within the realistic price band of currentPrice.
+function isCandleRealistic(candle, { symbol, currentPrice, timeframeMinutes }) {
+  if (!candle) return false;
+  const open = Number(candle.open);
+  const high = Number(candle.high);
+  const low = Number(candle.low);
+  const close = Number(candle.close);
+  if (![open, high, low, close].every(Number.isFinite)) return false;
+  if (high < low) return false;
+  if (open < low - 1e-6 || open > high + 1e-6) return false;
+  if (close < low - 1e-6 || close > high + 1e-6) return false;
+  const cp = Number(currentPrice);
+  if (!Number.isFinite(cp) || cp <= 0) return true;
+  const band = getCandlePriceBand(symbol, timeframeMinutes, cp);
+  if (!Number.isFinite(band)) return true;
+  if (Math.abs(high - cp) > band) return false;
+  if (Math.abs(low - cp) > band) return false;
+  return true;
+}
+
+// Filter + telemetry. Returns { valid, rejected, reasons }.
+// `reasons` aggregates the count of each rejection reason for debug surfaces.
+function filterRealisticCandles(candles, options = {}) {
+  const reasons = { broken_ohlc: 0, out_of_band: 0 };
+  if (!Array.isArray(candles)) return { valid: [], rejected: 0, reasons };
+  const valid = [];
+  for (const candle of candles) {
+    if (!candle) continue;
+    const open = Number(candle.open);
+    const high = Number(candle.high);
+    const low = Number(candle.low);
+    const close = Number(candle.close);
+    if (![open, high, low, close].every(Number.isFinite) || high < low
+      || open < low - 1e-6 || open > high + 1e-6
+      || close < low - 1e-6 || close > high + 1e-6) {
+      reasons.broken_ohlc += 1;
+      continue;
+    }
+    if (!isCandleRealistic(candle, options)) {
+      reasons.out_of_band += 1;
+      continue;
+    }
+    valid.push(candle);
+  }
+  return { valid, rejected: candles.length - valid.length, reasons };
+}
+
+// New York session anchor. RTH opens 9:30 NY. Returns the most recent 9:30 NY
+// instant <= now. Server runs in any TZ; use Intl to convert.
+function getRthSessionStart(now = Date.now()) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date(now));
+  const get = (type) => Number(parts.find((p) => p.type === type)?.value);
+  const year = get("year"), month = get("month"), day = get("day");
+  const hour = get("hour"), minute = get("minute"), second = get("second");
+  // Build "today 9:30 NY" by walking back from current NY clock.
+  const minutesSinceNyMidnight = hour * 60 + minute + second / 60;
+  const minutesSinceOpen = minutesSinceNyMidnight - (9 * 60 + 30);
+  if (minutesSinceOpen >= 0) {
+    return now - Math.round(minutesSinceOpen * 60_000);
+  }
+  // Before 9:30 NY today — most recent RTH session start was 9:30 NY yesterday.
+  // today's 9:30 NY is `minutesUntilOpen` in the future; yesterday's is 24h before that.
+  const minutesUntilOpen = -minutesSinceOpen;
+  return now - Math.round((24 * 60 - minutesUntilOpen) * 60_000);
+}
+
+function getSessionAnchorMs({ now = Date.now(), candles = [] } = {}) {
+  // Prefer RTH 9:30 NY today. If no candles fall inside that window (e.g.
+  // overnight session with all timestamps before 9:30), fall back to the
+  // most-recent contiguous-day boundary represented in the candles.
+  const rth = getRthSessionStart(now);
+  if (Array.isArray(candles) && candles.some((c) => {
+    const ts = c?.timestamp ? new Date(c.timestamp).getTime() : NaN;
+    return Number.isFinite(ts) && ts >= rth;
+  })) return rth;
+  const recent = Array.isArray(candles) ? candles.at(-1) : null;
+  const lastMs = recent?.timestamp ? new Date(recent.timestamp).getTime() : NaN;
+  if (Number.isFinite(lastMs)) return lastMs - 4 * 60 * 60 * 1000;
+  return rth;
+}
+
 function pickFinestCandleSeries(history, symbol) {
   if (!history || typeof history !== "object") return [];
   const sym = String(symbol || "").trim().toUpperCase();
@@ -375,8 +484,23 @@ function validateZones({ supportZone, resistanceZone, currentPrice, market, time
 // Single canonical zone engine.
 // Input: raw candle array, currentPrice, timeframe (string|minutes), symbol
 // Output: { supportZones, resistanceZones, activeSupport, activeResistance, valid, reason, ...telemetry }
-function detectTradeZones(candleSeries, currentPrice, timeframe, symbol) {
-  const candles = Array.isArray(candleSeries) ? candleSeries.slice(-200) : [];
+function detectTradeZones(candleSeries, currentPrice, timeframe, symbol, options = {}) {
+  const allCandles = Array.isArray(candleSeries) ? candleSeries : [];
+  // Restrict to the current session when an anchor is supplied; otherwise cap
+  // at the most recent 200 candles. Either way, never consume the entire
+  // saved history (that's where the cross-session pollution came from).
+  const sessionAnchorMs = Number.isFinite(Number(options.sessionAnchorMs))
+    ? Number(options.sessionAnchorMs)
+    : null;
+  const sessionScoped = sessionAnchorMs !== null
+    ? allCandles.filter((c) => {
+        const ts = c?.timestamp ? new Date(c.timestamp).getTime() : NaN;
+        return Number.isFinite(ts) && ts >= sessionAnchorMs;
+      })
+    : [];
+  const candles = sessionScoped.length >= 20
+    ? sessionScoped.slice(-200)
+    : allCandles.slice(-200);
   const market = String(symbol || "").toUpperCase();
   const tfMinutes = typeof timeframe === "number" ? timeframe : parseTimeframeMinutes(timeframe);
   const minDistance = getMinZoneDistance(market, tfMinutes);
@@ -571,8 +695,8 @@ function detectTradeZones(candleSeries, currentPrice, timeframe, symbol) {
 
 // Backwards-compatible wrapper used by enrichedZoneDetection.
 function detectAutoSRZones(candleSeries, options = {}) {
-  const { currentPrice, market, timeframeMinutes } = options;
-  const result = detectTradeZones(candleSeries, currentPrice, timeframeMinutes, market);
+  const { currentPrice, market, timeframeMinutes, sessionAnchorMs } = options;
+  const result = detectTradeZones(candleSeries, currentPrice, timeframeMinutes, market, { sessionAnchorMs });
   return {
     supportZone: result.activeSupport,
     resistanceZone: result.activeResistance,
@@ -1320,6 +1444,7 @@ export default function App() {
   const [price, setPrice] = useState(marketDefaults[profile.mainMarket] ?? 27400);
   const [priceHistory, setPriceHistory] = useState([]);
   const [candleHistory, setCandleHistory] = useState(() => loadCandleHistory());
+  const previousMarketRef = useRef(profile.mainMarket);
   const [activeTimeframe, setActiveTimeframe] = useState("");
   const [tradingViewSignal, setTradingViewSignal] = useState(null);
   const [priceSource, setPriceSource] = useState("manual");
@@ -1405,6 +1530,25 @@ export default function App() {
       // localStorage may be full or disabled.
     }
   }, [candleHistory]);
+
+  // Symbol switch — drop every cached candle/key that does not belong to the
+  // new active symbol. Stops cross-symbol leakage into the zone engines.
+  useEffect(() => {
+    const previous = previousMarketRef.current;
+    if (previous === profile.mainMarket) return;
+    previousMarketRef.current = profile.mainMarket;
+    const activeSym = String(profile.mainMarket || "").trim().toUpperCase();
+    setCandleHistory((current) => {
+      if (!current || typeof current !== "object") return {};
+      const next = {};
+      for (const [key, value] of Object.entries(current)) {
+        const keySym = String(key.split("|")[0] || "").toUpperCase();
+        if (keySym === activeSym && Array.isArray(value)) next[key] = value;
+      }
+      return next;
+    });
+    setPriceHistory([]);
+  }, [profile.mainMarket]);
 
   useEffect(() => {
     try {
@@ -4397,7 +4541,7 @@ function SignalSourceCard({ activeSymbol, candleSeries, connectionError, current
   );
 }
 
-function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, notify, priceSource, profile, timeframe, tradingViewSignal, webhookDebug }) {
+function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, notify, priceSource, profile, timeframe, tradingViewSignal, webhookDebug, zoneDiagnostics }) {
   const [collapsed, setCollapsed] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendStatus, setSendStatus] = useState("");
@@ -4568,6 +4712,41 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
         <p style={{ color: "#fca5a5", fontSize: "12px", fontWeight: 800, margin: "8px 0 0" }}>
           Mismatch: parsed price differs from latest signal.
         </p>
+      ) : null}
+
+      {zoneDiagnostics ? (
+        <div style={{ borderTop: "1px solid #1e293b", marginTop: "14px", paddingTop: "12px" }}>
+          <p style={{ ...styles.cardLabel, margin: "0 0 8px" }}>Zone Diagnostics</p>
+          <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+            <div><span style={rowLabel}>Total candles</span><span style={rowValue}>{zoneDiagnostics.totalCandles ?? 0}</span></div>
+            <div><span style={rowLabel}>Valid candles</span><span style={rowValue}>{zoneDiagnostics.validCandles ?? 0}</span></div>
+            <div><span style={rowLabel}>Rejected</span><span style={rowValue}>{zoneDiagnostics.rejected ?? 0}{zoneDiagnostics.rejected ? ` (broken: ${zoneDiagnostics.rejectedReasons?.broken_ohlc ?? 0}, out-of-band: ${zoneDiagnostics.rejectedReasons?.out_of_band ?? 0})` : ""}</span></div>
+            <div><span style={rowLabel}>Symbol / TF</span><span style={rowValue}>{zoneDiagnostics.symbol || "—"} · {zoneDiagnostics.timeframe || "—"}</span></div>
+            <div><span style={rowLabel}>Current price</span><span style={rowValue}>{Number.isFinite(zoneDiagnostics.currentPrice) ? Number(zoneDiagnostics.currentPrice).toFixed(2) : "—"}</span></div>
+            <div><span style={rowLabel}>Session start (NY)</span><span style={rowValue}>{zoneDiagnostics.sessionStartLabel || "—"}</span></div>
+            <div><span style={rowLabel}>Open range candles</span><span style={rowValue}>{zoneDiagnostics.openRangeCandles ?? 0}</span></div>
+            <div><span style={rowLabel}>Open range</span><span style={rowValue}>{zoneDiagnostics.openRangeAvailable && Number.isFinite(zoneDiagnostics.openRangeLow) ? `${Number(zoneDiagnostics.openRangeLow).toFixed(2)} - ${Number(zoneDiagnostics.openRangeHigh).toFixed(2)}` : "Unavailable"}</span></div>
+            <div><span style={rowLabel}>Session H / L</span><span style={rowValue}>{Number.isFinite(zoneDiagnostics.sessionHigh) ? `${Number(zoneDiagnostics.sessionHigh).toFixed(2)} / ${Number(zoneDiagnostics.sessionLow).toFixed(2)}` : "—"}</span></div>
+            <div><span style={rowLabel}>Swing H / L count</span><span style={rowValue}>{zoneDiagnostics.swingHighs ?? 0} / {zoneDiagnostics.swingLows ?? 0}</span></div>
+            <div><span style={rowLabel}>Zone source</span><span style={rowValue}>{zoneDiagnostics.zoneSource || "—"}</span></div>
+            <div><span style={rowLabel}>Zones valid</span><span style={{ ...rowValue, color: zoneDiagnostics.zonesValid ? "#5eead4" : "#fca5a5" }}>{zoneDiagnostics.zonesValid ? "Yes" : `No${zoneDiagnostics.zoneReason ? ` — ${zoneDiagnostics.zoneReason}` : ""}`}</span></div>
+          </div>
+          {zoneDiagnostics.totalCandles > 0 && zoneDiagnostics.validCandles < 20 ? (
+            <p style={{ background: "rgba(56,189,248,.08)", border: "1px solid rgba(56,189,248,.3)", borderRadius: "8px", color: "#7dd3fc", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
+              Need more candles for reliable zones.
+            </p>
+          ) : null}
+          {zoneDiagnostics.openRangeAvailable === false ? (
+            <p style={{ background: "rgba(148,163,184,.08)", border: "1px solid rgba(148,163,184,.25)", borderRadius: "8px", color: "#cbd5e1", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
+              Open range unavailable for this session.
+            </p>
+          ) : null}
+          {zoneDiagnostics.totalCandles > 0 && zoneDiagnostics.rejected > 0 && zoneDiagnostics.validCandles === 0 ? (
+            <p style={{ background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.3)", borderRadius: "8px", color: "#fde68a", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
+              Collecting fresh TradingView candles…
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
       <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "10px", marginTop: "14px" }}>
@@ -4962,9 +5141,25 @@ function Dashboard({
     [candleHistory, profile.mainMarket, activeTimeframe],
   );
   const chartTimeframeMinutes = parseTimeframeMinutes(chartTimeframe);
-  const liveCandleSeries = useMemo(
+  const rawLiveCandleSeries = useMemo(
     () => aggregateCandles(baseCandleSeries, chartTimeframeMinutes),
     [baseCandleSeries, chartTimeframeMinutes],
+  );
+  // Single source of truth for "candles we trust right now". Drops broken OHLC
+  // and bars whose price is implausibly far from the current quote (stale data
+  // from a previous symbol, mock seed, or pre-TradingView session).
+  const candleFilterResult = useMemo(
+    () => filterRealisticCandles(rawLiveCandleSeries, {
+      symbol: profile.mainMarket,
+      currentPrice: price,
+      timeframeMinutes: chartTimeframeMinutes,
+    }),
+    [rawLiveCandleSeries, profile.mainMarket, price, chartTimeframeMinutes],
+  );
+  const liveCandleSeries = candleFilterResult.valid;
+  const sessionAnchorMs = useMemo(
+    () => getSessionAnchorMs({ candles: liveCandleSeries }),
+    [liveCandleSeries],
   );
   const displayedTimeframe = timeframeLabel(chartTimeframe);
   const hasLiveCandles = liveCandleSeries.length >= 6;
@@ -4973,23 +5168,27 @@ function Dashboard({
       currentPrice: price,
       market: profile.mainMarket,
       timeframeMinutes: chartTimeframeMinutes,
+      sessionAnchorMs,
     }),
-    [liveCandleSeries, price, profile.mainMarket, chartTimeframeMinutes],
+    [liveCandleSeries, price, profile.mainMarket, chartTimeframeMinutes, sessionAnchorMs],
   );
-  const chartData = useMemo(
-    () => priceHistory.length >= 2
+  // Always feed the level engines from real candles (filtered) when we have
+  // them. Falling back to chartDataToCandles(priceHistory) was the source of
+  // the unrealistic open-range / swing-high values reported by users.
+  const candles = useMemo(() => {
+    if (liveCandleSeries.length) return liveCandleSeries;
+    const chartData = priceHistory.length >= 2
       ? priceHistory
-      : buildChartData({ price, entry, stop: engine.smartStop, support, resistance, trim1: engine.trim1, trim2: engine.trim2, runner: engine.runner }),
-    [priceHistory, engine.runner, engine.smartStop, engine.trim1, engine.trim2, entry, price, resistance, support],
-  );
-  const candles = useMemo(() => chartDataToCandles(chartData), [chartData]);
+      : buildChartData({ price, entry, stop: engine.smartStop, support, resistance, trim1: engine.trim1, trim2: engine.trim2, runner: engine.runner });
+    return chartDataToCandles(chartData);
+  }, [liveCandleSeries, priceHistory, engine.runner, engine.smartStop, engine.trim1, engine.trim2, entry, price, resistance, support]);
   const zoneDetection = useMemo(
-    () => detectKeyLevelsFromCandles(candles, { entry, price, resistance, support }),
-    [candles, entry, price, resistance, support],
+    () => detectKeyLevelsFromCandles(candles, { entry, price, resistance, support, sessionAnchorMs }),
+    [candles, entry, price, resistance, support, sessionAnchorMs],
   );
   const marketStructure = useMemo(
-    () => analyzeMarketStructure(candles, { price, resistance, support }),
-    [candles, price, resistance, support],
+    () => analyzeMarketStructure(candles, { price, resistance, support, sessionAnchorMs }),
+    [candles, price, resistance, support, sessionAnchorMs],
   );
   const enrichedZoneDetection = useMemo(() => {
     const base = {
@@ -5090,6 +5289,32 @@ function Dashboard({
 
     return base;
   }, [zoneDetection, marketStructure, autoSR, support, resistance, price, profile.mainMarket, chartTimeframeMinutes]);
+
+  // Telemetry surfaced in the Signal Debug panel so users can see exactly why
+  // a zone is or isn't trustworthy.
+  const zoneDiagnostics = useMemo(() => ({
+    totalCandles: rawLiveCandleSeries.length,
+    validCandles: liveCandleSeries.length,
+    rejected: candleFilterResult.rejected,
+    rejectedReasons: candleFilterResult.reasons,
+    symbol: profile.mainMarket,
+    timeframe: activeTimeframe || chartTimeframe,
+    currentPrice: price,
+    sessionStartMs: sessionAnchorMs,
+    sessionStartLabel: sessionAnchorMs ? new Date(sessionAnchorMs).toLocaleString() : null,
+    openRangeAvailable: zoneDetection.openRangeAvailable !== false,
+    openRangeCandles: Number(zoneDetection.openRangeCandles ?? 0),
+    openRangeHigh: zoneDetection.openRangeHigh ?? null,
+    openRangeLow: zoneDetection.openRangeLow ?? null,
+    sessionHigh: enrichedZoneDetection.sessionHigh ?? null,
+    sessionLow: enrichedZoneDetection.sessionLow ?? null,
+    swingHighs: Array.isArray(marketStructure.swingHighs) ? marketStructure.swingHighs.length : 0,
+    swingLows: Array.isArray(marketStructure.swingLows) ? marketStructure.swingLows.length : 0,
+    zoneSource: enrichedZoneDetection.source || zoneDetection.source || "unknown",
+    zonesValid: enrichedZoneDetection.zonesValid !== false,
+    zoneReason: enrichedZoneDetection.zoneReason || "",
+  }), [rawLiveCandleSeries.length, liveCandleSeries.length, candleFilterResult, profile.mainMarket, activeTimeframe, chartTimeframe, price, sessionAnchorMs, zoneDetection, enrichedZoneDetection, marketStructure]);
+
   const marketSpec = marketSpecs[profile.mainMarket] ?? customMarketSpec;
   const activeBias = normalizeActiveBias(levelBias);
   const autoTradePlan = getAutoTradePlan({
@@ -5735,6 +5960,7 @@ function Dashboard({
           timeframe={activeTimeframe}
           tradingViewSignal={tradingViewSignal}
           webhookDebug={webhookDebug}
+          zoneDiagnostics={zoneDiagnostics}
         />
       ) : null}
 
@@ -6567,6 +6793,7 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
       low: Number(candle.low ?? candle.close),
       open: Number(candle.open ?? candle.close),
       timestamp: candle.timestamp,
+      ts: candle.timestamp ? new Date(candle.timestamp).getTime() : NaN,
     }))
     .filter((candle) => [candle.close, candle.high, candle.low, candle.open].every(Number.isFinite));
 
@@ -6582,29 +6809,87 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
     };
   }
 
-  const highs = clean.map((candle) => candle.high);
-  const lows = clean.map((candle) => candle.low);
+  // Constrain analysis to current session candles. Falls back to the most
+  // recent 100 candles when timestamps aren't available so legacy mock data
+  // doesn't poison the levels.
+  const sessionAnchorMs = Number.isFinite(Number(fallback.sessionAnchorMs))
+    ? Number(fallback.sessionAnchorMs)
+    : null;
+  const sessionCandles = sessionAnchorMs !== null
+    ? clean.filter((c) => Number.isFinite(c.ts) && c.ts >= sessionAnchorMs)
+    : clean.slice(-100);
+  const recent = sessionCandles.length >= 6 ? sessionCandles : clean.slice(-100);
+
+  const highs = recent.map((candle) => candle.high);
+  const lows = recent.map((candle) => candle.low);
   const sessionHigh = Math.max(...highs);
   const sessionLow = Math.min(...lows);
-  const priorHigh = Math.max(...highs.slice(0, -1));
-  const priorLow = Math.min(...lows.slice(0, -1));
-  const openRangeCandles = clean.slice(0, Math.min(6, clean.length));
-  const openRangeHigh = Math.max(...openRangeCandles.map((candle) => candle.high));
-  const openRangeLow = Math.min(...openRangeCandles.map((candle) => candle.low));
-  const swingHighs = [];
-  const swingLows = [];
+  const priorHigh = recent.length > 1 ? Math.max(...highs.slice(0, -1)) : sessionHigh;
+  const priorLow = recent.length > 1 ? Math.min(...lows.slice(0, -1)) : sessionLow;
 
-  for (let index = 1; index < clean.length - 1; index += 1) {
-    if (clean[index].high >= clean[index - 1].high && clean[index].high >= clean[index + 1].high) swingHighs.push(clean[index].high);
-    if (clean[index].low <= clean[index - 1].low && clean[index].low <= clean[index + 1].low) swingLows.push(clean[index].low);
+  // Open range: first 15 minutes of the active session (RTH 9:30 NY).
+  // If no candles fall inside that window, openRange is unavailable instead
+  // of being faked from "first 6 bars" of the entire history.
+  let openRangeHigh = null;
+  let openRangeLow = null;
+  let openRangeCount = 0;
+  let openRangeAvailable = false;
+  if (sessionAnchorMs !== null) {
+    const orWindow = sessionAnchorMs + 15 * 60_000;
+    const orCandles = clean.filter((c) => Number.isFinite(c.ts) && c.ts >= sessionAnchorMs && c.ts <= orWindow);
+    openRangeCount = orCandles.length;
+    if (orCandles.length) {
+      openRangeHigh = Math.max(...orCandles.map((c) => c.high));
+      openRangeLow = Math.min(...orCandles.map((c) => c.low));
+      openRangeAvailable = true;
+    }
   }
 
-  const currentPrice = Number(fallback.price || clean.at(-1).close);
+  // Swing pivots from the most recent 100 valid candles only.
+  const swingPool = recent.slice(-100);
+  const swingHighs = [];
+  const swingLows = [];
+  for (let index = 1; index < swingPool.length - 1; index += 1) {
+    if (swingPool[index].high >= swingPool[index - 1].high && swingPool[index].high >= swingPool[index + 1].high) swingHighs.push(swingPool[index].high);
+    if (swingPool[index].low <= swingPool[index - 1].low && swingPool[index].low <= swingPool[index + 1].low) swingLows.push(swingPool[index].low);
+  }
+
+  const currentPrice = Number(fallback.price || recent.at(-1).close);
+  // Rejection zones must lie within a reasonable band of currentPrice — the
+  // old engine emitted levels like 43905.37 when stale candles slipped in.
+  const rejectionBand = Math.max(Math.abs(currentPrice) * 0.01, sessionHigh - sessionLow);
+  const inBand = (level) => Number.isFinite(level)
+    && Number.isFinite(currentPrice)
+    && Math.abs(level - currentPrice) <= rejectionBand * 4;
   const rejectionPad = Math.max(1, (sessionHigh - sessionLow) * 0.018);
-  const rejectionHighs = findRepeatedRejectionLevels([...swingHighs, priorHigh, openRangeHigh, sessionHigh], rejectionPad);
-  const rejectionLows = findRepeatedRejectionLevels([...swingLows, priorLow, openRangeLow, sessionLow], rejectionPad);
-  const supportLevel = averageNearest([fallback.support, priorLow, openRangeLow, sessionLow, ...swingLows, ...rejectionLows].filter(Number.isFinite), currentPrice, "below");
-  const resistanceLevel = averageNearest([fallback.resistance, priorHigh, openRangeHigh, sessionHigh, ...swingHighs, ...rejectionHighs].filter(Number.isFinite), currentPrice, "above");
+  const rawRejectionHighs = findRepeatedRejectionLevels(
+    [...swingHighs, priorHigh, ...(openRangeAvailable ? [openRangeHigh] : []), sessionHigh].filter(inBand),
+    rejectionPad,
+  );
+  const rawRejectionLows = findRepeatedRejectionLevels(
+    [...swingLows, priorLow, ...(openRangeAvailable ? [openRangeLow] : []), sessionLow].filter(inBand),
+    rejectionPad,
+  );
+  const rejectionHighs = rawRejectionHighs.filter(inBand);
+  const rejectionLows = rawRejectionLows.filter(inBand);
+
+  const supportPool = [
+    fallback.support, priorLow,
+    ...(openRangeAvailable ? [openRangeLow] : []),
+    sessionLow,
+    ...swingLows,
+    ...rejectionLows,
+  ].filter(Number.isFinite).filter((level) => Math.abs(level - currentPrice) <= rejectionBand * 4);
+  const resistancePool = [
+    fallback.resistance, priorHigh,
+    ...(openRangeAvailable ? [openRangeHigh] : []),
+    sessionHigh,
+    ...swingHighs,
+    ...rejectionHighs,
+  ].filter(Number.isFinite).filter((level) => Math.abs(level - currentPrice) <= rejectionBand * 4);
+
+  const supportLevel = averageNearest(supportPool, currentPrice, "below");
+  const resistanceLevel = averageNearest(resistancePool, currentPrice, "above");
   const zonePad = Math.max(1, (sessionHigh - sessionLow) * 0.015);
   const middleLow = Number((supportLevel + (resistanceLevel - supportLevel) * 0.38).toFixed(2));
   const middleHigh = Number((supportLevel + (resistanceLevel - supportLevel) * 0.62).toFixed(2));
@@ -6613,13 +6898,15 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
     breakoutLevel: resistanceLevel,
     repeatedRejectionHighs: Array.isArray(rejectionHighs) ? rejectionHighs : [],
     repeatedRejectionLows: Array.isArray(rejectionLows) ? rejectionLows : [],
-    message: "Zones are estimated from recent swing highs/lows, repeated rejection areas, prior levels, session range, and opening range.",
+    message: "Zones are estimated from recent session swing highs/lows, repeated rejection areas, prior levels, session range, and opening range.",
     middleZone: `${middleLow.toFixed(2)} - ${middleHigh.toFixed(2)}`,
     middleZoneHigh: middleHigh,
     middleZoneLow: middleLow,
-    openRange: `${openRangeLow.toFixed(2)} - ${openRangeHigh.toFixed(2)}`,
-    openRangeHigh,
-    openRangeLow,
+    openRange: openRangeAvailable ? `${openRangeLow.toFixed(2)} - ${openRangeHigh.toFixed(2)}` : "",
+    openRangeHigh: openRangeAvailable ? openRangeHigh : null,
+    openRangeLow: openRangeAvailable ? openRangeLow : null,
+    openRangeAvailable,
+    openRangeCandles: openRangeCount,
     priorHigh,
     priorLow,
     pullbackSupport: supportLevel,
@@ -6630,7 +6917,9 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
     resistanceZone: `${(resistanceLevel - zonePad).toFixed(2)} - ${(resistanceLevel + zonePad).toFixed(2)}`,
     sessionHigh,
     sessionLow,
-    source: "mock/manual candles",
+    sessionCandleCount: recent.length,
+    sessionAnchorMs,
+    source: sessionAnchorMs !== null ? "session-candles" : "recent-100-candles",
     supportLevel,
     supportZoneHigh: Number((supportLevel + zonePad).toFixed(2)),
     supportZoneLow: Number((supportLevel - zonePad).toFixed(2)),
@@ -6647,11 +6936,22 @@ function analyzeMarketStructure(candles = [], fallback = {}) {
       low: Number(c.low ?? c.close),
       open: Number(c.open ?? c.close),
       volume: Number(c.volume ?? 1),
+      ts: c.timestamp ? new Date(c.timestamp).getTime() : NaN,
     }))
     .filter((c) => [c.close, c.high, c.low, c.open].every(Number.isFinite));
 
-  const currentPrice = Number(fallback.price ?? clean.at(-1)?.close ?? 0);
-  if (!clean.length) {
+  // Restrict to the active session when an anchor is supplied. Otherwise cap
+  // to the last 100 valid candles — never the entire saved history.
+  const sessionAnchorMs = Number.isFinite(Number(fallback.sessionAnchorMs))
+    ? Number(fallback.sessionAnchorMs)
+    : null;
+  const sessionScoped = sessionAnchorMs !== null
+    ? clean.filter((c) => Number.isFinite(c.ts) && c.ts >= sessionAnchorMs)
+    : [];
+  const recent = sessionScoped.length >= 6 ? sessionScoped : clean.slice(-100);
+
+  const currentPrice = Number(fallback.price ?? recent.at(-1)?.close ?? 0);
+  if (!recent.length) {
     return {
       liquiditySweepHigh: null,
       liquiditySweepLow: null,
@@ -6665,38 +6965,38 @@ function analyzeMarketStructure(candles = [], fallback = {}) {
     };
   }
 
-  // Swing highs and lows (3-bar pivot)
+  // Swing highs and lows (3-bar pivot) — restricted to recent session candles.
   const swingHighs = [];
   const swingLows = [];
-  for (let i = 1; i < clean.length - 1; i++) {
-    if (clean[i].high > clean[i - 1].high && clean[i].high > clean[i + 1].high) swingHighs.push(clean[i].high);
-    if (clean[i].low < clean[i - 1].low && clean[i].low < clean[i + 1].low) swingLows.push(clean[i].low);
+  for (let i = 1; i < recent.length - 1; i++) {
+    if (recent[i].high > recent[i - 1].high && recent[i].high > recent[i + 1].high) swingHighs.push(recent[i].high);
+    if (recent[i].low < recent[i - 1].low && recent[i].low < recent[i + 1].low) swingLows.push(recent[i].low);
   }
 
-  // Session extremes
-  const sessionHigh = Math.max(...clean.map((c) => c.high));
-  const sessionLow = Math.min(...clean.map((c) => c.low));
+  // Session extremes — only from current session candles (or last 100 fallback).
+  const sessionHigh = Math.max(...recent.map((c) => c.high));
+  const sessionLow = Math.min(...recent.map((c) => c.low));
 
   // VWAP proxy: weighted average of typical price by volume
-  const totalVolume = clean.reduce((sum, c) => sum + c.volume, 0);
+  const totalVolume = recent.reduce((sum, c) => sum + c.volume, 0);
   const vwap = totalVolume > 0
-    ? Number((clean.reduce((sum, c) => sum + ((c.high + c.low + c.close) / 3) * c.volume, 0) / totalVolume).toFixed(2))
+    ? Number((recent.reduce((sum, c) => sum + ((c.high + c.low + c.close) / 3) * c.volume, 0) / totalVolume).toFixed(2))
     : Number(((sessionHigh + sessionLow) / 2).toFixed(2));
 
   // Liquidity sweep detection: price briefly exceeded a prior swing level then reversed
   let liquiditySweepHigh = null;
   let liquiditySweepLow = null;
-  if (swingHighs.length >= 2 && clean.length >= 3) {
+  if (swingHighs.length >= 2 && recent.length >= 3) {
     const priorSwingHigh = swingHighs[swingHighs.length - 2];
-    const last = clean.at(-1);
-    const prev = clean.at(-2);
+    const last = recent.at(-1);
+    const prev = recent.at(-2);
     if (last.high > priorSwingHigh && last.close < priorSwingHigh) liquiditySweepHigh = priorSwingHigh;
     if (prev.high > priorSwingHigh && prev.close < priorSwingHigh) liquiditySweepHigh = priorSwingHigh;
   }
-  if (swingLows.length >= 2 && clean.length >= 3) {
+  if (swingLows.length >= 2 && recent.length >= 3) {
     const priorSwingLow = swingLows[swingLows.length - 2];
-    const last = clean.at(-1);
-    const prev = clean.at(-2);
+    const last = recent.at(-1);
+    const prev = recent.at(-2);
     if (last.low < priorSwingLow && last.close > priorSwingLow) liquiditySweepLow = priorSwingLow;
     if (prev.low < priorSwingLow && prev.close > priorSwingLow) liquiditySweepLow = priorSwingLow;
   }
