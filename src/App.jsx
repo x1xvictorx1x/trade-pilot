@@ -332,18 +332,20 @@ function pickCandleSeries(history, symbol, timeframe) {
 function getMinZoneDistance(market, timeframeMinutes) {
   const tf = Math.max(1, Math.round(Number(timeframeMinutes) || 1));
   const sym = String(market || "").toUpperCase();
-  const nqDefault = tf >= 15 ? 50 : tf >= 5 ? 30 : 20;
+  // Tuned per timeframe: 1m=10, 2m=14, 5m=20, 15m=35. The previous floor
+  // (1m=20) flagged "zones too compressed" on every routine NQ pullback.
+  const nqDefault = tf >= 15 ? 35 : tf >= 5 ? 20 : tf >= 2 ? 14 : 10;
   if (!sym || sym === "NQ" || sym === "MNQ" || sym.startsWith("NQ") || sym.startsWith("MNQ")) {
     return nqDefault;
   }
-  if (sym === "ES" || sym === "MES") return tf >= 15 ? 12 : tf >= 5 ? 8 : 5;
-  if (sym === "YM" || sym === "MYM") return tf >= 15 ? 200 : tf >= 5 ? 120 : 80;
-  if (sym === "RTY" || sym === "M2K") return tf >= 15 ? 8 : tf >= 5 ? 5 : 3;
-  if (sym === "CL") return tf >= 15 ? 0.5 : tf >= 5 ? 0.3 : 0.2;
-  if (sym === "GC") return tf >= 15 ? 12 : tf >= 5 ? 8 : 5;
-  if (sym.startsWith("BTC")) return tf >= 15 ? 400 : tf >= 5 ? 250 : 150;
-  if (sym.startsWith("ETH")) return tf >= 15 ? 25 : tf >= 5 ? 15 : 10;
-  if (sym === "SPY" || sym === "QQQ") return tf >= 15 ? 1.5 : tf >= 5 ? 1 : 0.5;
+  if (sym === "ES" || sym === "MES") return tf >= 15 ? 9 : tf >= 5 ? 5 : tf >= 2 ? 3.5 : 2.5;
+  if (sym === "YM" || sym === "MYM") return tf >= 15 ? 140 : tf >= 5 ? 80 : tf >= 2 ? 55 : 40;
+  if (sym === "RTY" || sym === "M2K") return tf >= 15 ? 6 : tf >= 5 ? 3.5 : tf >= 2 ? 2.5 : 1.8;
+  if (sym === "CL") return tf >= 15 ? 0.35 : tf >= 5 ? 0.2 : tf >= 2 ? 0.14 : 0.1;
+  if (sym === "GC") return tf >= 15 ? 9 : tf >= 5 ? 5 : tf >= 2 ? 3.5 : 2.5;
+  if (sym.startsWith("BTC")) return tf >= 15 ? 280 : tf >= 5 ? 160 : tf >= 2 ? 110 : 75;
+  if (sym.startsWith("ETH")) return tf >= 15 ? 18 : tf >= 5 ? 10 : tf >= 2 ? 7 : 5;
+  if (sym === "SPY" || sym === "QQQ") return tf >= 15 ? 1.1 : tf >= 5 ? 0.7 : tf >= 2 ? 0.45 : 0.3;
   return nqDefault;
 }
 
@@ -972,7 +974,8 @@ const defaultLayout = {
   score: true,
   tradePlan: true,
   watchlist: true,
-  cardOrder: ["coach", "tradePlan", "chart", "risk", "propFirmRules", "journal", "watchlist", "alerts", "performanceStats"],
+  // Chart is the hero — coach + plan immediately under it, then risk/journal/etc.
+  cardOrder: ["chart", "coach", "tradePlan", "risk", "propFirmRules", "performanceStats", "watchlist", "alerts", "journal"],
 };
 
 const dashboardCardOptions = [
@@ -1274,6 +1277,21 @@ export default function App() {
       // ignore quota/private mode
     }
   }, [debugMode]);
+  // Shift+D toggles Debug Mode globally. Skipped while typing in inputs so
+  // capitalising "D" in a field doesn't accidentally flip the panel.
+  useEffect(() => {
+    const handler = (event) => {
+      if (!event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key !== "D" && event.key !== "d") return;
+      const target = event.target;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
+      event.preventDefault();
+      setDebugMode((current) => !current);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
   const audioReadyRef = useRef(false);
   const lastClosedTradeRef = useRef("");
   const [autoPrice, setAutoPrice] = useState(true);
@@ -3008,8 +3026,8 @@ export default function App() {
           .dashboard-grid { grid-template-columns: 1fr !important; }
           .app-container, .page-container, .dashboard-container { padding: 16px; }
           .home-feature-grid { grid-template-columns: 1fr !important; }
-          .chart-panel { min-height: 300px; }
-          .tradepilot-chart-wrap { height: 300px !important; }
+          .chart-panel { min-height: 320px; padding: 12px !important; }
+          .tradepilot-chart-wrap { height: 320px !important; max-width: 100% !important; overflow: hidden !important; }
         }
         .mobile-launch-button { display: none !important; }
         .mobile-menu-item { display: none !important; }
@@ -3040,10 +3058,13 @@ export default function App() {
           }
           .tradepilot-top-actions { margin-left: auto !important; position: static !important; width: auto !important; justify-content: flex-end !important; gap: 8px !important; }
           .mobile-menu-button {
-            height: 44px !important;
-            width: 44px !important;
-            min-height: 44px !important;
-            min-width: 44px !important;
+            height: 48px !important;
+            width: 48px !important;
+            min-height: 48px !important;
+            min-width: 48px !important;
+            position: relative !important;
+            z-index: 9999 !important;
+            pointer-events: auto !important;
           }
           .mobile-drawer {
             background: #05070d !important;
@@ -3090,13 +3111,13 @@ export default function App() {
           .mobile-menu-item { display: block !important; width: 100% !important; }
           .dashboard-card-board { display: flex !important; flex-direction: column !important; max-width: 100% !important; width: 100% !important; }
           .dashboard-card-slot { max-width: 100% !important; min-width: 0 !important; width: 100% !important; }
+          .card-chart { order: 1; }
           .card-coach { order: 2; }
           .card-tradePlan { order: 3; }
-          .card-chart { order: 4; }
-          .card-risk { order: 5; }
-          .card-journal { order: 6; }
-          .card-performanceStats { order: 7; }
-          .card-alerts, .card-watchlist, .card-propFirmRules { order: 8; }
+          .card-risk { order: 4; }
+          .card-performanceStats { order: 5; }
+          .card-alerts, .card-watchlist, .card-propFirmRules { order: 6; }
+          .card-journal { order: 7; }
           .onboarding-card { max-width: 100% !important; width: 100% !important; }
           .onboarding-card button { width: 100% !important; }
           .install-banner {
@@ -3184,23 +3205,29 @@ export default function App() {
                 </button>
                 <div style={styles.moreWrap}>
                   <button
+                    aria-expanded={moreMenuOpen}
                     aria-label={moreMenuOpen ? "Close menu" : "Open menu"}
                     className="mobile-menu-button"
                     onClick={() => setMoreMenuOpen((open) => !open)}
                     style={styles.menuButton}
+                    type="button"
                   >
                     <span style={styles.menuBar} />
                     <span style={styles.menuBar} />
                     <span style={styles.menuBar} />
                   </button>
-                  <button
-                    aria-hidden={!moreMenuOpen}
-                    aria-label="Close mobile menu"
-                    className={`mobile-overlay${moreMenuOpen ? "" : " closed"}`}
-                    onClick={() => setMoreMenuOpen(false)}
-                    style={styles.mobileOverlay}
-                    tabIndex={moreMenuOpen ? 0 : -1}
-                  />
+                  {/* Only mount the full-screen overlay when the drawer is open.
+                      Otherwise its position:fixed inset:0 blocks every tap on
+                      the page — including the hamburger button itself. */}
+                  {moreMenuOpen ? (
+                    <button
+                      aria-label="Close mobile menu"
+                      className="mobile-overlay"
+                      onClick={() => setMoreMenuOpen(false)}
+                      style={styles.mobileOverlay}
+                      type="button"
+                    />
+                  ) : null}
                   <div className={`tradepilot-more-menu mobile-drawer${moreMenuOpen ? "" : " closed"}`} style={styles.moreMenu}>
                       {navigationTabs.map((tab) => (
                         <button
@@ -3211,6 +3238,7 @@ export default function App() {
                             setMoreMenuOpen(false);
                           }}
                           style={styles.moreMenuItem}
+                          type="button"
                         >
                           {tab}
                         </button>
@@ -3224,10 +3252,25 @@ export default function App() {
                             setMoreMenuOpen(false);
                           }}
                           style={styles.moreMenuItem}
+                          type="button"
                         >
                           {tab}
                         </button>
                       ))}
+                      {debugMode ? (
+                        <button
+                          className="mobile-menu-item"
+                          key="mobile-debug"
+                          onClick={() => {
+                            setActivePage("dashboard");
+                            setMoreMenuOpen(false);
+                          }}
+                          style={{ ...styles.moreMenuItem, color: "#fde68a" }}
+                          type="button"
+                        >
+                          Debug Panel
+                        </button>
+                      ) : null}
                       <label style={styles.moreToggle}>
                         <input
                           type="checkbox"
@@ -3244,6 +3287,7 @@ export default function App() {
                             setMoreMenuOpen(false);
                           }}
                           style={styles.moreMenuItem}
+                          type="button"
                         >
                           Log Out
                         </button>
@@ -4354,6 +4398,7 @@ function SignalSourceCard({ activeSymbol, candleSeries, connectionError, current
 }
 
 function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, notify, priceSource, profile, timeframe, tradingViewSignal, webhookDebug }) {
+  const [collapsed, setCollapsed] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendStatus, setSendStatus] = useState("");
   const debug = webhookDebug || {};
@@ -4450,13 +4495,26 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
 
   return (
     <section style={{ background: "rgba(15,23,42,.7)", border: "1px solid #1e293b", borderRadius: "12px", margin: "0 0 14px", padding: "14px 16px" }}>
-      <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "10px", justifyContent: "space-between", marginBottom: "10px" }}>
+      <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "10px", justifyContent: "space-between", marginBottom: collapsed ? 0 : "10px" }}>
         <p style={{ ...styles.cardLabel, margin: 0 }}>TradingView Signal Debug</p>
-        <span style={{ background: feedTone.bg, border: `1px solid ${feedTone.color}55`, borderRadius: "999px", color: feedTone.color, fontSize: "11px", fontWeight: 800, letterSpacing: ".06em", padding: "3px 10px", textTransform: "uppercase" }}>
-          Feed: {feedTone.label}
-        </span>
+        <div style={{ alignItems: "center", display: "flex", gap: "8px" }}>
+          <span style={{ background: feedTone.bg, border: `1px solid ${feedTone.color}55`, borderRadius: "999px", color: feedTone.color, fontSize: "11px", fontWeight: 800, letterSpacing: ".06em", padding: "3px 10px", textTransform: "uppercase" }}>
+            Feed: {feedTone.label}
+          </span>
+          <button
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? "Expand debug panel" : "Collapse debug panel"}
+            onClick={() => setCollapsed((value) => !value)}
+            style={{ background: "transparent", border: "1px solid #334155", borderRadius: "8px", color: "#cbd5e1", cursor: "pointer", fontSize: "11px", fontWeight: 800, padding: "4px 10px" }}
+            type="button"
+          >
+            {collapsed ? "Expand" : "Collapse"}
+          </button>
+        </div>
       </div>
 
+      {collapsed ? null : (
+      <>
       <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
         <div><span style={rowLabel}>Last received</span><span style={rowValue}>{lastReceivedLabel}</span></div>
         <div><span style={rowLabel}>Parsed symbol</span><span style={rowValue}>{parsed?.symbol || tradingViewSignal?.symbol || debug.symbol || "—"}</span></div>
@@ -4532,6 +4590,8 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
         </button>
         {sendStatus ? <span style={{ color: "#94a3b8", fontSize: "12px" }}>{sendStatus}</span> : null}
       </div>
+      </>
+      )}
     </section>
   );
 }
@@ -7761,22 +7821,16 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
 function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPrice, debugMode = false, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
   const candles = Array.isArray(candleSeries) ? candleSeries : [];
   const haveEnoughCandles = candles.length >= 20;
-  // Per spec: zones only render if support is below current price, resistance is above,
-  // distance is not too tight, AND we have at least 20 candles to base them on.
+  // Defer the "is the spacing reasonable?" decision to the upstream zone
+  // engine via zoneDetection.zonesValid. Just sanity-check ordering here so
+  // we never render a support line above the price.
   const zoneSpacingValid = (() => {
     if (!Number.isFinite(Number(currentPrice))) return false;
     const cp = Number(currentPrice);
-    const supLow = Number(zoneDetection.supportZoneLow);
     const supHigh = Number(zoneDetection.supportZoneHigh);
     const resLow = Number(zoneDetection.resistanceZoneLow);
-    const resHigh = Number(zoneDetection.resistanceZoneHigh);
-    if (![supLow, supHigh, resLow, resHigh].every(Number.isFinite)) return false;
-    if (!(supHigh < cp)) return false;
-    if (!(resLow > cp)) return false;
-    const minSpread = Math.max(0.5, Math.abs(cp) * 0.001);
-    if ((cp - supHigh) < minSpread) return false;
-    if ((resLow - cp) < minSpread) return false;
-    return true;
+    if (![supHigh, resLow].every(Number.isFinite)) return false;
+    return supHigh < cp && resLow > cp;
   })();
   const zonesValid = zoneDetection.zonesValid !== false && haveEnoughCandles && zoneSpacingValid;
   const supportZone = zonesValid
@@ -7820,83 +7874,62 @@ function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPric
         <strong style={styles.chartPrice}>{Number.isFinite(Number(currentPrice)) ? Number(currentPrice).toFixed(2) : "—"}</strong>
       </div>
       {setChartTimeframe ? (
-        <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px" }}>
-          {CHART_TIMEFRAME_OPTIONS.map((option) => {
-            const isActive = String(chartTimeframe) === option.value;
-            return (
+        <div style={styles.chartToolbar}>
+          <div style={styles.chartTimeframeGroup}>
+            {CHART_TIMEFRAME_OPTIONS.map((option) => {
+              const isActive = String(chartTimeframe) === option.value;
+              return (
+                <button
+                  key={option.value}
+                  onClick={() => setChartTimeframe(option.value)}
+                  style={{
+                    ...styles.chartTimeframeButton,
+                    background: isActive ? "rgba(56, 189, 248, .15)" : "transparent",
+                    color: isActive ? "#7dd3fc" : "#94a3b8",
+                  }}
+                  type="button"
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+          <div style={styles.chartActionGroup}>
+            {onResetChart ? (
               <button
-                key={option.value}
-                onClick={() => setChartTimeframe(option.value)}
-                style={{
-                  background: isActive ? "#2563eb" : "rgba(15,23,42,.6)",
-                  border: `1px solid ${isActive ? "#3b82f6" : "#334155"}`,
-                  borderRadius: "8px",
-                  color: "#e2e8f0",
-                  cursor: "pointer",
-                  fontSize: "12px",
-                  fontWeight: 800,
-                  padding: "6px 10px",
-                }}
-              >
-                {option.label}
-              </button>
-            );
-          })}
-          <span style={{ flex: 1 }} />
-          {onResetChart ? (
-            <button
-              onClick={onResetChart}
-              style={{
-                background: "rgba(15,23,42,.6)",
-                border: "1px solid #334155",
-                borderRadius: "8px",
-                color: "#e2e8f0",
-                cursor: "pointer",
-                fontSize: "12px",
-                fontWeight: 800,
-                padding: "6px 10px",
-              }}
-              title="Refit candles and reset price scale"
-            >Reset View</button>
-          ) : null}
-          {setChartPrefs ? (
-            <>
-              <button
-                onClick={() => setChartPrefs((current) => ({ ...current, autoFit: !current.autoFit }))}
-                style={{
-                  background: chartPrefs?.autoFit ? "#0f766e" : "rgba(15,23,42,.6)",
-                  border: `1px solid ${chartPrefs?.autoFit ? "#14b8a6" : "#334155"}`,
-                  borderRadius: "8px",
-                  color: "#e2e8f0",
-                  cursor: "pointer",
-                  fontSize: "12px",
-                  fontWeight: 800,
-                  padding: "6px 10px",
-                }}
-                title="Keep chart fit to latest candles"
-              >{chartPrefs?.autoFit ? "Auto Fit ✓" : "Auto Fit"}</button>
-              <button
-                onClick={() => setChartPrefs((current) => ({ ...current, lockPriceScale: !current.lockPriceScale }))}
-                style={{
-                  background: chartPrefs?.lockPriceScale ? "#7c2d12" : "rgba(15,23,42,.6)",
-                  border: `1px solid ${chartPrefs?.lockPriceScale ? "#f97316" : "#334155"}`,
-                  borderRadius: "8px",
-                  color: "#e2e8f0",
-                  cursor: "pointer",
-                  fontSize: "12px",
-                  fontWeight: 800,
-                  padding: "6px 10px",
-                }}
-                title="Prevent vertical price-scale dragging"
-              >{chartPrefs?.lockPriceScale ? "🔒 Price" : "🔓 Price"}</button>
-            </>
-          ) : null}
+                onClick={onResetChart}
+                style={styles.chartActionButton}
+                title="Refit candles and reset price scale"
+                type="button"
+              >Reset</button>
+            ) : null}
+            {setChartPrefs ? (
+              <>
+                <button
+                  onClick={() => setChartPrefs((current) => ({ ...current, autoFit: !current.autoFit }))}
+                  style={{
+                    ...styles.chartActionButton,
+                    color: chartPrefs?.autoFit ? "#5eead4" : "#94a3b8",
+                  }}
+                  title="Keep chart fit to latest candles"
+                  type="button"
+                >{chartPrefs?.autoFit ? "Auto Fit ·" : "Auto Fit"}</button>
+                <button
+                  onClick={() => setChartPrefs((current) => ({ ...current, lockPriceScale: !current.lockPriceScale }))}
+                  style={{
+                    ...styles.chartActionButton,
+                    color: chartPrefs?.lockPriceScale ? "#fdba74" : "#94a3b8",
+                  }}
+                  title="Prevent vertical price-scale dragging"
+                  type="button"
+                >{chartPrefs?.lockPriceScale ? "Price 🔒" : "Price 🔓"}</button>
+              </>
+            ) : null}
+          </div>
         </div>
       ) : null}
       {!zonesValid && haveEnoughCandles ? (
-        <div style={{ background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.3)", borderRadius: "10px", color: "#fde68a", fontSize: "12px", marginBottom: "10px", padding: "8px 12px" }}>
-          Waiting for clearer structure. {zoneDetection.zoneReason || ""}
-        </div>
+        <p style={styles.chartZoneNote}>Analyzing market structure…</p>
       ) : null}
       <div className="tradepilot-chart-wrap" style={{ ...styles.chartWrap, height: `${chartHeight}px` }}>
         <TradingChart
@@ -9129,7 +9162,7 @@ function SettingsPage({ applyAlert, debugMode, notificationPrefs, profile, setDe
   const [settingsTab, setSettingsTab] = useState("General");
   const accountType = normalizeAccountType(profile.accountType);
   const isFunded = isFundedAccountType(accountType);
-  const tabs = ["General", "Risk Guardrails", "Funded Account", "Trade Defaults", "Alerts"];
+  const tabs = ["General", "Risk Guardrails", "Funded Account", "Trade Defaults", "Alerts", "Advanced"];
 
   return (
     <main style={styles.mainGrid}>
@@ -9145,29 +9178,32 @@ function SettingsPage({ applyAlert, debugMode, notificationPrefs, profile, setDe
           ))}
         </div>
         {settingsTab === "General" ? (
-          <>
-            <div style={styles.formGrid}>
-              <Field label="Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
-              <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
-              <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
-              <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
-              <SelectField label="Account Type" value={accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
-              <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
-              <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
-              <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
-            </div>
-            <div style={{ borderTop: "1px solid #1e293b", marginTop: "16px", paddingTop: "16px" }}>
-              <p style={styles.cardLabel}>Developer</p>
-              <label style={styles.switchRow}>
-                <input
-                  type="checkbox"
-                  checked={Boolean(debugMode)}
-                  onChange={(event) => setDebugMode?.(event.target.checked)}
-                />
-                Debug Mode (shows TradingView Signal Debug panel on dashboard)
-              </label>
-            </div>
-          </>
+          <div style={styles.formGrid}>
+            <Field label="Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
+            <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
+            <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
+            <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
+            <SelectField label="Account Type" value={accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
+            <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
+            <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
+            <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
+          </div>
+        ) : null}
+        {settingsTab === "Advanced" ? (
+          <div style={styles.warningStack}>
+            <p style={styles.cardLabel}>Developer</p>
+            <label style={styles.switchRow}>
+              <input
+                type="checkbox"
+                checked={Boolean(debugMode)}
+                onChange={(event) => setDebugMode?.(event.target.checked)}
+              />
+              Debug Mode (shows TradingView Signal Debug panel on dashboard)
+            </label>
+            <p style={{ ...styles.muted, fontSize: "12px", margin: "4px 0 0" }}>
+              Tip: press <strong style={{ color: "#e2e8f0" }}>Shift + D</strong> anywhere to toggle Debug Mode.
+            </p>
+          </div>
         ) : null}
         {settingsTab === "Risk Guardrails" ? (
           <div style={styles.formGrid}>
@@ -9697,13 +9733,16 @@ const styles = {
     display: "inline-flex",
     flexDirection: "column",
     gap: "4px",
-    height: "44px",
+    height: "48px",
     justifyContent: "center",
-    minHeight: "44px",
-    minWidth: "44px",
+    minHeight: "48px",
+    minWidth: "48px",
     padding: 0,
+    pointerEvents: "auto",
+    position: "relative",
     touchAction: "manipulation",
-    width: "44px",
+    width: "48px",
+    zIndex: 9999,
   },
   menuBar: {
     background: "#e2e8f0",
@@ -10278,13 +10317,62 @@ const styles = {
     padding: "24px",
   },
   chartPanel: {
-    background: "rgba(11, 16, 21, .96)",
-    border: "1px solid rgba(74, 85, 104, .55)",
+    background: "rgba(13, 17, 23, .96)",
+    border: "1px solid rgba(110, 122, 145, .35)",
     borderRadius: "16px",
     marginBottom: "22px",
     minHeight: "420px",
     padding: "18px 18px 22px",
     width: "100%",
+  },
+  chartToolbar: {
+    alignItems: "center",
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "10px",
+    justifyContent: "space-between",
+    marginBottom: "12px",
+  },
+  chartTimeframeGroup: {
+    background: "rgba(15, 23, 42, .55)",
+    border: "1px solid rgba(110, 122, 145, .25)",
+    borderRadius: "999px",
+    display: "inline-flex",
+    gap: "2px",
+    padding: "3px",
+  },
+  chartTimeframeButton: {
+    border: "none",
+    borderRadius: "999px",
+    cursor: "pointer",
+    fontSize: "11px",
+    fontWeight: 700,
+    letterSpacing: ".02em",
+    padding: "5px 10px",
+    transition: "background 120ms ease, color 120ms ease",
+  },
+  chartActionGroup: {
+    alignItems: "center",
+    display: "inline-flex",
+    gap: "6px",
+  },
+  chartActionButton: {
+    background: "transparent",
+    border: "1px solid rgba(110, 122, 145, .25)",
+    borderRadius: "999px",
+    color: "#94a3b8",
+    cursor: "pointer",
+    fontSize: "11px",
+    fontWeight: 700,
+    letterSpacing: ".02em",
+    padding: "5px 12px",
+  },
+  chartZoneNote: {
+    color: "#64748b",
+    fontSize: "12px",
+    fontStyle: "italic",
+    margin: "0 0 12px",
+    padding: "0 4px",
   },
   chartWrap: {
     height: "480px",

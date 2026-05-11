@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createChart,
   CandlestickSeries,
@@ -6,21 +6,22 @@ import {
   createSeriesMarkers,
 } from "lightweight-charts";
 
-// TradingView-style dark palette: dim background, low-contrast grid, bright wicks.
+// TradingView-style dark palette: dim background, soft grid, bright wicks.
 const CHART_THEME = {
-  background: "#0b1015",
+  background: "#0d1117",
   text: "#d1d4dc",
-  grid: "rgba(54, 60, 78, 0.45)",
-  border: "rgba(74, 85, 104, 0.6)",
-  up: "#26a69a",
-  down: "#ef5350",
-  support: "#26a69a",
-  resistance: "#ef5350",
+  grid: "rgba(70, 78, 95, 0.28)",
+  border: "rgba(110, 122, 145, 0.45)",
+  up: "#22c55e",
+  down: "#f43f5e",
+  support: "#22c55e",
+  resistance: "#f43f5e",
   entry: "#38bdf8",
   stop: "#f97316",
-  tp: "#22c55e",
+  tp: "#84cc16",
   runner: "#a855f7",
   price: "#facc15",
+  glow: "rgba(250, 204, 21, 0.45)",
 };
 
 const MIN_CANDLES_FOR_LIVE = 20;
@@ -117,7 +118,7 @@ export default function TradingChart({
   candles,
   currentPrice,
   debugMode = false,
-  emptyMessage = "Collecting TradingView candle data…",
+  emptyMessage = "Waiting for TradingView candles…",
   height = 480,
   lockPriceScale = false,
   markers,
@@ -137,6 +138,7 @@ export default function TradingChart({
   const markersRef = useRef(null);
   const priceLinesRef = useRef({});
   const hasInitiallyFitRef = useRef(false);
+  const [hoverCandle, setHoverCandle] = useState(null);
 
   const built = useMemo(() => buildCandleSeriesData(candles, { symbol }), [candles, symbol]);
   const realCandles = useMemo(() => {
@@ -176,12 +178,12 @@ export default function TradingChart({
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: CHART_THEME.grid, style: 1 },
-        horzLines: { color: CHART_THEME.grid, style: 1 },
+        vertLines: { color: CHART_THEME.grid, style: 0 },
+        horzLines: { color: CHART_THEME.grid, style: 0 },
       },
       rightPriceScale: {
         borderColor: CHART_THEME.border,
-        scaleMargins: { top: 0.1, bottom: 0.12 },
+        scaleMargins: { top: 0.15, bottom: 0.15 },
         autoScale: true,
         entireTextOnly: true,
       },
@@ -189,14 +191,24 @@ export default function TradingChart({
         borderColor: CHART_THEME.border,
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 8,
-        barSpacing: 8,
-        minBarSpacing: 2,
+        rightOffset: 12,
+        barSpacing: 12,
+        minBarSpacing: 4,
       },
       crosshair: {
         mode: 1,
-        vertLine: { color: CHART_THEME.border, width: 1, style: 3, labelBackgroundColor: "#1a1f2e" },
-        horzLine: { color: CHART_THEME.border, width: 1, style: 3, labelBackgroundColor: "#1a1f2e" },
+        vertLine: {
+          color: "rgba(148, 163, 184, .55)",
+          width: 1,
+          style: 2,
+          labelBackgroundColor: "#1a1f2e",
+        },
+        horzLine: {
+          color: "rgba(148, 163, 184, .55)",
+          width: 1,
+          style: 2,
+          labelBackgroundColor: "#1a1f2e",
+        },
       },
       handleScroll: {
         mouseWheel: true,
@@ -229,11 +241,39 @@ export default function TradingChart({
     chartRef.current = chart;
     seriesRef.current = series;
 
+    // OHLC tooltip — fires on every crosshair move; nulls out when leaving.
+    const handleCrosshair = (param) => {
+      if (!param || !param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
+        setHoverCandle(null);
+        return;
+      }
+      const point = param.seriesData?.get(series);
+      if (!point) {
+        setHoverCandle(null);
+        return;
+      }
+      setHoverCandle({
+        x: param.point.x,
+        y: param.point.y,
+        open: Number(point.open),
+        high: Number(point.high),
+        low: Number(point.low),
+        close: Number(point.close),
+      });
+    };
+    chart.subscribeCrosshairMove(handleCrosshair);
+
     const handleResize = () => {
       if (!containerRef.current || !chartRef.current) return;
       chartRef.current.applyOptions({ width: containerRef.current.clientWidth });
     };
     window.addEventListener("resize", handleResize);
+    // iOS reflows after rotation — wait a tick then re-measure so the chart
+    // doesn't end up clipped by stale width.
+    const handleOrientation = () => {
+      setTimeout(handleResize, 150);
+    };
+    window.addEventListener("orientationchange", handleOrientation);
 
     // ResizeObserver gives us responsive resizing when the parent layout
     // changes (sidebar collapse, drawer open) — not just window resize.
@@ -245,7 +285,13 @@ export default function TradingChart({
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      window.removeEventListener("orientationchange", handleOrientation);
       if (observer) observer.disconnect();
+      try {
+        chart.unsubscribeCrosshairMove(handleCrosshair);
+      } catch {
+        // already disposed
+      }
       try {
         chart.remove();
       } catch {
@@ -344,22 +390,27 @@ export default function TradingChart({
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
+    // Only render the latest valid setup marker — old arrows just clutter
+    // the chart and confuse the user about what is actionable now.
     const fixedMarkers = Array.isArray(markers)
       ? markers
           .map((marker) => {
             if (!marker) return null;
             const time = toSeconds(marker.time ?? marker.timestamp);
             if (!Number.isFinite(time)) return null;
+            const isShort = marker.direction === "short";
             return {
               time,
-              position: marker.position || (marker.direction === "short" ? "aboveBar" : "belowBar"),
-              color: marker.color || (marker.direction === "short" ? CHART_THEME.down : CHART_THEME.up),
-              shape: marker.shape || (marker.direction === "short" ? "arrowDown" : "arrowUp"),
-              text: marker.text || marker.label || "",
+              position: marker.position || (isShort ? "aboveBar" : "belowBar"),
+              color: marker.color || (isShort ? CHART_THEME.down : CHART_THEME.up),
+              shape: marker.shape || (isShort ? "arrowDown" : "arrowUp"),
+              text: marker.text || marker.label || (isShort ? "▼ SHORT" : "▲ LONG"),
+              size: 1,
             };
           })
           .filter(Boolean)
           .sort((a, b) => a.time - b.time)
+          .slice(-1)
       : [];
     if (!markersRef.current) {
       markersRef.current = createSeriesMarkers(series, fixedMarkers);
@@ -376,8 +427,9 @@ export default function TradingChart({
       price: Number(currentPrice),
       color: CHART_THEME.price,
       lineStyle: 0,
-      lineWidth: 1,
-      title: "Price",
+      lineWidth: 2,
+      axisLabelVisible: true,
+      title: "",
     } : null);
 
     // One support line + one resistance line — never duplicates that visually
@@ -445,9 +497,38 @@ export default function TradingChart({
     } : null);
   }, [currentPrice, cleanSupport?.min, cleanSupport?.max, cleanSupport?.center, cleanResistance?.min, cleanResistance?.max, cleanResistance?.center, planValid, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner, showZones]);
 
+  // Tooltip placement — keep it inside the chart bounds. 12px nudge so it
+  // doesn't sit directly under the cursor.
+  const tooltipStyle = hoverCandle ? {
+    background: "rgba(13, 17, 23, .94)",
+    border: "1px solid rgba(110, 122, 145, 0.45)",
+    borderRadius: "8px",
+    color: "#d1d4dc",
+    fontSize: "11px",
+    fontVariantNumeric: "tabular-nums",
+    left: Math.min(Math.max(12, hoverCandle.x + 14), Math.max(140, (containerRef.current?.clientWidth || 600) - 150)),
+    lineHeight: 1.6,
+    padding: "6px 10px",
+    pointerEvents: "none",
+    position: "absolute",
+    top: 12,
+    whiteSpace: "nowrap",
+    zIndex: 5,
+  } : null;
+  const hoverRange = hoverCandle ? Math.abs(hoverCandle.high - hoverCandle.low) : 0;
+
   return (
     <div style={{ position: "relative", width: "100%", height, touchAction: "none" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%", touchAction: "none" }} />
+      {hoverCandle ? (
+        <div style={tooltipStyle}>
+          <div><span style={{ color: "#94a3b8" }}>O:</span> {hoverCandle.open.toFixed(2)}</div>
+          <div><span style={{ color: "#94a3b8" }}>H:</span> {hoverCandle.high.toFixed(2)}</div>
+          <div><span style={{ color: "#94a3b8" }}>L:</span> {hoverCandle.low.toFixed(2)}</div>
+          <div><span style={{ color: "#94a3b8" }}>C:</span> {hoverCandle.close.toFixed(2)}</div>
+          <div><span style={{ color: "#94a3b8" }}>Range:</span> {hoverRange.toFixed(2)}</div>
+        </div>
+      ) : null}
       {debugMode && visualRangeEnhanced ? (
         <div
           style={{
@@ -472,31 +553,27 @@ export default function TradingChart({
         <div
           style={{
             alignItems: "center",
-            background: "rgba(11, 16, 21, 0.86)",
-            border: "1px solid rgba(74, 85, 104, 0.55)",
-            borderRadius: "12px",
-            color: "#d1d4dc",
+            background: "transparent",
+            color: "#94a3b8",
             display: "flex",
             flexDirection: "column",
             fontSize: "13px",
             gap: "4px",
             left: "50%",
             padding: "12px 16px",
+            pointerEvents: "none",
             position: "absolute",
             top: "50%",
             transform: "translate(-50%, -50%)",
             textAlign: "center",
-            minWidth: "240px",
+            minWidth: "200px",
           }}
         >
-          <strong style={{ color: "#e2e8f0", fontSize: "13px", letterSpacing: ".04em" }}>
-            {symbol || "Live"}{timeframe ? ` · ${timeframe}` : ""}
-          </strong>
-          <span style={{ color: "#94a3b8" }}>
+          <span style={{ color: "#cbd5e1", fontSize: "13px", fontWeight: 600 }}>
             {emptyMessage}
           </span>
-          <span style={{ color: "#64748b", fontSize: "11px" }}>
-            {realCandles.length} / {MIN_CANDLES_FOR_LIVE} candles received
+          <span style={{ color: "#475569", fontSize: "10px", letterSpacing: ".06em", textTransform: "uppercase" }}>
+            {realCandles.length} / {MIN_CANDLES_FOR_LIVE} candles · {symbol || "Live"}{timeframe ? ` · ${timeframe}` : ""}
           </span>
         </div>
       ) : null}
