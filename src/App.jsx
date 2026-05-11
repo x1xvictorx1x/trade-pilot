@@ -22,6 +22,7 @@ const feedbackStorageKey = "tradePilotFeedback";
 const supportStorageKey = "tradePilotSupportMessages";
 const onboardingStorageKey = "tradePilotOnboardingComplete";
 const streamerModeStorageKey = "tradePilotStreamerMode";
+const debugModeStorageKey = "tradePilotDebugMode";
 const subscriberStorageKey = "tradePilotSubscribers";
 const journalStorageKey = "tradePilotJournal";
 const layoutStorageKey = "tradePilotLayout";
@@ -1251,7 +1252,28 @@ export default function App() {
     received: "",
     symbol: "",
     updated: "",
+    feedStatus: "waiting",
+    lastReceivedAt: null,
+    rawPayload: null,
+    parsedSignal: null,
+    candleCount: 0,
+    lastCandleTime: null,
+    lastTradeSetup: null,
   });
+  const [debugMode, setDebugMode] = useState(() => {
+    try {
+      return localStorage.getItem(debugModeStorageKey) === "true";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(debugModeStorageKey, String(debugMode));
+    } catch {
+      // ignore quota/private mode
+    }
+  }, [debugMode]);
   const audioReadyRef = useRef(false);
   const lastClosedTradeRef = useRef("");
   const [autoPrice, setAutoPrice] = useState(true);
@@ -1413,6 +1435,35 @@ export default function App() {
       return Number(target.toFixed(4));
     });
   }, [candleHistory, profile.mainMarket, activeTimeframe, dataSource, price]);
+
+  useEffect(() => {
+    const series = pickCandleSeries(candleHistory, profile.mainMarket, activeTimeframe);
+    const lastCandle = series.length ? series[series.length - 1] : null;
+    setWebhookDebug((current) => {
+      const nextCandleCount = series.length;
+      const nextCandleTime = lastCandle?.timestamp || null;
+      if (current.candleCount === nextCandleCount && current.lastCandleTime === nextCandleTime) {
+        return current;
+      }
+      return { ...current, candleCount: nextCandleCount, lastCandleTime: nextCandleTime };
+    });
+  }, [candleHistory, profile.mainMarket, activeTimeframe]);
+
+  // Mark feed as stale if 2 minutes pass without any TradingView signal.
+  useEffect(() => {
+    if (dataSource !== "TradingView Webhook") return undefined;
+    const timer = setInterval(() => {
+      setWebhookDebug((current) => {
+        if (!current.lastReceivedAt) return current;
+        const ageMs = Date.now() - current.lastReceivedAt;
+        if (ageMs > 120_000 && current.feedStatus !== "stale" && current.feedStatus !== "error") {
+          return { ...current, feedStatus: "stale" };
+        }
+        return current;
+      });
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [dataSource]);
 
   useEffect(() => {
     localStorage.setItem(disciplineStorageKey, JSON.stringify(discipline));
@@ -1841,6 +1892,7 @@ export default function App() {
           setWebhookDebug((current) => ({
             ...current,
             error: result.error || "TradingView feed temporarily unavailable.",
+            feedStatus: "error",
             updated: new Date().toLocaleTimeString(),
           }));
           setPriceStatus("TradingView feed temporarily unavailable. Retrying…");
@@ -1858,6 +1910,7 @@ export default function App() {
             ...current,
             error: "",
             received: "No",
+            feedStatus: "waiting",
             updated: new Date().toLocaleTimeString(),
           }));
           setPriceStatus("Waiting for TradingView alert data.");
@@ -1866,13 +1919,30 @@ export default function App() {
         const signal = payload.signal;
         const signalTime = signal.created_at || signal.timestamp;
         const signalTimeMs = signalTime ? new Date(signalTime).getTime() : 0;
-        setWebhookDebug({
+        setWebhookDebug((current) => ({
+          ...current,
           error: "",
           price: String(signal.price ?? ""),
           received: "Yes",
           symbol: signal.symbol || "",
           updated: signalTime ? new Date(signalTime).toLocaleTimeString() : new Date().toLocaleTimeString(),
-        });
+          feedStatus: "connected",
+          lastReceivedAt: Date.now(),
+          rawPayload: signal,
+          parsedSignal: {
+            symbol: signal.symbol || null,
+            price: Number(signal.price),
+            open: Number(signal.candle?.open ?? signal.open),
+            high: Number(signal.candle?.high ?? signal.high),
+            low: Number(signal.candle?.low ?? signal.low),
+            close: Number(signal.candle?.close ?? signal.close),
+            signal: signal.signal || null,
+            grade: signal.grade || null,
+            direction: signal.direction || null,
+            timeframe: signal.timeframe || null,
+            timestamp: signalTime || null,
+          },
+        }));
         const incomingSignal = String(signal.signal || "").toLowerCase();
         const incomingScore = Number(signal.setupScore);
         const incomingGrade = signal.grade ? String(signal.grade).toUpperCase() : "";
@@ -2299,6 +2369,31 @@ export default function App() {
     const tfRaw = alert.timeframe ? String(alert.timeframe).trim() : "";
     if (tfRaw) setActiveTimeframe(tfRaw);
 
+    setWebhookDebug((current) => ({
+      ...current,
+      error: "",
+      received: "Yes",
+      symbol: alert.symbol || resolved.symbol || current.symbol,
+      price: Number.isFinite(nextPrice) ? String(nextPrice) : current.price,
+      updated: new Date(signalTime).toLocaleTimeString(),
+      feedStatus: "connected",
+      lastReceivedAt: Date.now(),
+      rawPayload: alert,
+      parsedSignal: {
+        symbol: alert.symbol || resolved.symbol || null,
+        price: Number.isFinite(nextPrice) ? nextPrice : null,
+        open: Number(alert.candle?.open ?? alert.open),
+        high: Number(alert.candle?.high ?? alert.high),
+        low: Number(alert.candle?.low ?? alert.low),
+        close: Number(alert.candle?.close ?? alert.close),
+        signal: signalKind || null,
+        grade: alert.grade ? String(alert.grade).toUpperCase() : null,
+        direction: alert.direction || null,
+        timeframe: tfRaw || null,
+        timestamp: signalTime,
+      },
+    }));
+
     if (signalKind === "price_update") {
       const candleFromPriceUpdate = alert.candle && Number.isFinite(Number(alert.candle.close))
         ? alert.candle
@@ -2365,7 +2460,7 @@ export default function App() {
       candle: alert.candle || null,
     });
     if (isTradeSetup) {
-      setLastTradeSetup({
+      const tradeSetup = {
         direction: alert.direction || null,
         setupScore,
         grade: setupGrade,
@@ -2373,7 +2468,9 @@ export default function App() {
         timestamp: signalTime,
         symbol: resolved.symbol,
         timeframe: tfRaw || null,
-      });
+      };
+      setLastTradeSetup(tradeSetup);
+      setWebhookDebug((current) => ({ ...current, lastTradeSetup: tradeSetup }));
     }
     setPriceSource("TradingView Webhook");
     const candleFromAlert = alert.candle && Number.isFinite(Number(alert.candle.close))
@@ -3210,6 +3307,7 @@ export default function App() {
             activeTimeframe={activeTimeframe}
             activeTrade={activeTrade}
             addJournalEntry={addJournalEntry}
+            applyAlert={applyAlert}
             applyQuickSetup={applyQuickSetup}
             autoPrice={autoPrice}
             brokerConnection={brokerConnection}
@@ -3219,11 +3317,14 @@ export default function App() {
             chartTimeframe={chartTimeframe}
             connectionError={connectionError}
             contracts={contracts}
+            debugMode={debugMode}
             isOnline={isOnline}
+            lastTradeSetup={lastTradeSetup}
             onResetChart={onResetChart}
             setChartPrefs={setChartPrefs}
             setChartTimeframe={setChartTimeframe}
             dataSource={dataSource}
+            webhookDebug={webhookDebug}
             direction={direction}
             discipline={discipline}
             engine={engine}
@@ -3340,8 +3441,10 @@ export default function App() {
         {activePage === "settings" ? (
           <SettingsPage
             applyAlert={applyAlert}
+            debugMode={debugMode}
             notificationPrefs={notificationPrefs}
             profile={profile}
+            setDebugMode={setDebugMode}
             setNotificationPrefs={setNotificationPrefs}
             updateProfile={updateProfile}
           />
@@ -4250,30 +4353,168 @@ function SignalSourceCard({ activeSymbol, candleSeries, connectionError, current
   );
 }
 
-function SignalDebugPanel({ currentPrice, dataSource, lastUpdated, priceSource, timeframe, tradingViewSignal }) {
+function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, notify, priceSource, profile, timeframe, tradingViewSignal, webhookDebug }) {
+  const [sending, setSending] = useState(false);
+  const [sendStatus, setSendStatus] = useState("");
+  const debug = webhookDebug || {};
+  const parsed = debug.parsedSignal || null;
+  const tradeSetup = debug.lastTradeSetup || null;
   const rawPrice = tradingViewSignal && Number.isFinite(Number(tradingViewSignal.price)) ? Number(tradingViewSignal.price) : null;
-  const parsed = Number.isFinite(Number(currentPrice)) ? Number(currentPrice) : null;
-  const mismatch = rawPrice !== null && parsed !== null && Math.abs(rawPrice - parsed) / Math.max(1, Math.abs(rawPrice)) > 0.001;
+  const parsedPrice = Number.isFinite(Number(currentPrice)) ? Number(currentPrice) : null;
+  const mismatch = rawPrice !== null && parsedPrice !== null && Math.abs(rawPrice - parsedPrice) / Math.max(1, Math.abs(rawPrice)) > 0.001;
+  const hasReceivedAtBackend = debug.received === "Yes" || Boolean(debug.lastReceivedAt);
+  const frontendApplied = Boolean(tradingViewSignal);
+  const frontendNotApplying = hasReceivedAtBackend && !frontendApplied;
+
+  const feedStatus = debug.feedStatus || (debug.received === "Yes" ? "connected" : "waiting");
+  const feedTone = feedStatus === "connected"
+    ? { label: "Connected", color: "#10b981", bg: "rgba(16,185,129,.12)" }
+    : feedStatus === "stale"
+      ? { label: "Stale", color: "#f97316", bg: "rgba(249,115,22,.12)" }
+      : feedStatus === "error"
+        ? { label: "Error", color: "#ef4444", bg: "rgba(239,68,68,.12)" }
+        : { label: "Waiting", color: "#facc15", bg: "rgba(250,204,21,.12)" };
+
+  const lastReceivedLabel = debug.lastReceivedAt
+    ? new Date(debug.lastReceivedAt).toLocaleString()
+    : (debug.updated || lastUpdated || "—");
+
+  const lastCandleLabel = debug.lastCandleTime
+    ? new Date(debug.lastCandleTime).toLocaleString()
+    : "—";
+
+  const sendLocalTestSignal = async () => {
+    if (sending) return;
+    setSending(true);
+    setSendStatus("Sending test signal...");
+    const now = new Date();
+    const payload = {
+      symbol: "NQ",
+      price: 27444.25,
+      timeframe: "1",
+      open: 27440,
+      high: 27450,
+      low: 27435,
+      close: 27444.25,
+      volume: 1000,
+      signal: "price_update",
+      timestamp: now.toISOString(),
+    };
+    const isLocalhost = typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+    const apiBase = isLocalhost ? "https://tradepilottool.com" : "";
+    try {
+      const response = await fetch(`${apiBase}/api/webhook/tradingview`, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || result.ok === false) {
+        throw new Error(result.error || `Test signal failed (HTTP ${response.status}).`);
+      }
+      applyAlert?.({
+        ...payload,
+        candle: {
+          open: payload.open,
+          high: payload.high,
+          low: payload.low,
+          close: payload.close,
+          volume: payload.volume,
+          timeframe: payload.timeframe,
+          timestamp: payload.timestamp,
+        },
+      });
+      setSendStatus("Test signal sent. Dashboard, candle, and chart should now be updated.");
+      notify?.("Local test signal applied.", "success");
+    } catch (error) {
+      setSendStatus(error.message || "Test signal failed.");
+      notify?.(error.message || "Test signal failed.", "failure");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const rowLabel = { color: "#94a3b8", display: "block", fontSize: "10px", letterSpacing: ".08em", marginBottom: "2px", textTransform: "uppercase" };
+  const rowValue = { color: "#e2e8f0", display: "block", fontSize: "13px", fontWeight: 700, wordBreak: "break-word" };
+
   return (
-    <section style={{ background: "rgba(15,23,42,.6)", border: "1px solid #1e293b", borderRadius: "12px", margin: "0 0 14px", padding: "12px 14px" }}>
-      <p style={{ ...styles.cardLabel, margin: 0 }}>Signal Debug</p>
-      <div style={{ display: "grid", gap: "6px", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", marginTop: "8px" }}>
-        <div><span style={styles.cardLabel}>Raw signal price</span><strong style={{ color: "#e2e8f0", display: "block" }}>{rawPrice !== null ? rawPrice.toFixed(2) : "—"}</strong></div>
-        <div><span style={styles.cardLabel}>Parsed currentPrice</span><strong style={{ color: "#e2e8f0", display: "block" }}>{parsed !== null ? parsed.toFixed(2) : "—"}</strong></div>
-        <div><span style={styles.cardLabel}>Active symbol</span><strong style={{ color: "#e2e8f0", display: "block" }}>{tradingViewSignal?.symbol || "—"}</strong></div>
-        <div><span style={styles.cardLabel}>Active timeframe</span><strong style={{ color: "#e2e8f0", display: "block" }}>{tradingViewSignal?.timeframe || timeframe || "—"}</strong></div>
-        <div><span style={styles.cardLabel}>Last updated</span><strong style={{ color: "#e2e8f0", display: "block" }}>{lastUpdated || "—"}</strong></div>
-        <div><span style={styles.cardLabel}>Price source</span><strong style={{ color: "#e2e8f0", display: "block" }}>{priceSource || dataSource || "—"}</strong></div>
+    <section style={{ background: "rgba(15,23,42,.7)", border: "1px solid #1e293b", borderRadius: "12px", margin: "0 0 14px", padding: "14px 16px" }}>
+      <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "10px", justifyContent: "space-between", marginBottom: "10px" }}>
+        <p style={{ ...styles.cardLabel, margin: 0 }}>TradingView Signal Debug</p>
+        <span style={{ background: feedTone.bg, border: `1px solid ${feedTone.color}55`, borderRadius: "999px", color: feedTone.color, fontSize: "11px", fontWeight: 800, letterSpacing: ".06em", padding: "3px 10px", textTransform: "uppercase" }}>
+          Feed: {feedTone.label}
+        </span>
       </div>
+
+      <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+        <div><span style={rowLabel}>Last received</span><span style={rowValue}>{lastReceivedLabel}</span></div>
+        <div><span style={rowLabel}>Parsed symbol</span><span style={rowValue}>{parsed?.symbol || tradingViewSignal?.symbol || debug.symbol || "—"}</span></div>
+        <div><span style={rowLabel}>Parsed price</span><span style={rowValue}>{Number.isFinite(parsed?.price) ? parsed.price.toFixed(2) : "—"}</span></div>
+        <div><span style={rowLabel}>Parsed signal type</span><span style={rowValue}>{parsed?.signal || "—"}</span></div>
+        <div><span style={rowLabel}>Parsed grade</span><span style={rowValue}>{parsed?.grade || "—"}</span></div>
+        <div><span style={rowLabel}>Parsed direction</span><span style={rowValue}>{parsed?.direction || "—"}</span></div>
+        <div><span style={rowLabel}>Open / High</span><span style={rowValue}>{Number.isFinite(parsed?.open) ? parsed.open : "—"} / {Number.isFinite(parsed?.high) ? parsed.high : "—"}</span></div>
+        <div><span style={rowLabel}>Low / Close</span><span style={rowValue}>{Number.isFinite(parsed?.low) ? parsed.low : "—"} / {Number.isFinite(parsed?.close) ? parsed.close : "—"}</span></div>
+        <div><span style={rowLabel}>Candle count</span><span style={rowValue}>{debug.candleCount ?? 0}</span></div>
+        <div><span style={rowLabel}>Last candle time</span><span style={rowValue}>{lastCandleLabel}</span></div>
+        <div><span style={rowLabel}>Active timeframe</span><span style={rowValue}>{tradingViewSignal?.timeframe || parsed?.timeframe || timeframe || "—"}</span></div>
+        <div><span style={rowLabel}>Price source</span><span style={rowValue}>{priceSource || dataSource || "—"}</span></div>
+      </div>
+
+      <div style={{ marginTop: "12px" }}>
+        <span style={rowLabel}>Last trade_setup signal</span>
+        {tradeSetup ? (
+          <span style={rowValue}>
+            {tradeSetup.grade || "?"} {tradeSetup.direction || "?"} @ {Number.isFinite(tradeSetup.price) ? tradeSetup.price.toFixed(2) : "—"} · {tradeSetup.timestamp ? new Date(tradeSetup.timestamp).toLocaleString() : "—"}
+          </span>
+        ) : (
+          <span style={rowValue}>None received yet.</span>
+        )}
+      </div>
+
+      <div style={{ marginTop: "12px" }}>
+        <span style={rowLabel}>Last raw payload</span>
+        <pre style={{ background: "rgba(2,6,23,.85)", border: "1px solid #1e293b", borderRadius: "8px", color: "#cbd5e1", fontSize: "11px", margin: "4px 0 0", maxHeight: "180px", overflow: "auto", padding: "8px 10px" }}>
+          {debug.rawPayload ? JSON.stringify(debug.rawPayload, null, 2) : "No payload yet."}
+        </pre>
+      </div>
+
+      {feedStatus === "stale" ? (
+        <p style={{ background: "rgba(249,115,22,.1)", border: "1px solid rgba(249,115,22,.3)", borderRadius: "8px", color: "#fdba74", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
+          TradingView feed stale. Check alert is running.
+        </p>
+      ) : null}
+      {frontendNotApplying ? (
+        <p style={{ background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", borderRadius: "8px", color: "#fecaca", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
+          Backend received signal, frontend not applying it.
+        </p>
+      ) : null}
       {mismatch ? (
         <p style={{ color: "#fca5a5", fontSize: "12px", fontWeight: 800, margin: "8px 0 0" }}>
-          Mismatch: parsed price differs from latest signal. Refreshing the feed should resolve this.
+          Mismatch: parsed price differs from latest signal.
         </p>
-      ) : (
-        <p style={{ color: "#10b981", fontSize: "12px", fontWeight: 800, margin: "8px 0 0" }}>
-          Prices in sync.
-        </p>
-      )}
+      ) : null}
+
+      <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "10px", marginTop: "14px" }}>
+        <button
+          disabled={sending}
+          onClick={sendLocalTestSignal}
+          style={{
+            background: sending ? "#1e293b" : "#2563eb",
+            border: "1px solid #3b82f6",
+            borderRadius: "10px",
+            color: "#f8fafc",
+            cursor: sending ? "not-allowed" : "pointer",
+            fontSize: "13px",
+            fontWeight: 800,
+            opacity: sending ? 0.6 : 1,
+            padding: "8px 14px",
+          }}
+        >
+          {sending ? "Sending..." : "Send Local Test Signal"}
+        </button>
+        {sendStatus ? <span style={{ color: "#94a3b8", fontSize: "12px" }}>{sendStatus}</span> : null}
+      </div>
     </section>
   );
 }
@@ -4548,6 +4789,7 @@ function Dashboard({
   activeTimeframe,
   activeTrade,
   addJournalEntry,
+  applyAlert,
   applyQuickSetup,
   autoPrice,
   brokerConnection,
@@ -4557,7 +4799,10 @@ function Dashboard({
   chartTimeframe,
   connectionError,
   contracts,
+  debugMode,
   isOnline,
+  lastTradeSetup,
+  webhookDebug,
   onResetChart,
   setChartPrefs,
   setChartTimeframe,
@@ -5199,6 +5444,7 @@ function Dashboard({
       chartTimeframe={chartTimeframe}
       currentPrice={price}
       entry={hasPlan ? visualPlan.entry : undefined}
+      lastTradeSetup={lastTradeSetup}
       onResetChart={onResetChart}
       resetSignal={chartResetSignal}
       runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
@@ -5279,6 +5525,7 @@ function Dashboard({
           candleSeries={liveCandleSeries}
           currentPrice={price}
           entry={hasPlan ? visualPlan.entry : undefined}
+          lastTradeSetup={lastTradeSetup}
           runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
           stop={hasPlan ? visualPlan.stop : undefined}
           support={enrichedZoneDetection.supportLevel ?? support}
@@ -5397,6 +5644,21 @@ function Dashboard({
       {customizeOpen ? (
         <CustomizeDashboardPanel layoutPrefs={layoutPrefs} notify={notify} setLayoutPrefs={setLayoutPrefs} />
       ) : null}
+      {debugMode ? (
+        <SignalDebugPanel
+          applyAlert={applyAlert}
+          currentPrice={price}
+          dataSource={dataSource}
+          lastUpdated={lastUpdated}
+          notify={notify}
+          priceSource={priceSource}
+          profile={profile}
+          timeframe={activeTimeframe}
+          tradingViewSignal={tradingViewSignal}
+          webhookDebug={webhookDebug}
+        />
+      ) : null}
+
       <section
         className={`dashboard-card-board mode-${String(effectiveLayout.mode || "Pro").toLowerCase().replace(/\s+/g, "-")}`}
         style={styles.dashboardCardBoard}
@@ -5417,15 +5679,6 @@ function Dashboard({
       </button>
 
       <div style={{ display: advancedOpen ? "block" : "none" }}>
-
-      <SignalDebugPanel
-        currentPrice={price}
-        dataSource={dataSource}
-        lastUpdated={lastUpdated}
-        priceSource={priceSource}
-        timeframe={activeTimeframe}
-        tradingViewSignal={tradingViewSignal}
-      />
 
       <SignalSourceCard
         activeSymbol={profile.mainMarket}
@@ -7486,17 +7739,33 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   return `Grade D setup (${score}/100). Do not trade: ${issue || "setup does not meet quality threshold"}.`;
 }
 
-function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPrice, entry, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
-  const zonesValid = zoneDetection.zonesValid !== false;
-  // Trust validated zone numerics from enrichedZoneDetection only.
-  // No raw support/resistance fallback — that path produced one-tick "zones" near current price.
-  const supportZone = zonesValid && Number.isFinite(Number(zoneDetection.supportZoneLow)) && Number.isFinite(Number(zoneDetection.supportZoneHigh))
+function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPrice, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
+  const candles = Array.isArray(candleSeries) ? candleSeries : [];
+  const haveEnoughCandles = candles.length >= 20;
+  // Per spec: zones only render if support is below current price, resistance is above,
+  // distance is not too tight, AND we have at least 20 candles to base them on.
+  const zoneSpacingValid = (() => {
+    if (!Number.isFinite(Number(currentPrice))) return false;
+    const cp = Number(currentPrice);
+    const supLow = Number(zoneDetection.supportZoneLow);
+    const supHigh = Number(zoneDetection.supportZoneHigh);
+    const resLow = Number(zoneDetection.resistanceZoneLow);
+    const resHigh = Number(zoneDetection.resistanceZoneHigh);
+    if (![supLow, supHigh, resLow, resHigh].every(Number.isFinite)) return false;
+    if (!(supHigh < cp)) return false;
+    if (!(resLow > cp)) return false;
+    const minSpread = Math.max(0.5, Math.abs(cp) * 0.001);
+    if ((cp - supHigh) < minSpread) return false;
+    if ((resLow - cp) < minSpread) return false;
+    return true;
+  })();
+  const zonesValid = zoneDetection.zonesValid !== false && haveEnoughCandles && zoneSpacingValid;
+  const supportZone = zonesValid
     ? { min: Number(zoneDetection.supportZoneLow), max: Number(zoneDetection.supportZoneHigh) }
     : null;
-  const resistanceZone = zonesValid && Number.isFinite(Number(zoneDetection.resistanceZoneLow)) && Number.isFinite(Number(zoneDetection.resistanceZoneHigh))
+  const resistanceZone = zonesValid
     ? { min: Number(zoneDetection.resistanceZoneLow), max: Number(zoneDetection.resistanceZoneHigh) }
     : null;
-  const candles = Array.isArray(candleSeries) ? candleSeries : [];
   const plan = {
     entry: Number.isFinite(Number(entry)) ? Number(entry) : null,
     stop: Number.isFinite(Number(stop)) ? Number(stop) : null,
@@ -7504,6 +7773,24 @@ function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPric
     tp2: Number.isFinite(Number(trim2)) ? Number(trim2) : null,
     runner: Number.isFinite(Number(runner)) ? Number(runner) : null,
   };
+
+  // Trade setup markers: only for trade_setup signals graded A or B+.
+  const tradeSetupGrade = lastTradeSetup?.grade ? String(lastTradeSetup.grade).toUpperCase() : null;
+  const setupMarkers = lastTradeSetup
+    && (tradeSetupGrade === "A" || tradeSetupGrade === "B+")
+    && lastTradeSetup.timestamp
+    ? [{
+        time: lastTradeSetup.timestamp,
+        direction: lastTradeSetup.direction === "short" ? "short" : "long",
+        text: `${tradeSetupGrade} ${String(lastTradeSetup.direction || "long").toUpperCase()}`,
+      }]
+    : [];
+
+  // Responsive chart height — 320 mobile, 480 desktop.
+  const isMobile = typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia("(max-width: 720px)").matches
+    : false;
+  const chartHeight = isMobile ? 320 : 480;
   return (
     <section className="chart-panel" style={styles.chartPanel}>
       <div style={styles.sectionHeader}>
@@ -7587,21 +7874,23 @@ function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPric
           ) : null}
         </div>
       ) : null}
-      {!zonesValid ? (
+      {!zonesValid && haveEnoughCandles ? (
         <div style={{ background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.3)", borderRadius: "10px", color: "#fde68a", fontSize: "12px", marginBottom: "10px", padding: "8px 12px" }}>
-          Waiting for better support/resistance structure. {zoneDetection.zoneReason || ""}
+          Waiting for clearer structure. {zoneDetection.zoneReason || ""}
         </div>
       ) : null}
-      <div className="tradepilot-chart-wrap" style={styles.chartWrap}>
+      <div className="tradepilot-chart-wrap" style={{ ...styles.chartWrap, height: `${chartHeight}px` }}>
         <TradingChart
           autoFit={chartPrefs?.autoFit !== false}
           candles={candles}
           currentPrice={currentPrice}
-          height={360}
+          height={chartHeight}
           lockPriceScale={chartPrefs?.lockPriceScale === true}
+          markers={setupMarkers}
           plan={plan}
           resetSignal={resetSignal || 0}
           resistanceZone={resistanceZone}
+          showZones={zonesValid}
           supportZone={supportZone}
           symbol={symbol}
           timeframe={timeframe}
@@ -8811,7 +9100,7 @@ function SupportPage({ messages, onSubmit }) {
   );
 }
 
-function SettingsPage({ applyAlert, notificationPrefs, profile, setNotificationPrefs, updateProfile }) {
+function SettingsPage({ applyAlert, debugMode, notificationPrefs, profile, setDebugMode, setNotificationPrefs, updateProfile }) {
   const [settingsTab, setSettingsTab] = useState("General");
   const accountType = normalizeAccountType(profile.accountType);
   const isFunded = isFundedAccountType(accountType);
@@ -8831,16 +9120,29 @@ function SettingsPage({ applyAlert, notificationPrefs, profile, setNotificationP
           ))}
         </div>
         {settingsTab === "General" ? (
-          <div style={styles.formGrid}>
-            <Field label="Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
-            <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
-            <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
-            <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
-            <SelectField label="Account Type" value={accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
-            <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
-            <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
-            <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
-          </div>
+          <>
+            <div style={styles.formGrid}>
+              <Field label="Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
+              <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
+              <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
+              <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
+              <SelectField label="Account Type" value={accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
+              <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
+              <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
+              <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
+            </div>
+            <div style={{ borderTop: "1px solid #1e293b", marginTop: "16px", paddingTop: "16px" }}>
+              <p style={styles.cardLabel}>Developer</p>
+              <label style={styles.switchRow}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(debugMode)}
+                  onChange={(event) => setDebugMode?.(event.target.checked)}
+                />
+                Debug Mode (shows TradingView Signal Debug panel on dashboard)
+              </label>
+            </div>
+          </>
         ) : null}
         {settingsTab === "Risk Guardrails" ? (
           <div style={styles.formGrid}>
@@ -9951,17 +10253,18 @@ const styles = {
     padding: "24px",
   },
   chartPanel: {
-    background: "rgba(2, 6, 23, .94)",
-    border: "1px solid #334155",
-    borderRadius: "18px",
+    background: "rgba(11, 16, 21, .96)",
+    border: "1px solid rgba(74, 85, 104, .55)",
+    borderRadius: "16px",
     marginBottom: "22px",
-    minHeight: "520px",
-    padding: "22px",
+    minHeight: "420px",
+    padding: "18px 18px 22px",
     width: "100%",
   },
   chartWrap: {
-    height: "520px",
+    height: "480px",
     minWidth: 0,
+    width: "100%",
   },
   chartNote: {
     color: "#94a3b8",

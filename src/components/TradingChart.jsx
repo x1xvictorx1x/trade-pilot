@@ -6,21 +6,24 @@ import {
   createSeriesMarkers,
 } from "lightweight-charts";
 
+// TradingView-style dark palette: dim background, low-contrast grid, bright wicks.
 const CHART_THEME = {
-  background: "#020617",
-  text: "#cbd5e1",
-  grid: "rgba(148, 163, 184, 0.12)",
-  border: "rgba(148, 163, 184, 0.25)",
-  up: "#10b981",
-  down: "#ef4444",
-  support: "#10b981",
-  resistance: "#ef4444",
+  background: "#0b1015",
+  text: "#d1d4dc",
+  grid: "rgba(54, 60, 78, 0.45)",
+  border: "rgba(74, 85, 104, 0.6)",
+  up: "#26a69a",
+  down: "#ef5350",
+  support: "#26a69a",
+  resistance: "#ef5350",
   entry: "#38bdf8",
   stop: "#f97316",
   tp: "#22c55e",
   runner: "#a855f7",
   price: "#facc15",
 };
+
+const MIN_CANDLES_FOR_LIVE = 20;
 
 function toSeconds(value) {
   if (value === null || value === undefined) return null;
@@ -85,13 +88,14 @@ export default function TradingChart({
   autoFit = true,
   candles,
   currentPrice,
-  emptyMessage = "Waiting for TradingView candle data.",
-  height = 380,
+  emptyMessage = "Collecting TradingView candle data…",
+  height = 480,
   lockPriceScale = false,
   markers,
   plan,
   resetSignal = 0,
   resistanceZone,
+  showZones = true,
   supportZone,
   symbol,
   timeframe,
@@ -105,9 +109,14 @@ export default function TradingChart({
   const priceLinesRef = useRef({});
   const hasInitiallyFitRef = useRef(false);
 
-  const realCandles = useMemo(() => buildCandleSeriesData(candles), [candles]);
+  const realCandles = useMemo(() => {
+    const built = buildCandleSeriesData(candles);
+    // Hard-cap to last 300 candles — keeps the chart snappy and matches the
+    // history pipeline's MAX_CANDLES_PER_KEY.
+    return built.length > 300 ? built.slice(built.length - 300) : built;
+  }, [candles]);
   const candleData = realCandles;
-  const waitingForCandles = realCandles.length < 5;
+  const waitingForCandles = realCandles.length < MIN_CANDLES_FOR_LIVE;
   // Reject zones when support and resistance would collide on the same line —
   // collapses to "no zone shown" rather than two duplicates at one price.
   const cleanSupport = supportZone && resistanceZone
@@ -132,24 +141,33 @@ export default function TradingChart({
       layout: {
         background: { color: CHART_THEME.background },
         textColor: CHART_THEME.text,
+        fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+        fontSize: 12,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: CHART_THEME.grid },
-        horzLines: { color: CHART_THEME.grid },
+        vertLines: { color: CHART_THEME.grid, style: 1 },
+        horzLines: { color: CHART_THEME.grid, style: 1 },
       },
       rightPriceScale: {
         borderColor: CHART_THEME.border,
-        scaleMargins: { top: 0.15, bottom: 0.15 },
+        scaleMargins: { top: 0.1, bottom: 0.12 },
         autoScale: true,
+        entireTextOnly: true,
       },
       timeScale: {
         borderColor: CHART_THEME.border,
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 6,
+        rightOffset: 8,
+        barSpacing: 8,
+        minBarSpacing: 2,
       },
-      crosshair: { mode: 1 },
+      crosshair: {
+        mode: 1,
+        vertLine: { color: CHART_THEME.border, width: 1, style: 3, labelBackgroundColor: "#1a1f2e" },
+        horzLine: { color: CHART_THEME.border, width: 1, style: 3, labelBackgroundColor: "#1a1f2e" },
+      },
       handleScroll: {
         mouseWheel: true,
         pressedMouseMove: true,
@@ -173,7 +191,10 @@ export default function TradingChart({
       borderDownColor: CHART_THEME.down,
       wickUpColor: CHART_THEME.up,
       wickDownColor: CHART_THEME.down,
+      borderVisible: true,
+      wickVisible: true,
       priceLineVisible: false,
+      lastValueVisible: true,
     });
     chartRef.current = chart;
     seriesRef.current = series;
@@ -286,9 +307,9 @@ export default function TradingChart({
       }
       ref.current.setData(data);
     };
-    upsertArea(supportAreaRef, cleanSupport, CHART_THEME.support);
-    upsertArea(resistanceAreaRef, cleanResistance, CHART_THEME.resistance);
-  }, [candleData, cleanSupport?.min, cleanSupport?.max, cleanResistance?.min, cleanResistance?.max]);
+    upsertArea(supportAreaRef, showZones ? cleanSupport : null, CHART_THEME.support);
+    upsertArea(resistanceAreaRef, showZones ? cleanResistance : null, CHART_THEME.resistance);
+  }, [candleData, cleanSupport?.min, cleanSupport?.max, cleanResistance?.min, cleanResistance?.max, showZones]);
 
   useEffect(() => {
     const series = seriesRef.current;
@@ -341,14 +362,14 @@ export default function TradingChart({
       : (cleanResistance && Number.isFinite(Number(cleanResistance.min)) && Number.isFinite(Number(cleanResistance.max))
         ? (Number(cleanResistance.min) + Number(cleanResistance.max)) / 2
         : null);
-    ensurePriceLine(series, priceLinesRef, "support", Number.isFinite(supportCenter) ? {
+    ensurePriceLine(series, priceLinesRef, "support", showZones && Number.isFinite(supportCenter) ? {
       price: supportCenter,
       color: CHART_THEME.support,
       lineStyle: 2,
       lineWidth: 2,
       title: "Support",
     } : null);
-    ensurePriceLine(series, priceLinesRef, "resistance", Number.isFinite(resistanceCenter) && resistanceCenter !== supportCenter ? {
+    ensurePriceLine(series, priceLinesRef, "resistance", showZones && Number.isFinite(resistanceCenter) && resistanceCenter !== supportCenter ? {
       price: resistanceCenter,
       color: CHART_THEME.resistance,
       lineStyle: 2,
@@ -392,7 +413,7 @@ export default function TradingChart({
       lineWidth: 1,
       title: "Runner",
     } : null);
-  }, [currentPrice, cleanSupport?.min, cleanSupport?.max, cleanSupport?.center, cleanResistance?.min, cleanResistance?.max, cleanResistance?.center, planValid, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner]);
+  }, [currentPrice, cleanSupport?.min, cleanSupport?.max, cleanSupport?.center, cleanResistance?.min, cleanResistance?.max, cleanResistance?.center, planValid, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner, showZones]);
 
   return (
     <div style={{ position: "relative", width: "100%", height, touchAction: "none" }}>
@@ -400,20 +421,32 @@ export default function TradingChart({
       {waitingForCandles ? (
         <div
           style={{
-            background: "rgba(2, 6, 23, 0.85)",
-            border: "1px solid rgba(148, 163, 184, 0.2)",
-            borderRadius: "10px",
-            color: "#cbd5e1",
-            fontSize: "12px",
-            left: "12px",
-            padding: "6px 10px",
+            alignItems: "center",
+            background: "rgba(11, 16, 21, 0.86)",
+            border: "1px solid rgba(74, 85, 104, 0.55)",
+            borderRadius: "12px",
+            color: "#d1d4dc",
+            display: "flex",
+            flexDirection: "column",
+            fontSize: "13px",
+            gap: "4px",
+            left: "50%",
+            padding: "12px 16px",
             position: "absolute",
-            top: "10px",
+            top: "50%",
+            transform: "translate(-50%, -50%)",
+            textAlign: "center",
+            minWidth: "240px",
           }}
         >
-          <strong style={{ color: "#e2e8f0" }}>{symbol || "Live"}{timeframe ? ` · ${timeframe}` : ""}</strong>
-          <span style={{ color: "#94a3b8", marginLeft: "8px" }}>
-            {realCandles.length === 0 ? emptyMessage : "Waiting for more candle data."}
+          <strong style={{ color: "#e2e8f0", fontSize: "13px", letterSpacing: ".04em" }}>
+            {symbol || "Live"}{timeframe ? ` · ${timeframe}` : ""}
+          </strong>
+          <span style={{ color: "#94a3b8" }}>
+            {emptyMessage}
+          </span>
+          <span style={{ color: "#64748b", fontSize: "11px" }}>
+            {realCandles.length} / {MIN_CANDLES_FOR_LIVE} candles received
           </span>
         </div>
       ) : null}
