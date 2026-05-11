@@ -4383,6 +4383,17 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
     ? new Date(debug.lastCandleTime).toLocaleString()
     : "—";
 
+  // High-low range — surfaces "TradingView is only sending flat candle data"
+  // when the alert pushes a single price per bar instead of true OHLC.
+  const hlRange = (Number.isFinite(parsed?.high) && Number.isFinite(parsed?.low))
+    ? Math.abs(Number(parsed.high) - Number(parsed.low))
+    : null;
+  const refPrice = Number.isFinite(parsed?.close)
+    ? Math.abs(Number(parsed.close))
+    : (Number.isFinite(parsedPrice) ? Math.abs(parsedPrice) : 0);
+  const flatRangeThreshold = Math.max(0.01, refPrice * 0.0001);
+  const flatCandle = hlRange !== null && hlRange < flatRangeThreshold;
+
   const sendLocalTestSignal = async () => {
     if (sending) return;
     setSending(true);
@@ -4455,6 +4466,7 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
         <div><span style={rowLabel}>Parsed direction</span><span style={rowValue}>{parsed?.direction || "—"}</span></div>
         <div><span style={rowLabel}>Open / High</span><span style={rowValue}>{Number.isFinite(parsed?.open) ? parsed.open : "—"} / {Number.isFinite(parsed?.high) ? parsed.high : "—"}</span></div>
         <div><span style={rowLabel}>Low / Close</span><span style={rowValue}>{Number.isFinite(parsed?.low) ? parsed.low : "—"} / {Number.isFinite(parsed?.close) ? parsed.close : "—"}</span></div>
+        <div><span style={rowLabel}>High − Low range</span><span style={rowValue}>{hlRange === null ? "—" : hlRange.toFixed(4)}</span></div>
         <div><span style={rowLabel}>Candle count</span><span style={rowValue}>{debug.candleCount ?? 0}</span></div>
         <div><span style={rowLabel}>Last candle time</span><span style={rowValue}>{lastCandleLabel}</span></div>
         <div><span style={rowLabel}>Active timeframe</span><span style={rowValue}>{tradingViewSignal?.timeframe || parsed?.timeframe || timeframe || "—"}</span></div>
@@ -4487,6 +4499,11 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
       {frontendNotApplying ? (
         <p style={{ background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", borderRadius: "8px", color: "#fecaca", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
           Backend received signal, frontend not applying it.
+        </p>
+      ) : null}
+      {flatCandle ? (
+        <p style={{ background: "rgba(234,179,8,.1)", border: "1px solid rgba(234,179,8,.3)", borderRadius: "8px", color: "#fde68a", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
+          TradingView is only sending flat candle data. Switch the alert to "Once Per Bar Close" so each bar delivers real OHLC.
         </p>
       ) : null}
       {mismatch ? (
@@ -5443,6 +5460,7 @@ function Dashboard({
       chartPrefs={chartPrefs}
       chartTimeframe={chartTimeframe}
       currentPrice={price}
+      debugMode={debugMode}
       entry={hasPlan ? visualPlan.entry : undefined}
       lastTradeSetup={lastTradeSetup}
       onResetChart={onResetChart}
@@ -5524,6 +5542,7 @@ function Dashboard({
         <TradeChartPanel
           candleSeries={liveCandleSeries}
           currentPrice={price}
+          debugMode={debugMode}
           entry={hasPlan ? visualPlan.entry : undefined}
           lastTradeSetup={lastTradeSetup}
           runner={hasPlan ? visualPlan.runner ?? visualPlan.target : undefined}
@@ -7739,7 +7758,7 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   return `Grade D setup (${score}/100). Do not trade: ${issue || "setup does not meet quality threshold"}.`;
 }
 
-function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPrice, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
+function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPrice, debugMode = false, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
   const candles = Array.isArray(candleSeries) ? candleSeries : [];
   const haveEnoughCandles = candles.length >= 20;
   // Per spec: zones only render if support is below current price, resistance is above,
@@ -7884,6 +7903,7 @@ function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPric
           autoFit={chartPrefs?.autoFit !== false}
           candles={candles}
           currentPrice={currentPrice}
+          debugMode={debugMode}
           height={chartHeight}
           lockPriceScale={chartPrefs?.lockPriceScale === true}
           markers={setupMarkers}
@@ -8574,14 +8594,19 @@ alertcondition(fireLong,  title="TradePilot Long Setup",   message='{"symbol":"{
 alertcondition(fireShort, title="TradePilot Short Setup",  message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"short","timestamp":"{{timenow}}"}')
 `;
 
+// Default alert payload sends real OHLC + volume so the chart renders true
+// candles (not flat single-tick bars). Use TradingView "Once Per Bar Close"
+// frequency so each alert delivers the closed bar's OHLC.
 const TRADE_PILOT_ALERT_MESSAGE = `{
  "symbol": "{{ticker}}",
  "price": {{close}},
  "timeframe": "{{interval}}",
- "signal": "trade_setup",
- "direction": "long",
- "setupScore": 78,
- "grade": "B+",
+ "open": {{open}},
+ "high": {{high}},
+ "low": {{low}},
+ "close": {{close}},
+ "volume": {{volume}},
+ "signal": "price_update",
  "timestamp": "{{timenow}}"
 }`;
 

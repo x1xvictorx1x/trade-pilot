@@ -32,9 +32,24 @@ function toSeconds(value) {
   return Math.floor(millis / 1000);
 }
 
-function buildCandleSeriesData(candles) {
-  if (!Array.isArray(candles)) return [];
+// Per-market floor for minimum visible candle range. Display-only.
+function getMinVisibleRange(symbol, refPrice) {
+  const sym = String(symbol || "").toUpperCase();
+  if (sym === "NQ" || sym === "MNQ" || sym.startsWith("NQ") || sym.startsWith("MNQ")) return 2;
+  if (sym === "ES" || sym === "MES" || sym.startsWith("ES") || sym.startsWith("MES")) return 0.5;
+  if (sym === "YM" || sym === "MYM") return 5;
+  if (sym === "RTY" || sym === "M2K") return 0.4;
+  if (sym === "CL") return 0.05;
+  if (sym === "GC" || sym === "MGC") return 0.5;
+  const px = Number(refPrice);
+  return Number.isFinite(px) && px > 0 ? Math.max(0.01, px * 0.001) : 0.5;
+}
+
+function buildCandleSeriesData(candles, options = {}) {
+  if (!Array.isArray(candles)) return { data: [], expanded: 0 };
+  const symbol = options.symbol || "";
   const seen = new Map();
+  let expanded = 0;
   for (const candle of candles) {
     if (!candle) continue;
     const time = toSeconds(candle.timestamp ?? candle.time);
@@ -43,9 +58,22 @@ function buildCandleSeriesData(candles) {
     const low = Number(candle.low);
     const close = Number(candle.close);
     if (!Number.isFinite(time) || !Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) continue;
-    seen.set(time, { time, open, high, low, close });
+    let displayHigh = high;
+    let displayLow = low;
+    const range = Math.abs(displayHigh - displayLow);
+    const minRange = getMinVisibleRange(symbol, close);
+    if (range < minRange) {
+      // Display-only expansion. Trading logic still uses raw OHLC stored upstream.
+      displayHigh = close + minRange / 2;
+      displayLow = close - minRange / 2;
+      expanded += 1;
+    }
+    seen.set(time, { time, open, high: displayHigh, low: displayLow, close });
   }
-  return Array.from(seen.values()).sort((a, b) => a.time - b.time);
+  return {
+    data: Array.from(seen.values()).sort((a, b) => a.time - b.time),
+    expanded,
+  };
 }
 
 function buildZoneAreaData(zone, candles) {
@@ -88,6 +116,7 @@ export default function TradingChart({
   autoFit = true,
   candles,
   currentPrice,
+  debugMode = false,
   emptyMessage = "Collecting TradingView candle data…",
   height = 480,
   lockPriceScale = false,
@@ -109,14 +138,15 @@ export default function TradingChart({
   const priceLinesRef = useRef({});
   const hasInitiallyFitRef = useRef(false);
 
+  const built = useMemo(() => buildCandleSeriesData(candles, { symbol }), [candles, symbol]);
   const realCandles = useMemo(() => {
-    const built = buildCandleSeriesData(candles);
     // Hard-cap to last 300 candles — keeps the chart snappy and matches the
     // history pipeline's MAX_CANDLES_PER_KEY.
-    return built.length > 300 ? built.slice(built.length - 300) : built;
-  }, [candles]);
+    return built.data.length > 300 ? built.data.slice(built.data.length - 300) : built.data;
+  }, [built]);
   const candleData = realCandles;
   const waitingForCandles = realCandles.length < MIN_CANDLES_FOR_LIVE;
+  const visualRangeEnhanced = built.expanded > 0;
   // Reject zones when support and resistance would collide on the same line —
   // collapses to "no zone shown" rather than two duplicates at one price.
   const cleanSupport = supportZone && resistanceZone
@@ -418,6 +448,26 @@ export default function TradingChart({
   return (
     <div style={{ position: "relative", width: "100%", height, touchAction: "none" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%", touchAction: "none" }} />
+      {debugMode && visualRangeEnhanced ? (
+        <div
+          style={{
+            background: "rgba(234, 179, 8, 0.18)",
+            border: "1px solid rgba(234, 179, 8, 0.5)",
+            borderRadius: "8px",
+            color: "#fde68a",
+            fontSize: "10px",
+            fontWeight: 800,
+            left: "10px",
+            letterSpacing: ".06em",
+            padding: "3px 8px",
+            position: "absolute",
+            textTransform: "uppercase",
+            top: "10px",
+          }}
+        >
+          Visual range enhanced
+        </div>
+      ) : null}
       {waitingForCandles ? (
         <div
           style={{
