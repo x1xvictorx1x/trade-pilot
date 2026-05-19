@@ -65,6 +65,24 @@ const CHART_TIMEFRAME_OPTIONS = [
   { value: "60", label: "1h" },
 ];
 
+// How long a trade_setup signal stays valid per timeframe.
+// After expiry the coach and plan show "no setup" for that timeframe.
+const SIGNAL_EXPIRY_MS = {
+  "1":  5  * 60 * 1000,
+  "2":  10 * 60 * 1000,
+  "5":  20 * 60 * 1000,
+  "15": 45 * 60 * 1000,
+  "30": 90 * 60 * 1000,
+  "60": 3  * 60 * 60 * 1000,
+};
+function getSignalExpiryMs(timeframeValue) {
+  const mins = String(Math.round(Math.max(1, Number(timeframeValue) || 1)));
+  return SIGNAL_EXPIRY_MS[mins] ?? 30 * 60 * 1000;
+}
+function makeChartKey(symbol, timeframe) {
+  return `${String(symbol || "").toUpperCase()}:${String(timeframe || "").trim()}`;
+}
+
 function parseTimeframeMinutes(value) {
   if (value === null || value === undefined) return 1;
   const raw = String(value).trim().toLowerCase();
@@ -1336,8 +1354,8 @@ function loadMigratedWorkspace() {
 const layoutModePresets = {
   Simple: {
     alerts: false,
-    cardOrder: ["coach", "tradePlan", "risk"],
-    chart: false,
+    cardOrder: ["chart", "coach", "tradePlan", "risk"],
+    chart: true,
     coach: true,
     journal: false,
     performanceStats: false,
@@ -1549,6 +1567,7 @@ export default function App() {
   const previousActiveTimeframeRef = useRef("");
   const [activeTimeframe, setActiveTimeframe] = useState("");
   const [tradingViewSignal, setTradingViewSignal] = useState(null);
+  const [lastTradeSetupByKey, setLastTradeSetupByKey] = useState({});
   const [priceSource, setPriceSource] = useState("manual");
   const [lastTradeSetup, setLastTradeSetup] = useState(null);
   const [notificationPrefs, setNotificationPrefs] = useState(() => loadNotificationPrefs());
@@ -1672,6 +1691,24 @@ export default function App() {
       return next;
     });
   }, [activeTimeframe]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Prune expired per-chart signals once per minute so the coach and plan
+  // cannot stay stuck on a stale LONG/SHORT after the expiry window passes.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLastTradeSetupByKey((prev) => {
+        const now = Date.now();
+        const cleaned = {};
+        for (const [key, stored] of Object.entries(prev)) {
+          const tf = String(key.split(":")[1] || "5");
+          const tfMins = Math.max(1, Number(tf) || 5);
+          if (now - stored.receivedAt <= getSignalExpiryMs(tfMins)) cleaned[key] = stored;
+        }
+        return Object.keys(cleaned).length === Object.keys(prev).length ? prev : cleaned;
+      });
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     try {
@@ -2753,9 +2790,18 @@ export default function App() {
         timestamp: signalTime,
         symbol: resolved.symbol,
         timeframe: tfRaw || null,
+        signal: signalKind,
       };
       setLastTradeSetup(tradeSetup);
       setWebhookDebug((current) => ({ ...current, lastTradeSetup: tradeSetup }));
+      // Store per chartKey so coach/plan are isolated per symbol+timeframe
+      const chartKeyForSignal = makeChartKey(resolved.symbol || nextMarket, tfRaw || "");
+      if (chartKeyForSignal) {
+        setLastTradeSetupByKey((prev) => ({
+          ...prev,
+          [chartKeyForSignal]: { ...tradeSetup, receivedAt: Date.now(), chartKey: chartKeyForSignal },
+        }));
+      }
     }
     setPriceSource("TradingView Webhook");
     const candleFromAlert = alert.candle && Number.isFinite(Number(alert.candle.close))
@@ -2872,6 +2918,7 @@ export default function App() {
           status: "planned",
           stop: Number(alert.stop),
           target: targets[targets.length - 1],
+          timeframe: tfRaw || null,
           trim1: targets[0],
           trim2: targets[1] ?? targets[0],
         }, {
@@ -3631,6 +3678,7 @@ export default function App() {
             debugMode={debugMode}
             isOnline={isOnline}
             lastTradeSetup={lastTradeSetup}
+            lastTradeSetupByKey={lastTradeSetupByKey}
             onResetChart={onResetChart}
             setChartPrefs={setChartPrefs}
             setChartTimeframe={setChartTimeframe}
@@ -4525,30 +4573,54 @@ function normalizeCardOrder(order = []) {
   return [...clean, ...known.filter((key) => !clean.includes(key))];
 }
 
-function DashboardNextStep({ activeTrade, dataSource, hasPlan, support, resistance, onMarkActive }) {
+function DashboardNextStep({ activeTrade, currentTimeframeSignal, dataSource, hasPlan, hasCandles, support, resistance, timeframe, onMarkActive }) {
   const hasLevels = Number.isFinite(Number(support)) && Number(support) > 0
     && Number.isFinite(Number(resistance)) && Number(resistance) > 0;
-  const connected = dataSource && dataSource !== "Manual";
+  const isTradingView = dataSource === "TradingView Webhook";
+  const tf = timeframeLabel(timeframe);
 
   let message = null;
+  let tone = "neutral";
   let action = null;
 
   if (activeTrade?.isActive) {
-    message = "Trade active. Monitor price against your targets.";
+    message = "Trade active. Manage risk.";
+    tone = "active";
   } else if (hasPlan) {
-    message = "Plan ready. Click Mark Trade Active when you enter the trade.";
-    action = { label: "Mark Trade Active", onClick: onMarkActive };
-  } else if (connected && hasLevels) {
+    message = "Plan ready. Mark active only after you enter.";
+    tone = "ready";
+    action = { label: "Mark Active", onClick: onMarkActive };
+  } else if (isTradingView && !hasCandles) {
+    message = `Waiting for TradingView candles on ${tf}.`;
+    tone = "waiting";
+  } else if (isTradingView && hasCandles && currentTimeframeSignal) {
+    const dir = String(currentTimeframeSignal.direction || "").toUpperCase();
+    const grade = currentTimeframeSignal.grade || "";
+    message = `${grade}${dir ? ` ${dir}` : ""} setup detected on ${tf}. Review the plan.`;
+    tone = "signal";
+  } else if (isTradingView && hasCandles && !currentTimeframeSignal) {
+    message = `No high-quality setup on ${tf} yet.`;
+    tone = "neutral";
+  } else if (dataSource && dataSource !== "Manual Mode" && !hasLevels) {
+    message = `${dataSource} connected. Add support and resistance to generate a plan.`;
+    tone = "neutral";
+  } else if (hasLevels && !hasPlan) {
     message = "Levels set. Generate a plan or build one manually.";
     action = { label: "Build Plan", onClick: onMarkActive };
-  } else if (connected && !hasLevels) {
-    message = `${dataSource} connected. Add support and resistance to generate a plan.`;
   } else {
     message = "Connect a data source, then add support and resistance levels to begin.";
   }
 
+  const toneColor = {
+    active: "#3b82f6",
+    ready: "#10b981",
+    signal: "#facc15",
+    waiting: "#64748b",
+    neutral: "#475569",
+  }[tone] || "#475569";
+
   return (
-    <div style={{ alignItems: "center", background: "rgba(15,23,42,.6)", border: "1px solid #1e293b", borderRadius: "12px", display: "flex", fontSize: "13px", gap: "12px", justifyContent: "space-between", margin: "0 0 12px", padding: "10px 16px" }}>
+    <div style={{ alignItems: "center", background: `${toneColor}12`, border: `1px solid ${toneColor}30`, borderRadius: "12px", display: "flex", fontSize: "13px", gap: "12px", justifyContent: "space-between", margin: "0 0 12px", padding: "10px 16px" }}>
       <span style={{ color: "#94a3b8" }}>{message}</span>
       {action ? (
         <button
@@ -4556,6 +4628,33 @@ function DashboardNextStep({ activeTrade, dataSource, hasPlan, support, resistan
           style={{ background: "#2563eb", border: "none", borderRadius: "8px", color: "#f8fafc", cursor: "pointer", fontSize: "12px", fontWeight: 900, padding: "6px 14px", whiteSpace: "nowrap" }}
         >{action.label}</button>
       ) : null}
+    </div>
+  );
+}
+
+function TimeframeSignalBadge({ currentTimeframeSignal, dataSource, symbol, timeframe }) {
+  if (dataSource !== "TradingView Webhook") return null;
+  const tf = timeframeLabel(timeframe);
+  const sym = String(symbol || "").toUpperCase();
+  if (!currentTimeframeSignal) {
+    return (
+      <div style={{ alignItems: "center", background: "rgba(15,23,42,.5)", border: "1px solid #1e293b", borderRadius: "8px", color: "#64748b", display: "flex", fontSize: "12px", fontWeight: 600, gap: "8px", marginBottom: "10px", padding: "6px 12px" }}>
+        <span style={{ color: "#334155" }}>◦</span>
+        {sym} · {tf} — No high-quality setup yet
+      </div>
+    );
+  }
+  const dir = String(currentTimeframeSignal.direction || "").toUpperCase();
+  const grade = currentTimeframeSignal.grade || "";
+  const age = currentTimeframeSignal.receivedAt ? new Date(currentTimeframeSignal.receivedAt).toLocaleTimeString() : "";
+  const dirColor = dir === "LONG" ? "#10b981" : dir === "SHORT" ? "#f87171" : "#94a3b8";
+  return (
+    <div style={{ alignItems: "center", background: "rgba(15,23,42,.5)", border: "1px solid #1e3a5f", borderRadius: "8px", display: "flex", fontSize: "12px", fontWeight: 600, gap: "8px", marginBottom: "10px", padding: "6px 12px" }}>
+      <span style={{ color: "#3b82f6" }}>●</span>
+      <span style={{ color: "#94a3b8" }}>{sym} · {tf}</span>
+      <span style={{ color: "#475569" }}>—</span>
+      <span style={{ color: dirColor }}>{grade}{dir ? ` ${dir}` : " setup"}</span>
+      {age ? <span style={{ color: "#334155", marginLeft: "auto" }}>{age}</span> : null}
     </div>
   );
 }
@@ -5191,6 +5290,7 @@ function Dashboard({
   debugMode,
   isOnline,
   lastTradeSetup,
+  lastTradeSetupByKey,
   webhookDebug,
   onResetChart,
   setChartPrefs,
@@ -5252,6 +5352,18 @@ function Dashboard({
   const safeJournalEntries = safeArray(journalEntries);
   const safeWatchlist = normalizeWatchlistItems(watchlist, profile.mainMarket);
   const effectiveLayout = getEffectiveLayout(layoutPrefs);
+  // Per-timeframe signal isolation: only the signal that matches the currently
+  // displayed symbol+timeframe feeds the coach, plan, and setup score.
+  // Signals for other timeframes are ignored until the user switches to them.
+  const activeChartKeyTf = activeTimeframe || chartTimeframe || "5";
+  const activeChartKey = makeChartKey(profile.mainMarket, activeChartKeyTf);
+  const currentTimeframeSignal = useMemo(() => {
+    const stored = lastTradeSetupByKey?.[activeChartKey];
+    if (!stored || !Number.isFinite(stored.receivedAt)) return null;
+    const expiryMs = getSignalExpiryMs(Number(activeChartKeyTf) || 5);
+    if (Date.now() - stored.receivedAt > expiryMs) return null;
+    return stored;
+  }, [lastTradeSetupByKey, activeChartKey, activeChartKeyTf]);
   const rangePad = Math.max(20, price * 0.01);
   const rangeMin = Math.max(0, price - rangePad);
   const rangeMax = price + rangePad;
@@ -5464,7 +5576,7 @@ function Dashboard({
     price,
     resistance,
     support,
-    tradingViewSignal,
+    tradingViewSignal: currentTimeframeSignal,
     zoneDetection: enrichedZoneDetection,
   });
   const fallbackPlan = {
@@ -5529,10 +5641,10 @@ function Dashboard({
     rewardRisk,
     stop: visualPlan.stop,
     support,
-    webhookSetupScore: tradingViewSignal?.setupScore ?? null,
-    webhookSetupGrade: tradingViewSignal?.grade ?? null,
+    webhookSetupScore: currentTimeframeSignal?.setupScore ?? null,
+    webhookSetupGrade: currentTimeframeSignal?.grade ?? null,
     zoneDetection: enrichedZoneDetection,
-  }), [activeBias, liveCandleSeries.length, visualPlan.contracts, contracts, discipline.dailyPnl, dataSource, visualPlan.direction, visualPlan.entry, visualPlan.stop, support, resistance, profile.maxContracts, profile.maxDailyLoss, price, rewardRisk, tradingViewSignal, enrichedZoneDetection]);
+  }), [activeBias, liveCandleSeries.length, visualPlan.contracts, contracts, discipline.dailyPnl, dataSource, visualPlan.direction, visualPlan.entry, visualPlan.stop, support, resistance, profile.maxContracts, profile.maxDailyLoss, price, rewardRisk, currentTimeframeSignal, enrichedZoneDetection]);
   const disciplineGrade = useMemo(() => gradeDiscipline({
     activeTrade,
     discipline,
@@ -5616,7 +5728,7 @@ function Dashboard({
     }
 
     return {
-      signal: tradingViewSignal || null,
+      signal: currentTimeframeSignal || null,
       plan,
       validation: activePlanValidation,
       hasPlan: isValidPlan,
@@ -5629,7 +5741,7 @@ function Dashboard({
       manageMessage,
       coach: liveCoach,
     };
-  }, [activeTradePlan, activePlanValidation, rewardRisk, price, activeTrade, activePosition, liveCoach, tradingViewSignal]);
+  }, [activeTradePlan, activePlanValidation, rewardRisk, price, activeTrade, activePosition, liveCoach, currentTimeframeSignal]);
 
   // Structured coach output. Always answers "what should I do right now?".
   const coachStructured = useMemo(() => {
@@ -5744,15 +5856,15 @@ function Dashboard({
 
   // Reset when an opposite-direction signal arrives. The previous trade is
   // implicitly invalidated, so any TP/runner flags must be wiped.
-  const previousSignalDirectionRef = useRef(tradingViewSignal?.direction || null);
+  const previousSignalDirectionRef = useRef(currentTimeframeSignal?.direction || null);
   useEffect(() => {
-    const next = tradingViewSignal?.direction || null;
+    const next = currentTimeframeSignal?.direction || null;
     const prev = previousSignalDirectionRef.current;
     if (next && prev && next !== prev && (next === "long" || next === "short")) {
       resetTradeState(`signal direction flipped (${prev} → ${next})`);
     }
     previousSignalDirectionRef.current = next;
-  }, [tradingViewSignal?.direction, resetTradeState]);
+  }, [currentTimeframeSignal?.direction, resetTradeState]);
 
   // Debug logging.
   useEffect(() => {
@@ -5940,7 +6052,7 @@ function Dashboard({
     performanceStats: effectiveLayout.performanceStats ? <PerformanceStatsCard discipline={discipline} journalEntries={safeJournalEntries} tradeGrade={displayTradeGrade} /> : null,
     propFirmRules: effectiveLayout.propFirmRules ? <PropFirmRulesCard fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} /> : null,
     risk: effectiveLayout.risk ? <RiskGuardCard discipline={discipline} fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} riskStatus={riskStatus} /> : null,
-    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard activeBias={activeBias} activeTradePlan={activeTradePlan} autoTradePlan={autoTradePlan} hasPlan={tradeState.hasPlan} missedEntry={missedEntry} onAutoGenerate={enrichedZoneDetection?.zonesValid ? handleAutoGeneratePlan : null} onAddLevels={handleOpenLevelsModal} onOpenManualBuilder={enrichedZoneDetection?.zonesValid ? handleOpenManualBuilder : null} planValidation={activePlanValidation} profile={profile} rewardRisk={rewardRisk} setupName={setupName} symbol={profile.mainMarket} tradeGrade={displayTradeGrade} tradeState={tradeState} visualPlan={visualPlan} zonesValid={enrichedZoneDetection?.zonesValid !== false} /> : null,
+    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard activeBias={activeBias} activeTradePlan={activeTradePlan} activeTimeframeKey={activeChartKeyTf} autoTradePlan={autoTradePlan} hasPlan={tradeState.hasPlan} missedEntry={missedEntry} onAutoGenerate={enrichedZoneDetection?.zonesValid ? handleAutoGeneratePlan : null} onAddLevels={handleOpenLevelsModal} onOpenManualBuilder={enrichedZoneDetection?.zonesValid ? handleOpenManualBuilder : null} planValidation={activePlanValidation} profile={profile} rewardRisk={rewardRisk} setupName={setupName} symbol={profile.mainMarket} tradeGrade={displayTradeGrade} tradeState={tradeState} visualPlan={visualPlan} zonesValid={enrichedZoneDetection?.zonesValid !== false} /> : null,
     watchlist: effectiveLayout.watchlist ? <WatchlistCard price={price} profile={profile} watchlist={safeWatchlist} /> : null,
   };
 
@@ -5997,6 +6109,15 @@ function Dashboard({
         </div>
       </section>
       <section style={styles.dashboardToolbar}>
+        <div style={{ display: "flex", gap: "4px", background: "#0f172a", border: "1px solid #1e293b", borderRadius: "8px", padding: "3px" }}>
+          {["Simple", "Pro"].map((m) => (
+            <button
+              key={m}
+              onClick={() => setLayoutPrefs((prev) => ({ ...prev, ...layoutModePresets[m], mode: m }))}
+              style={{ background: effectiveLayout.mode === m ? "#2563eb" : "transparent", border: "none", borderRadius: "6px", color: effectiveLayout.mode === m ? "#f8fafc" : "#64748b", cursor: "pointer", fontSize: "12px", fontWeight: 700, padding: "4px 10px" }}
+            >{m}</button>
+          ))}
+        </div>
         <button onClick={() => setCustomizeOpen((open) => !open)} style={styles.settingsButton}>Customize Dashboard</button>
         {(() => {
           const markDisabled = tradeBlockedByGrade || !tradeState.hasPlan || Boolean(tradeState.activeTrade);
@@ -6046,12 +6167,21 @@ function Dashboard({
           title={tradeState.hasPlan ? "Copy plan + grade to clipboard" : "No plan to share yet."}
         >Share Breakdown</button>
       </section>
+      <TimeframeSignalBadge
+        currentTimeframeSignal={currentTimeframeSignal}
+        dataSource={dataSource}
+        symbol={profile.mainMarket}
+        timeframe={activeChartKeyTf}
+      />
       <DashboardNextStep
         activeTrade={activeTrade}
+        currentTimeframeSignal={currentTimeframeSignal}
         dataSource={dataSource}
         hasPlan={hasPlan}
+        hasCandles={hasLiveCandles}
         support={support}
         resistance={resistance}
+        timeframe={activeChartKeyTf}
         onMarkActive={() => setMarkActiveModalOpen(true)}
       />
       <CoachScoreGrid disciplineGrade={disciplineGrade} setupGrade={setupGrade} />
@@ -6514,12 +6644,15 @@ function AutoZonePanel({ zoneDetection, symbol, onClearZones, onAddLevels }) {
   );
 }
 
-function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, missedEntry, onAutoGenerate, onAddLevels, onOpenManualBuilder, planValidation, profile, rewardRisk, setupName, symbol, tradeGrade, tradeState, visualPlan, zonesValid = true }) {
+function TradePlanCard({ activeBias, activeTradePlan, activeTimeframeKey, autoTradePlan, hasPlan, missedEntry, onAutoGenerate, onAddLevels, onOpenManualBuilder, planValidation, profile, rewardRisk, setupName, symbol, tradeGrade, tradeState, visualPlan, zonesValid = true }) {
   const marketCat = getMarketCategory(symbol || profile?.mainMarket || "");
   const unitLabel = marketCat === "forex" ? "pips" : marketCat === "crypto" ? "$" : marketCat === "stock" ? "shares" : "pts";
   const unitColor = { futures: "#3b82f6", forex: "#a855f7", crypto: "#f59e0b", stock: "#10b981" }[marketCat] || "#64748b";
   const fp = (v) => formatPrice(v, symbol || profile?.mainMarket || "");
   const planSource = activeTradePlan?.source || "Auto Zone";
+  const planTf = activeTradePlan?.timeframe ? String(activeTradePlan.timeframe).trim() : null;
+  const activeTf = activeTimeframeKey ? String(activeTimeframeKey).trim() : null;
+  const planIsFromOtherTf = planTf && activeTf && planTf !== activeTf;
   // Status label is derived from the unified tradeState so the Plan card cannot
   // disagree with the Manage / Active Trade cards.
   const planStatus = (() => {
@@ -6578,6 +6711,11 @@ function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, mi
         <Metric label="Status" value={planStatus} />
         <Metric label="Last updated" value={planUpdated} />
       </div>
+      {planIsFromOtherTf ? (
+        <div style={{ background: "rgba(251,191,36,.08)", border: "1px solid rgba(251,191,36,.25)", borderRadius: "8px", color: "#fbbf24", fontSize: "12px", marginBottom: "10px", padding: "7px 12px" }}>
+          Plan is from {timeframeLabel(planTf)}. Switch back or regenerate for {timeframeLabel(activeTf)}.
+        </div>
+      ) : null}
       {hasPlan ? (
         <>
           <div style={styles.planMetricGrid}>
