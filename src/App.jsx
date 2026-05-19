@@ -1535,6 +1535,12 @@ export default function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
+  useEffect(() => {
+    if (!moreMenuOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") setMoreMenuOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [moreMenuOpen]);
   const audioReadyRef = useRef(false);
   const lastClosedTradeRef = useRef("");
   const [autoPrice, setAutoPrice] = useState(true);
@@ -3365,10 +3371,10 @@ export default function App() {
             padding-top: max(10px, calc(env(safe-area-inset-top, 0px) + 6px)) !important;
             padding-bottom: 10px !important;
             padding-left: max(12px, env(safe-area-inset-left, 0px)) !important;
-            padding-right: max(12px, env(safe-area-inset-right, 0px)) !important;
+            padding-right: max(72px, calc(env(safe-area-inset-right, 0px) + 72px)) !important;
             position: sticky !important;
             top: 0 !important;
-            z-index: 50 !important;
+            z-index: 99 !important;
           }
           .tradepilot-top-actions { margin-left: auto !important; position: static !important; width: auto !important; justify-content: flex-end !important; gap: 8px !important; }
           .mobile-menu-button {
@@ -3376,8 +3382,8 @@ export default function App() {
             width: 48px !important;
             min-height: 48px !important;
             min-width: 48px !important;
-            position: relative !important;
-            z-index: 9999 !important;
+            position: fixed !important;
+            z-index: 99999 !important;
             pointer-events: auto !important;
           }
           .mobile-drawer {
@@ -3402,7 +3408,7 @@ export default function App() {
             transform: translateX(0) !important;
             transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
             width: min(86vw, 320px) !important;
-            z-index: 9999 !important;
+            z-index: 99999 !important;
           }
           .mobile-menu-item {
             min-height: 44px !important;
@@ -3420,7 +3426,7 @@ export default function App() {
             inset: 0 !important;
             padding: 0 !important;
             position: fixed !important;
-            z-index: 9998 !important;
+            z-index: 99998 !important;
           }
           .mobile-menu-item { display: block !important; width: 100% !important; }
           .dashboard-card-board { display: flex !important; flex-direction: column !important; max-width: 100% !important; width: 100% !important; }
@@ -3517,97 +3523,6 @@ export default function App() {
                 >
                   Launch App
                 </button>
-                <div style={styles.moreWrap}>
-                  <button
-                    aria-expanded={moreMenuOpen}
-                    aria-label={moreMenuOpen ? "Close menu" : "Open menu"}
-                    className="mobile-menu-button"
-                    onClick={() => setMoreMenuOpen((open) => !open)}
-                    style={styles.menuButton}
-                    type="button"
-                  >
-                    <span style={styles.menuBar} />
-                    <span style={styles.menuBar} />
-                    <span style={styles.menuBar} />
-                  </button>
-                  {/* Only mount the full-screen overlay when the drawer is open.
-                      Otherwise its position:fixed inset:0 blocks every tap on
-                      the page — including the hamburger button itself. */}
-                  {moreMenuOpen ? (
-                    <button
-                      aria-label="Close mobile menu"
-                      className="mobile-overlay"
-                      onClick={() => setMoreMenuOpen(false)}
-                      style={styles.mobileOverlay}
-                      type="button"
-                    />
-                  ) : null}
-                  <div className={`tradepilot-more-menu mobile-drawer${moreMenuOpen ? "" : " closed"}`} style={styles.moreMenu}>
-                      {navigationTabs.map((tab) => (
-                        <button
-                          className="mobile-menu-item"
-                          key={`mobile-${tab}`}
-                          onClick={() => {
-                            setActivePage(tab.toLowerCase());
-                            setMoreMenuOpen(false);
-                          }}
-                          style={styles.moreMenuItem}
-                          type="button"
-                        >
-                          {tab}
-                        </button>
-                      ))}
-                      {moreTabs.map((tab) => (
-                        <button
-                          className="mobile-menu-item"
-                          key={tab}
-                          onClick={() => {
-                            setActivePage(tab.toLowerCase());
-                            setMoreMenuOpen(false);
-                          }}
-                          style={styles.moreMenuItem}
-                          type="button"
-                        >
-                          {tab}
-                        </button>
-                      ))}
-                      {debugMode ? (
-                        <button
-                          className="mobile-menu-item"
-                          key="mobile-debug"
-                          onClick={() => {
-                            setActivePage("dashboard");
-                            setMoreMenuOpen(false);
-                          }}
-                          style={{ ...styles.moreMenuItem, color: "#fde68a" }}
-                          type="button"
-                        >
-                          Debug Panel
-                        </button>
-                      ) : null}
-                      <label style={styles.moreToggle}>
-                        <input
-                          type="checkbox"
-                          checked={streamerMode}
-                          onChange={(event) => setStreamerMode(event.target.checked)}
-                        />
-                        Streamer Mode
-                      </label>
-                      {session?.user ? (
-                        <button
-                          className="mobile-menu-item"
-                          onClick={() => {
-                            signOut();
-                            setMoreMenuOpen(false);
-                          }}
-                          style={styles.moreMenuItem}
-                          type="button"
-                        >
-                          Log Out
-                        </button>
-                      ) : null}
-                    </div>
-                </div>
               </>
             )}
           </div>
@@ -3823,6 +3738,107 @@ export default function App() {
         <AppFooter />
         </DashboardFrame>
       </div>
+
+      {/* ── Fixed mobile nav — z-index 99999 in root stacking context ─────── */}
+      <button
+        aria-expanded={moreMenuOpen}
+        aria-label={moreMenuOpen ? "Close menu" : "Open menu"}
+        className="mobile-menu-button"
+        onClick={() => {
+          console.log("[TradePilot] Hamburger clicked. moreMenuOpen →", !moreMenuOpen);
+          setMoreMenuOpen((open) => !open);
+        }}
+        style={{
+          ...styles.menuButton,
+          position: "fixed",
+          right: "max(12px, env(safe-area-inset-right, 0px))",
+          top: "max(14px, calc(env(safe-area-inset-top, 0px) + 14px))",
+          pointerEvents: "auto",
+          zIndex: 99999,
+        }}
+        type="button"
+      >
+        <span style={styles.menuBar} />
+        <span style={styles.menuBar} />
+        <span style={styles.menuBar} />
+      </button>
+      {moreMenuOpen ? (
+        <button
+          aria-label="Close mobile menu"
+          className="mobile-overlay"
+          onClick={() => setMoreMenuOpen(false)}
+          style={{ ...styles.mobileOverlay, pointerEvents: "auto", zIndex: 99998 }}
+          type="button"
+        />
+      ) : null}
+      <div
+        className={`tradepilot-more-menu mobile-drawer${moreMenuOpen ? "" : " closed"}`}
+        style={{ ...styles.moreMenu, pointerEvents: "auto" }}
+      >
+        {navigationTabs.map((tab) => (
+          <button
+            className="mobile-menu-item"
+            key={`portal-${tab}`}
+            onClick={() => {
+              setActivePage(tab.toLowerCase());
+              setMoreMenuOpen(false);
+            }}
+            style={styles.moreMenuItem}
+            type="button"
+          >
+            {tab}
+          </button>
+        ))}
+        {moreTabs.map((tab) => (
+          <button
+            className="mobile-menu-item"
+            key={`portal-more-${tab}`}
+            onClick={() => {
+              setActivePage(tab.toLowerCase());
+              setMoreMenuOpen(false);
+            }}
+            style={styles.moreMenuItem}
+            type="button"
+          >
+            {tab}
+          </button>
+        ))}
+        {debugMode ? (
+          <button
+            className="mobile-menu-item"
+            onClick={() => {
+              setActivePage("dashboard");
+              setMoreMenuOpen(false);
+            }}
+            style={{ ...styles.moreMenuItem, color: "#fde68a" }}
+            type="button"
+          >
+            Debug Panel
+          </button>
+        ) : null}
+        <label style={styles.moreToggle}>
+          <input
+            checked={streamerMode}
+            onChange={(event) => setStreamerMode(event.target.checked)}
+            type="checkbox"
+          />
+          Streamer Mode
+        </label>
+        {session?.user ? (
+          <button
+            className="mobile-menu-item"
+            onClick={() => {
+              signOut();
+              setMoreMenuOpen(false);
+            }}
+            style={styles.moreMenuItem}
+            type="button"
+          >
+            Log Out
+          </button>
+        ) : null}
+      </div>
+      {/* ────────────────────────────────────────────────────────────────────── */}
 
       {settingsOpen ? (
         <SettingsModal profile={profile} updateProfile={updateProfile} onClose={() => setSettingsOpen(false)} />
@@ -10604,7 +10620,7 @@ const styles = {
     inset: 0,
     padding: 0,
     position: "fixed",
-    zIndex: 9998,
+    zIndex: 99998,
   },
   moreMenuItem: {
     background: "transparent",
