@@ -1471,7 +1471,7 @@ export default function App() {
   const [activeTrade, setActiveTrade] = useState(() => loadActiveTrade());
   const [activePage, setActivePage] = useState("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [disclaimerAccepted, setDisclaimerAccepted] = useState(() => localStorage.getItem(disclaimerStorageKey) === "true");
   const [onboardingComplete, setOnboardingComplete] = useState(() => localStorage.getItem(onboardingStorageKey) === "true");
   const [fastMessage, setFastMessage] = useState("Ready for manual execution.");
@@ -1536,11 +1536,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
   useEffect(() => {
-    if (!moreMenuOpen) return;
-    const onKey = (e) => { if (e.key === "Escape") setMoreMenuOpen(false); };
+    if (!mobileMenuOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") setMobileMenuOpen(false); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [moreMenuOpen]);
+  }, [mobileMenuOpen]);
   const audioReadyRef = useRef(false);
   const lastClosedTradeRef = useRef("");
   const [autoPrice, setAutoPrice] = useState(true);
@@ -3351,40 +3351,50 @@ export default function App() {
         }
         .mobile-launch-button { display: none !important; }
         .mobile-menu-item { display: none !important; }
-        .desktop-nav-item { display: none !important; }
-        .mobile-menu-button { display: inline-flex !important; }
-        @media (max-width: 768px) {
+        .desktop-nav-item { display: inline-flex !important; }
+        .header-market-status { display: none; }
+        .mobile-menu-button { display: none !important; }
+        @media (max-width: 900px) {
           .desktop-nav-item { display: none !important; }
+          .mobile-menu-button { display: inline-flex !important; }
+        }
+        @media (max-width: 768px) {
           .mobile-menu-item { display: block !important; }
           .mobile-menu-button { display: inline-flex !important; }
-          .mobile-launch-button { display: inline-flex !important; align-items: center; }
           .tradepilot-subtitle,
           .tradepilot-positioning,
           .tradepilot-header-meta,
           .tradepilot-auth-actions { display: none !important; }
           .tradepilot-title { font-size: 24px !important; line-height: 1 !important; margin: 0 !important; }
+          .header-market-status {
+            align-items: flex-end !important;
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 1px !important;
+            white-space: nowrap !important;
+          }
           .tradepilot-header {
             align-items: center !important;
-            display: flex !important;
-            gap: 10px !important;
-            justify-content: space-between !important;
-            padding-top: max(10px, calc(env(safe-area-inset-top, 0px) + 6px)) !important;
+            display: grid !important;
+            gap: 12px !important;
+            grid-template-columns: 1fr auto auto !important;
             padding-bottom: 10px !important;
             padding-left: max(12px, env(safe-area-inset-left, 0px)) !important;
-            padding-right: max(72px, calc(env(safe-area-inset-right, 0px) + 72px)) !important;
+            padding-right: max(12px, env(safe-area-inset-right, 0px)) !important;
+            padding-top: max(10px, calc(env(safe-area-inset-top, 0px) + 6px)) !important;
             position: sticky !important;
             top: 0 !important;
-            z-index: 99 !important;
+            z-index: 200 !important;
           }
-          .tradepilot-top-actions { margin-left: auto !important; position: static !important; width: auto !important; justify-content: flex-end !important; gap: 8px !important; }
+          .tradepilot-top-actions { align-items: center !important; gap: 0 !important; justify-content: flex-end !important; position: static !important; width: auto !important; }
           .mobile-menu-button {
             height: 48px !important;
-            width: 48px !important;
             min-height: 48px !important;
             min-width: 48px !important;
-            position: fixed !important;
-            z-index: 99999 !important;
             pointer-events: auto !important;
+            position: relative !important;
+            width: 48px !important;
+            z-index: 1 !important;
           }
           .mobile-drawer {
             background: #05070d !important;
@@ -3395,20 +3405,20 @@ export default function App() {
             gap: 10px !important;
             height: 100dvh !important;
             left: auto !important;
-            min-width: 0 !important;
             max-width: 100vw !important;
+            min-width: 0 !important;
             overflow-y: auto !important;
-            padding-top: max(18px, calc(env(safe-area-inset-top, 0px) + 12px)) !important;
-            padding-right: max(18px, env(safe-area-inset-right, 0px)) !important;
             padding-bottom: max(18px, calc(env(safe-area-inset-bottom, 0px) + 12px)) !important;
             padding-left: 18px !important;
+            padding-right: max(18px, env(safe-area-inset-right, 0px)) !important;
+            padding-top: max(18px, calc(env(safe-area-inset-top, 0px) + 12px)) !important;
             position: fixed !important;
             right: 0 !important;
             top: 0 !important;
             transform: translateX(0) !important;
             transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-            width: min(86vw, 320px) !important;
-            z-index: 99999 !important;
+            width: min(86vw, 360px) !important;
+            z-index: 10000 !important;
           }
           .mobile-menu-item {
             min-height: 44px !important;
@@ -3426,7 +3436,7 @@ export default function App() {
             inset: 0 !important;
             padding: 0 !important;
             position: fixed !important;
-            z-index: 99998 !important;
+            z-index: 9999 !important;
           }
           .mobile-menu-item { display: block !important; width: 100% !important; }
           .dashboard-card-board { display: flex !important; flex-direction: column !important; max-width: 100% !important; width: 100% !important; }
@@ -3465,7 +3475,8 @@ export default function App() {
       `}</style>
       <div className="app-container" style={styles.shell}>
         <header className="tradepilot-header" style={styles.header}>
-          <div style={styles.headerBrand}>
+          {/* Col 1 — Brand */}
+          <div className="header-brand" style={styles.headerBrand}>
             <p style={styles.eyebrow}>Trade Pilot Alpha</p>
             <h1 className="tradepilot-title" style={styles.title}>Trade Pilot</h1>
             <p className="tradepilot-subtitle" style={styles.subtitle}>
@@ -3481,6 +3492,17 @@ export default function App() {
             </div>
           </div>
 
+          {/* Col 2 — Market + price (mobile only, hidden on desktop via CSS) */}
+          <div className="header-market-status">
+            <div style={{ color: "#64748b", fontSize: "11px", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+              {profile.mainMarket}
+            </div>
+            <div style={{ color: "#e2e8f0", fontSize: "14px", fontWeight: 800 }}>
+              {price ? formatPrice(price, profile.mainMarket) : "—"}
+            </div>
+          </div>
+
+          {/* Col 3 — Desktop: auth + nav; Mobile: hamburger only */}
           <div className="tradepilot-top-actions" style={styles.topActions}>
             <div className="tradepilot-auth-actions" style={styles.authActions}>
               {session?.user ? (
@@ -3499,32 +3521,39 @@ export default function App() {
             {streamerMode ? (
               <button onClick={() => setStreamerMode(false)} style={styles.secondaryButton}>Exit Streamer</button>
             ) : (
-              <>
-                {navigationTabs.map((tab) => (
-                  <button
-                    className="desktop-nav-item"
-                    key={tab}
-                    onClick={() => {
-                      setActivePage(tab.toLowerCase());
-                      setMoreMenuOpen(false);
-                    }}
-                    style={{ ...styles.secondaryButton, background: activePage === tab.toLowerCase() ? "#2563eb" : "#27272a" }}
-                  >
-                    {tab}
-                  </button>
-                ))}
+              navigationTabs.map((tab) => (
                 <button
-                  className="mobile-launch-button"
+                  className="desktop-nav-item"
+                  key={tab}
                   onClick={() => {
-                    setActivePage("dashboard");
-                    setMoreMenuOpen(false);
+                    setActivePage(tab.toLowerCase());
+                    setMobileMenuOpen(false);
                   }}
-                  style={styles.secondaryButton}
+                  style={{ ...styles.secondaryButton, background: activePage === tab.toLowerCase() ? "#2563eb" : "#27272a" }}
                 >
-                  Launch App
+                  {tab}
                 </button>
-              </>
+              ))
             )}
+            {/* Hamburger — inside header, position:relative, no overlap */}
+            <button
+              aria-expanded={mobileMenuOpen}
+              aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
+              className="mobile-menu-button"
+              onClick={() => setMobileMenuOpen((o) => !o)}
+              style={styles.menuButton}
+              type="button"
+            >
+              {mobileMenuOpen ? (
+                <span style={{ color: "#e2e8f0", fontSize: "22px", fontWeight: 300, lineHeight: 1 }}>✕</span>
+              ) : (
+                <>
+                  <span style={styles.menuBar} />
+                  <span style={styles.menuBar} />
+                  <span style={styles.menuBar} />
+                </>
+              )}
+            </button>
           </div>
         </header>
         <DashboardFrame
@@ -3739,51 +3768,62 @@ export default function App() {
         </DashboardFrame>
       </div>
 
-      {/* ── Fixed mobile nav — z-index 99999 in root stacking context ─────── */}
-      <button
-        aria-expanded={moreMenuOpen}
-        aria-label={moreMenuOpen ? "Close menu" : "Open menu"}
-        className="mobile-menu-button"
-        onClick={() => {
-          console.log("[TradePilot] Hamburger clicked. moreMenuOpen →", !moreMenuOpen);
-          setMoreMenuOpen((open) => !open);
-        }}
-        style={{
-          ...styles.menuButton,
-          position: "fixed",
-          right: "max(12px, env(safe-area-inset-right, 0px))",
-          top: "max(14px, calc(env(safe-area-inset-top, 0px) + 14px))",
-          pointerEvents: "auto",
-          zIndex: 99999,
-        }}
-        type="button"
-      >
-        <span style={styles.menuBar} />
-        <span style={styles.menuBar} />
-        <span style={styles.menuBar} />
-      </button>
-      {moreMenuOpen ? (
+      {/* Mobile nav overlay — tap-outside closes drawer */}
+      {mobileMenuOpen ? (
         <button
           aria-label="Close mobile menu"
           className="mobile-overlay"
-          onClick={() => setMoreMenuOpen(false)}
-          style={{ ...styles.mobileOverlay, pointerEvents: "auto", zIndex: 99998 }}
+          onClick={() => setMobileMenuOpen(false)}
+          style={styles.mobileOverlay}
           type="button"
         />
       ) : null}
+
+      {/* Mobile nav drawer — fixed panel, z-index 10000, above chart, below modals */}
       <div
-        className={`tradepilot-more-menu mobile-drawer${moreMenuOpen ? "" : " closed"}`}
-        style={{ ...styles.moreMenu, pointerEvents: "auto" }}
+        className={`tradepilot-more-menu mobile-drawer${mobileMenuOpen ? "" : " closed"}`}
+        style={styles.moreMenu}
       >
+        {/* Auth — shown inside drawer on mobile (hidden from header) */}
+        <div style={styles.drawerAuthSection}>
+          {session?.user ? (
+            <>
+              <div style={styles.drawerUserPill}>{session.user.user_metadata?.name || session.user.email}</div>
+              <button
+                className="mobile-menu-item"
+                onClick={() => { signOut(); setMobileMenuOpen(false); }}
+                style={{ ...styles.moreMenuItem, color: "#f87171" }}
+                type="button"
+              >
+                Log Out
+              </button>
+            </>
+          ) : (
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                onClick={() => { setAuthModal("signup"); setMobileMenuOpen(false); }}
+                style={{ ...styles.authButton, flex: "1 1 auto" }}
+                type="button"
+              >
+                Sign Up
+              </button>
+              <button
+                onClick={() => { setAuthModal("login"); setMobileMenuOpen(false); }}
+                style={{ ...styles.authButton, flex: "1 1 auto" }}
+                type="button"
+              >
+                Log In
+              </button>
+            </div>
+          )}
+        </div>
+        <div style={styles.drawerDivider} />
         {navigationTabs.map((tab) => (
           <button
             className="mobile-menu-item"
-            key={`portal-${tab}`}
-            onClick={() => {
-              setActivePage(tab.toLowerCase());
-              setMoreMenuOpen(false);
-            }}
-            style={styles.moreMenuItem}
+            key={`drawer-${tab}`}
+            onClick={() => { setActivePage(tab.toLowerCase()); setMobileMenuOpen(false); }}
+            style={{ ...styles.moreMenuItem, background: activePage === tab.toLowerCase() ? "rgba(37,99,235,.18)" : "transparent" }}
             type="button"
           >
             {tab}
@@ -3792,11 +3832,8 @@ export default function App() {
         {moreTabs.map((tab) => (
           <button
             className="mobile-menu-item"
-            key={`portal-more-${tab}`}
-            onClick={() => {
-              setActivePage(tab.toLowerCase());
-              setMoreMenuOpen(false);
-            }}
+            key={`drawer-more-${tab}`}
+            onClick={() => { setActivePage(tab.toLowerCase()); setMobileMenuOpen(false); }}
             style={styles.moreMenuItem}
             type="button"
           >
@@ -3806,10 +3843,7 @@ export default function App() {
         {debugMode ? (
           <button
             className="mobile-menu-item"
-            onClick={() => {
-              setActivePage("dashboard");
-              setMoreMenuOpen(false);
-            }}
+            onClick={() => { setActivePage("dashboard"); setMobileMenuOpen(false); }}
             style={{ ...styles.moreMenuItem, color: "#fde68a" }}
             type="button"
           >
@@ -3819,26 +3853,12 @@ export default function App() {
         <label style={styles.moreToggle}>
           <input
             checked={streamerMode}
-            onChange={(event) => setStreamerMode(event.target.checked)}
+            onChange={(e) => setStreamerMode(e.target.checked)}
             type="checkbox"
           />
           Streamer Mode
         </label>
-        {session?.user ? (
-          <button
-            className="mobile-menu-item"
-            onClick={() => {
-              signOut();
-              setMoreMenuOpen(false);
-            }}
-            style={styles.moreMenuItem}
-            type="button"
-          >
-            Log Out
-          </button>
-        ) : null}
       </div>
-      {/* ────────────────────────────────────────────────────────────────────── */}
 
       {settingsOpen ? (
         <SettingsModal profile={profile} updateProfile={updateProfile} onClose={() => setSettingsOpen(false)} />
@@ -10620,7 +10640,30 @@ const styles = {
     inset: 0,
     padding: 0,
     position: "fixed",
-    zIndex: 99998,
+    zIndex: 9999,
+  },
+  drawerAuthSection: {
+    borderBottom: "1px solid #1e293b",
+    display: "grid",
+    gap: "6px",
+    paddingBottom: "12px",
+  },
+  drawerUserPill: {
+    background: "#0f172a",
+    border: "1px solid #334155",
+    borderRadius: "8px",
+    color: "#94a3b8",
+    fontSize: "12px",
+    overflow: "hidden",
+    padding: "8px 12px",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  drawerDivider: {
+    background: "#1e293b",
+    border: "none",
+    height: "1px",
+    margin: "4px 0",
   },
   moreMenuItem: {
     background: "transparent",
