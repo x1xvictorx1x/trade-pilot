@@ -2774,7 +2774,7 @@ export default function App() {
 
     const setupScore = Number.isFinite(Number(alert.setupScore)) ? Number(alert.setupScore) : null;
     const setupGrade = alert.grade ? String(alert.grade).toUpperCase() : null;
-    const isTradeSetup = signalKind === "trade_setup" && (setupScore === null || setupScore >= 75);
+    const isTradeSetup = signalKind === "trade_setup" && Number.isFinite(setupScore) && setupScore >= 65;
     setTradingViewSignal({
       symbol: resolved.symbol,
       market: nextMarket,
@@ -5606,6 +5606,7 @@ function Dashboard({
     contracts,
     dailyPnl: discipline.dailyPnl,
     marketSpec,
+    marketStructure,
     maxContracts: Number(profile.maxContracts || contracts),
     maxDailyLoss: Number(profile.maxDailyLoss || 0),
     maxRisk: Number(profile.maxRiskPerTrade || 0),
@@ -7271,6 +7272,30 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
   };
 }
 
+// ── Signal Quality Engine helpers ──────────────────────────────────────────────
+
+function calcEMA(prices, period) {
+  if (!prices.length) return 0;
+  const k = 2 / (period + 1);
+  const seed = prices.slice(0, period).reduce((a, b) => a + b, 0) / Math.min(period, prices.length);
+  let ema = seed;
+  for (let i = Math.min(period, prices.length); i < prices.length; i++) {
+    ema = prices[i] * k + ema * (1 - k);
+  }
+  return ema;
+}
+
+function calcATR(candles, period = 14) {
+  if (candles.length < 2) return 0;
+  const trs = candles.slice(1).map((c, i) =>
+    Math.max(c.high - c.low, Math.abs(c.high - candles[i].close), Math.abs(c.low - candles[i].close))
+  );
+  const recent = trs.slice(-period);
+  return recent.reduce((a, b) => a + b, 0) / recent.length;
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+
 // Market Structure Engine — detects swing highs/lows, liquidity sweeps, VWAP proxy, session levels
 function analyzeMarketStructure(candles = [], fallback = {}) {
   const clean = safeArray(candles)
@@ -7359,21 +7384,225 @@ function analyzeMarketStructure(candles = [], fallback = {}) {
   }
 
   const aboveVwap = currentPrice > vwap;
+
+  // ── EMA trend analysis ────────────────────────────────────────────────────────
+  const closes = recent.map((c) => c.close);
+  const emaFast = closes.length >= 3 ? calcEMA(closes, Math.min(9, closes.length)) : currentPrice;
+  const emaSlow = closes.length >= 5 ? calcEMA(closes, Math.min(21, closes.length)) : currentPrice;
+  let emaSlope = "flat";
+  if (closes.length >= 8) {
+    const oldEma = calcEMA(closes.slice(0, -5), Math.min(9, closes.length - 5));
+    const slopePct = Math.abs(oldEma) > 0.01 ? (emaFast - oldEma) / Math.abs(oldEma) : 0;
+    if (slopePct > 0.0008) emaSlope = "bullish";
+    else if (slopePct < -0.0008) emaSlope = "bearish";
+  }
+
+  // ── ATR (14-period) ───────────────────────────────────────────────────────────
+  const atr = calcATR(recent, Math.min(14, Math.max(1, recent.length - 1)));
+
+  // ── Consecutive close direction ───────────────────────────────────────────────
+  let consecutiveBullish = 0;
+  let consecutiveBearish = 0;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const c = recent[i];
+    if (c.close > c.open) {
+      if (consecutiveBearish > 0) break;
+      consecutiveBullish++;
+    } else if (c.close < c.open) {
+      if (consecutiveBullish > 0) break;
+      consecutiveBearish++;
+    } else {
+      break;
+    }
+  }
+
+  // ── Momentum score (0–100) ────────────────────────────────────────────────────
+  const lastC = recent.at(-1);
+  const lastRange = Math.max(0.01, lastC.high - lastC.low);
+  const closePct = (lastC.close - lastC.low) / lastRange;
+  const momentumScore =
+    consecutiveBullish >= 3 ? Math.min(100, 50 + consecutiveBullish * 13) :
+    consecutiveBearish >= 3 ? Math.min(100, 50 + consecutiveBearish * 13) :
+    consecutiveBullish === 2 ? (closePct >= 0.55 ? 65 : 50) :
+    consecutiveBearish === 2 ? (closePct <= 0.45 ? 65 : 50) :
+    consecutiveBullish === 1 ? (closePct >= 0.6 ? 40 : 26) :
+    consecutiveBearish === 1 ? (closePct <= 0.4 ? 40 : 26) :
+    20;
+
+  // ── Chop detection ────────────────────────────────────────────────────────────
+  let isChop = false;
+  let chopReason = "";
+  if (recent.length >= 6 && emaSlope === "flat") {
+    const last6 = recent.slice(-6);
+    let overlapCount = 0;
+    let alterCount = 0;
+    for (let i = 1; i < last6.length; i++) {
+      const p = last6[i - 1];
+      const c = last6[i];
+      const pH = Math.max(p.open, p.close);
+      const pL = Math.min(p.open, p.close);
+      const cH = Math.max(c.open, c.close);
+      const cL = Math.min(c.open, c.close);
+      const overlap = Math.max(0, Math.min(pH, cH) - Math.max(pL, cL));
+      if (overlap / Math.max(0.01, cH - cL) > 0.4) overlapCount++;
+      if ((p.close > p.open) !== (c.close > c.open)) alterCount++;
+    }
+    if (overlapCount >= 3 && alterCount >= 3) {
+      isChop = true;
+      chopReason = "EMA flat, bodies overlapping, direction alternating.";
+    }
+  }
+
   let structureMessage = `Market structure is ${marketStructure}. Price is ${aboveVwap ? "above" : "below"} VWAP (${vwap.toFixed(2)}).`;
-  if (liquiditySweepHigh) structureMessage += ` Liquidity sweep detected above ${liquiditySweepHigh.toFixed(2)} — watch for reversal.`;
-  if (liquiditySweepLow) structureMessage += ` Liquidity sweep detected below ${liquiditySweepLow.toFixed(2)} — watch for reversal.`;
+  if (isChop) structureMessage += " Chop detected — no directional edge.";
+  if (liquiditySweepHigh) structureMessage += ` Liquidity sweep above ${liquiditySweepHigh.toFixed(2)} — watch for reversal.`;
+  if (liquiditySweepLow) structureMessage += ` Liquidity sweep below ${liquiditySweepLow.toFixed(2)} — watch for reversal.`;
 
   return {
     aboveVwap,
+    atr,
+    chopReason,
+    consecutiveBearish,
+    consecutiveBullish,
+    emaFast,
+    emaSlope,
+    emaSlow,
+    isChop,
     liquiditySweepHigh,
     liquiditySweepLow,
     marketStructure,
+    momentumScore,
     sessionHigh,
     sessionLow,
     structureMessage,
     swingHighs,
     swingLows,
     vwap,
+  };
+}
+
+// Multi-factor signal quality scorer — weights: structure 25, trend 20, momentum 20, confirmation 15, volatility 10, session 10
+function scoreSignalQuality({ direction, structure, price }) {
+  if (!structure || !direction) {
+    return { noTrade: true, noTradeReason: "Insufficient market data.", overallScore: 0, confidence: "No Trade", explanation: "NO TRADE — Insufficient market data." };
+  }
+  const isLong = direction === "long";
+  const ms = structure.marketStructure || "unknown";
+  const emaSlope = structure.emaSlope || "flat";
+  const emaFast = structure.emaFast ?? price;
+  const emaSlow = structure.emaSlow ?? price;
+  const isChop = structure.isChop || false;
+  const chopReason = structure.chopReason || "";
+  const consecutiveBullish = structure.consecutiveBullish ?? 0;
+  const consecutiveBearish = structure.consecutiveBearish ?? 0;
+  const sessionHigh = structure.sessionHigh ?? price;
+  const sessionLow = structure.sessionLow ?? price;
+  const atr = structure.atr ?? 0;
+  const priceVal = Number(price);
+
+  // ── Hard veto conditions ──────────────────────────────────────────────────────
+  if (isChop) {
+    return { noTrade: true, noTradeReason: `Market in chop. ${chopReason} Wait for directional momentum.`, overallScore: 0, confidence: "No Trade", explanation: `NO TRADE — Market in chop. ${chopReason}` };
+  }
+  if (isLong && ms === "bearish") {
+    return { noTrade: true, noTradeReason: "Bearish market structure (lower highs + lower lows). No long setups.", overallScore: 5, confidence: "No Trade", explanation: "NO TRADE — Bearish market structure. Price making lower highs and lower lows. Wait for structure reclaim before any long." };
+  }
+  if (!isLong && ms === "bullish") {
+    return { noTrade: true, noTradeReason: "Bullish market structure (higher highs + higher lows). No short setups.", overallScore: 5, confidence: "No Trade", explanation: "NO TRADE — Bullish market structure. Price making higher highs and higher lows. Wait for a confirmed breakdown before any short." };
+  }
+  if (isLong && emaSlope === "bearish" && priceVal < emaSlow) {
+    return { noTrade: true, noTradeReason: "Price below bearish EMA — trend headwind too strong for long.", overallScore: 12, confidence: "No Trade", explanation: "NO TRADE — Price below falling EMA with bearish slope. Long against dominant trend requires very high-quality structure — not present." };
+  }
+  if (!isLong && emaSlope === "bullish" && priceVal > emaSlow) {
+    return { noTrade: true, noTradeReason: "Price above bullish EMA — trend headwind too strong for short.", overallScore: 12, confidence: "No Trade", explanation: "NO TRADE — Price above rising EMA with bullish slope. Short against dominant trend requires very high-quality structure — not present." };
+  }
+
+  // ── Factor 1: Structure alignment (0–25) ─────────────────────────────────────
+  let structureScore, structureReason;
+  if (isLong) {
+    if (ms === "bullish")      { structureScore = 25; structureReason = "higher highs and higher lows confirmed"; }
+    else if (ms === "accumulation") { structureScore = 18; structureReason = "higher lows forming (accumulation)"; }
+    else if (ms === "distribution") { structureScore = 4;  structureReason = "distribution — deteriorating long structure"; }
+    else                       { structureScore = 8;  structureReason = "unclear market structure"; }
+  } else {
+    if (ms === "bearish")      { structureScore = 25; structureReason = "lower highs and lower lows confirmed"; }
+    else if (ms === "distribution") { structureScore = 18; structureReason = "lower highs forming (distribution)"; }
+    else if (ms === "accumulation") { structureScore = 4;  structureReason = "accumulation — deteriorating short structure"; }
+    else                       { structureScore = 8;  structureReason = "unclear market structure"; }
+  }
+
+  // ── Factor 2: Trend / EMA alignment (0–20) ───────────────────────────────────
+  let trendScore, trendReason;
+  if (isLong) {
+    if (emaSlope === "bullish" && priceVal > emaSlow)  { trendScore = 20; trendReason = "price above rising EMA — trend aligned"; }
+    else if (emaSlope === "bullish" || priceVal > emaFast) { trendScore = 13; trendReason = "partial trend alignment"; }
+    else if (emaSlope === "flat")                      { trendScore = 8;  trendReason = "EMA flat — no trend confirmation"; }
+    else                                               { trendScore = 3;  trendReason = "price below bearish EMA — trend headwind"; }
+  } else {
+    if (emaSlope === "bearish" && priceVal < emaSlow)  { trendScore = 20; trendReason = "price below falling EMA — trend aligned"; }
+    else if (emaSlope === "bearish" || priceVal < emaFast) { trendScore = 13; trendReason = "partial trend alignment"; }
+    else if (emaSlope === "flat")                      { trendScore = 8;  trendReason = "EMA flat — no trend confirmation"; }
+    else                                               { trendScore = 3;  trendReason = "price above bullish EMA — trend headwind"; }
+  }
+
+  // ── Factor 3: Momentum (0–20) ─────────────────────────────────────────────────
+  const consec = isLong ? consecutiveBullish : consecutiveBearish;
+  let momentumFactor, momentumReason;
+  if (consec >= 3)      { momentumFactor = 20; momentumReason = `${consec} consecutive confirming closes`; }
+  else if (consec === 2) { momentumFactor = 14; momentumReason = "2 confirming closes"; }
+  else if (consec === 1) { momentumFactor = 7;  momentumReason = "1 confirming close — weak momentum"; }
+  else                  { momentumFactor = 1;  momentumReason = "no confirming closes in signal direction"; }
+
+  // ── Factor 4: Confirmation quality (0–15) ────────────────────────────────────
+  let confirmScore, confirmReason;
+  if (consec >= 2)      { confirmScore = 15; confirmReason = "confirmed hold — multiple closes"; }
+  else if (consec === 1) { confirmScore = 8;  confirmReason = "first confirmation close only"; }
+  else                  { confirmScore = 0;  confirmReason = "first touch — no confirmation yet"; }
+
+  // ── Factor 5: Volatility quality (0–10) ──────────────────────────────────────
+  const sessionRange = Math.max(1, sessionHigh - sessionLow);
+  const atrRatio = atr / sessionRange;
+  let volatilityScore, volatilityReason;
+  if (atrRatio >= 0.04 && atrRatio <= 0.28)  { volatilityScore = 10; volatilityReason = "healthy volatility"; }
+  else if (atrRatio > 0.28)                   { volatilityScore = 5;  volatilityReason = "elevated volatility — widen stops"; }
+  else                                         { volatilityScore = 2;  volatilityReason = "compressed range"; }
+
+  // ── Factor 6: Session location (0–10) ────────────────────────────────────────
+  const pctInSession = sessionRange > 0 ? (priceVal - sessionLow) / sessionRange : 0.5;
+  let sessionScore, sessionReason;
+  if (isLong && pctInSession <= 0.3)               { sessionScore = 10; sessionReason = "near session low — strong long location"; }
+  else if (!isLong && pctInSession >= 0.7)          { sessionScore = 10; sessionReason = "near session high — strong short location"; }
+  else if (pctInSession >= 0.38 && pctInSession <= 0.62) { sessionScore = 3;  sessionReason = "mid-range — no session edge"; }
+  else                                              { sessionScore = 6;  sessionReason = "reasonable session location"; }
+
+  // ── Total ─────────────────────────────────────────────────────────────────────
+  const rawScore = structureScore + trendScore + momentumFactor + confirmScore + volatilityScore + sessionScore;
+  // Cap at Aggressive if no confirmation candles
+  const maxScore = consec === 0 ? 46 : 100;
+  const overallScore = Math.max(0, Math.min(maxScore, rawScore));
+
+  let confidence, noTrade = false, noTradeReason = null;
+  if (overallScore >= 72)      confidence = "High Confidence";
+  else if (overallScore >= 50) confidence = "Balanced";
+  else if (overallScore >= 35) confidence = "Aggressive";
+  else {
+    confidence = "No Trade";
+    noTrade = true;
+    noTradeReason = `Low quality setup (${overallScore}/100): ${confirmReason}. ${trendReason}.`;
+  }
+
+  const dirLabel = isLong ? "LONG" : "SHORT";
+  const explanation = noTrade
+    ? `NO TRADE — ${noTradeReason}`
+    : `${dirLabel} — ${structureReason}. ${trendReason}. ${confirmReason}. [${confidence}]`;
+
+  return {
+    confidence,
+    explanation,
+    factors: { confirmScore, momentumFactor, sessionScore, structureScore, trendScore, volatilityScore },
+    noTrade,
+    noTradeReason,
+    overallScore,
   };
 }
 
@@ -8114,7 +8343,7 @@ function safeNumber(...values) {
   return 0;
 }
 
-function getAutoTradePlan({ accountSize, activeBias = "neutral", contracts, dailyPnl, marketSpec, maxContracts, maxDailyLoss, maxRisk, price, resistance, support, tradingViewSignal = null, zoneDetection = {} }) {
+function getAutoTradePlan({ accountSize, activeBias = "neutral", contracts, dailyPnl, marketSpec, marketStructure = null, maxContracts, maxDailyLoss, maxRisk, price, resistance, support, tradingViewSignal = null, zoneDetection = {} }) {
   // 1) If a fresh webhook trade_setup carries entry/stop/targets, use those first.
   const sig = tradingViewSignal && (tradingViewSignal.signal === "trade_setup" || tradingViewSignal.kind === "trade_setup") ? tradingViewSignal : null;
   const sigEntry = Number(sig?.entry);
@@ -8267,20 +8496,51 @@ function getAutoTradePlan({ accountSize, activeBias = "neutral", contracts, dail
   }
   score = Math.max(30, Math.min(96, Math.round(score)));
   const setupLocation = isLong ? "near support" : "near resistance";
-  const coachMessage = reasons.includes("risk too high")
-    ? "Risk too high. Lower contracts."
-    : reasons.includes("wait for retest")
-      ? "Wait for retest."
-      : isLong
-        ? "Potential long setup near support."
-        : "Potential short setup near resistance.";
+
+  // ── Multi-factor signal quality gate ─────────────────────────────────────────
+  // Prefer NO TRADE over a bad trade (Parts 1–8, 12 of quality overhaul)
+  const quality = marketStructure
+    ? scoreSignalQuality({ direction, structure: marketStructure, price: priceValue })
+    : null;
+
+  if (quality?.noTrade) {
+    return {
+      noTrade: true,
+      coachMessage: quality.noTradeReason,
+      message: quality.noTradeReason,
+      reason: quality.explanation,
+      score: Math.max(5, quality.overallScore),
+    };
+  }
+
+  // Aggressive setups (score 35–49) are hidden by default — surface as no-trade with explanation
+  if (quality && quality.confidence === "Aggressive") {
+    return {
+      noTrade: true,
+      coachMessage: `Low confidence setup. ${quality.explanation}`,
+      message: `Low confidence: ${quality.noTradeReason || quality.explanation}`,
+      reason: quality.explanation,
+      score: quality.overallScore,
+    };
+  }
+
+  // Blend zone score with quality score when quality data is available
+  if (quality) score = Math.max(30, Math.min(96, Math.round((score * 0.5) + (quality.overallScore * 0.5))));
+
+  const confidence = quality?.confidence || "Balanced";
+  const qualityExplanation = quality?.explanation
+    || (isLong ? `LONG — ${setupLocation} with defined risk.` : `SHORT — ${setupLocation} with defined risk.`);
+  const coachMessage = qualityExplanation;
 
   return {
+    confidence,
     contracts,
     coachMessage,
     direction,
     entry,
     noTrade: false,
+    qualityExplanation,
+    qualityScore: quality?.overallScore ?? score,
     reason: reasons.length ? reasons.join("; ") : `Clean ${setupLocation} with defined risk.`,
     rewardRisk,
     riskDollars,
@@ -8428,6 +8688,7 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   }
 
   if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message || "No trade. Wait for confirmation.";
+  if (autoTradePlan?.qualityExplanation && !activeTrade?.isActive) return autoTradePlan.qualityExplanation;
 
   const marketCat = getMarketCategory(profile?.mainMarket || "");
   const marketIdleHint = {
