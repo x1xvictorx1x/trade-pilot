@@ -141,9 +141,15 @@ function getCandlePriceBand(symbol, timeframeMinutes, currentPrice) {
   if (sym === "GC") return tightTf ? 80 : 160;
   if (sym.startsWith("BTC")) return tightTf ? 4000 : 8000;
   if (sym.startsWith("ETH")) return tightTf ? 250 : 500;
+  if (sym.startsWith("SOL")) return tightTf ? 15 : 30;
+  if (sym.startsWith("XRP")) return tightTf ? 0.08 : 0.16;
+  // Forex pairs
+  if (sym === "XAUUSD" || sym === "XAGUSD") return tightTf ? 30 : 60;
+  if (sym.includes("JPY") || sym.includes("HUF")) return tightTf ? 1.5 : 3;
+  if (sym.length === 6 && /^[A-Z]{6}$/.test(sym)) return tightTf ? 0.01 : 0.02;
   // Stocks / custom — 5% of price (per spec).
   const px = Number(currentPrice);
-  return Number.isFinite(px) && px > 0 ? Math.max(1, px * 0.05) : Infinity;
+  return Number.isFinite(px) && px > 0 ? Math.max(0.01, px * 0.05) : Infinity;
 }
 
 // Single candle validator. Returns true when OHLC is sane and the bar is
@@ -454,7 +460,14 @@ function getMinZoneDistance(market, timeframeMinutes) {
   if (sym === "GC") return tf >= 15 ? 9 : tf >= 5 ? 5 : tf >= 2 ? 3.5 : 2.5;
   if (sym.startsWith("BTC")) return tf >= 15 ? 280 : tf >= 5 ? 160 : tf >= 2 ? 110 : 75;
   if (sym.startsWith("ETH")) return tf >= 15 ? 18 : tf >= 5 ? 10 : tf >= 2 ? 7 : 5;
+  if (sym.startsWith("SOL")) return tf >= 15 ? 2 : tf >= 5 ? 1.2 : tf >= 2 ? 0.8 : 0.5;
+  if (sym.startsWith("XRP")) return tf >= 15 ? 0.008 : tf >= 5 ? 0.005 : tf >= 2 ? 0.003 : 0.002;
   if (sym === "SPY" || sym === "QQQ") return tf >= 15 ? 1.1 : tf >= 5 ? 0.7 : tf >= 2 ? 0.45 : 0.3;
+  // Forex pairs
+  if (sym === "XAUUSD" || sym === "XAGUSD") return tf >= 15 ? 8 : tf >= 5 ? 5 : tf >= 2 ? 3 : 2;
+  if (sym.includes("JPY") || sym.includes("HUF")) return tf >= 15 ? 0.3 : tf >= 5 ? 0.18 : tf >= 2 ? 0.12 : 0.08;
+  if (sym.length === 6 && /^[A-Z]{6}$/.test(sym)) return tf >= 15 ? 0.0025 : tf >= 5 ? 0.0015 : tf >= 2 ? 0.001 : 0.0006;
+  // Stocks (generic) — ATR-based fallback handled by caller
   return nqDefault;
 }
 
@@ -498,7 +511,9 @@ function detectTradeZones(candleSeries, currentPrice, timeframe, symbol, options
         return Number.isFinite(ts) && ts >= sessionAnchorMs;
       })
     : [];
-  const candles = sessionScoped.length >= 20
+  // Never fall back to cross-session candles when a session anchor is set.
+  // Fewer than 20 session candles will trigger the "Waiting for more" early return below.
+  const candles = sessionAnchorMs !== null
     ? sessionScoped.slice(-200)
     : allCandles.slice(-200);
   const market = String(symbol || "").toUpperCase();
@@ -724,6 +739,7 @@ const defaultProfile = {
   startingBalance: 50000,
   trailingDrawdown: 2500,
   mainMarket: "MNQ",
+  autoSwitchSymbol: true,
   traderExperienceLevel: "intermediate",
   traderStyle: "scalper",
   maxDailyLoss: 500,
@@ -779,8 +795,14 @@ const futuresSymbolMap = {
 function resolveMarketFromSymbol(symbol = "", fallback = "MNQ") {
   const raw = String(symbol || "").trim().toUpperCase();
   if (!raw) {
-    return { market: fallback, symbol: fallback, marketType: marketSpecs[fallback] ? "futures" : "custom", spec: marketSpecs[fallback] || customMarketSpec };
+    const spec = marketSpecs[fallback] || customMarketSpec;
+    return { market: fallback, symbol: fallback, marketType: spec.category || "futures", spec };
   }
+  // Known symbol in our spec table
+  if (marketSpecs[raw]) {
+    return { market: raw, symbol: raw, marketType: marketSpecs[raw].category || "stock", spec: marketSpecs[raw] };
+  }
+  // Futures alias map (e.g. "NQ1!" → "NQ")
   if (futuresSymbolMap[raw]) {
     const code = futuresSymbolMap[raw];
     return { market: code, symbol: raw, marketType: "futures", spec: marketSpecs[code] || customMarketSpec };
@@ -791,7 +813,9 @@ function resolveMarketFromSymbol(symbol = "", fallback = "MNQ") {
       return { market: code, symbol: raw, marketType: "futures", spec: marketSpecs[code] || customMarketSpec };
     }
   }
-  return { market: raw, symbol: raw, marketType: "custom", spec: customMarketSpec };
+  // Dynamic category detection for unlisted symbols
+  const cat = getMarketCategory(raw);
+  return { market: raw, symbol: raw, marketType: cat, spec: customMarketSpec };
 }
 
 function specForMarket(market) {
@@ -800,20 +824,43 @@ function specForMarket(market) {
 }
 
 const marketDefaults = {
-  MNQ: 27289,
-  NQ: 27289,
-  ES: 6400,
-  MES: 6400,
-  YM: 47000,
-  MYM: 47000,
-  RTY: 2300,
-  M2K: 2300,
-  CL: 82,
+  MNQ: 21000,
+  NQ: 21000,
+  ES: 5800,
+  MES: 5800,
+  YM: 43000,
+  MYM: 43000,
+  RTY: 2100,
+  M2K: 2100,
+  CL: 75,
   GC: 2400,
-  BTC: 65000,
-  ETH: 3200,
-  SPY: 640,
-  QQQ: 560,
+  BTC: 100000,
+  ETH: 3500,
+  SPY: 580,
+  QQQ: 480,
+  // Crypto spot pairs
+  BTCUSDT: 100000,
+  ETHUSDT: 3500,
+  SOLUSDT: 180,
+  XRPUSDT: 0.6,
+  // Forex major pairs
+  EURUSD: 1.0850,
+  GBPUSD: 1.2700,
+  USDJPY: 155.00,
+  AUDUSD: 0.6500,
+  USDCAD: 1.3600,
+  USDCHF: 0.9000,
+  NZDUSD: 0.6000,
+  XAUUSD: 2400,
+  // Common stocks
+  AAPL: 210,
+  TSLA: 250,
+  NVDA: 900,
+  MSFT: 420,
+  AMZN: 190,
+  GOOGL: 170,
+  META: 500,
+  AMD: 165,
 };
 
 function normalizeFuturesSymbol(symbol = "") {
@@ -836,21 +883,75 @@ function normalizeFuturesSymbol(symbol = "") {
 
 const markets = Object.keys(marketDefaults);
 const marketSpecs = {
-  MNQ: { displayName: "Micro Nasdaq 100", pointValue: 2, tickSize: 0.25 },
-  NQ: { displayName: "Nasdaq 100", pointValue: 20, tickSize: 0.25 },
-  ES: { displayName: "S&P 500", pointValue: 50, tickSize: 0.25 },
-  MES: { displayName: "Micro S&P 500", pointValue: 5, tickSize: 0.25 },
-  YM: { displayName: "Dow Futures", pointValue: 5, tickSize: 1 },
-  MYM: { displayName: "Micro Dow Futures", pointValue: 0.5, tickSize: 1 },
-  RTY: { displayName: "Russell 2000", pointValue: 50, tickSize: 0.1 },
-  M2K: { displayName: "Micro Russell 2000", pointValue: 5, tickSize: 0.1 },
-  CL: { displayName: "Crude Oil", pointValue: 1000, tickSize: 0.01 },
-  GC: { displayName: "Gold", pointValue: 100, tickSize: 0.1 },
-  BTC: { displayName: "Bitcoin", pointValue: 1, tickSize: 0.01 },
-  ETH: { displayName: "Ethereum", pointValue: 1, tickSize: 0.01 },
-  SPY: { displayName: "SPY ETF", pointValue: 1, tickSize: 0.01 },
-  QQQ: { displayName: "QQQ ETF", pointValue: 1, tickSize: 0.01 },
+  // Futures
+  MNQ: { displayName: "Micro Nasdaq 100", pointValue: 2, tickSize: 0.25, category: "futures" },
+  NQ:  { displayName: "Nasdaq 100",       pointValue: 20, tickSize: 0.25, category: "futures" },
+  ES:  { displayName: "S&P 500",          pointValue: 50, tickSize: 0.25, category: "futures" },
+  MES: { displayName: "Micro S&P 500",    pointValue: 5,  tickSize: 0.25, category: "futures" },
+  YM:  { displayName: "Dow Futures",      pointValue: 5,  tickSize: 1,    category: "futures" },
+  MYM: { displayName: "Micro Dow",        pointValue: 0.5,tickSize: 1,    category: "futures" },
+  RTY: { displayName: "Russell 2000",     pointValue: 50, tickSize: 0.1,  category: "futures" },
+  M2K: { displayName: "Micro Russell",    pointValue: 5,  tickSize: 0.1,  category: "futures" },
+  CL:  { displayName: "Crude Oil",        pointValue: 1000,tickSize: 0.01,category: "futures" },
+  GC:  { displayName: "Gold Futures",     pointValue: 100, tickSize: 0.1, category: "futures" },
+  BTC: { displayName: "Bitcoin (Futures)",pointValue: 1,  tickSize: 0.01, category: "crypto"  },
+  ETH: { displayName: "Ether (Futures)",  pointValue: 1,  tickSize: 0.01, category: "crypto"  },
+  // ETFs / Stocks
+  SPY: { displayName: "SPY ETF",          pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  QQQ: { displayName: "QQQ ETF",          pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  AAPL:{ displayName: "Apple Inc.",       pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  TSLA:{ displayName: "Tesla Inc.",       pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  NVDA:{ displayName: "NVIDIA Corp.",     pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  MSFT:{ displayName: "Microsoft Corp.",  pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  AMZN:{ displayName: "Amazon.com",       pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  GOOGL:{ displayName: "Alphabet Inc.",   pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  META:{ displayName: "Meta Platforms",   pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  AMD: { displayName: "AMD Inc.",         pointValue: 1, tickSize: 0.01,  category: "stock"   },
+  // Crypto spot pairs
+  BTCUSDT: { displayName: "Bitcoin/USDT", pointValue: 1, tickSize: 0.01, category: "crypto"   },
+  ETHUSDT: { displayName: "Ether/USDT",   pointValue: 1, tickSize: 0.01, category: "crypto"   },
+  SOLUSDT: { displayName: "Solana/USDT",  pointValue: 1, tickSize: 0.001,category: "crypto"   },
+  XRPUSDT: { displayName: "XRP/USDT",     pointValue: 1, tickSize: 0.0001,category: "crypto"  },
+  // Forex pairs
+  EURUSD: { displayName: "EUR/USD",       pointValue: 1, tickSize: 0.00001, category: "forex"  },
+  GBPUSD: { displayName: "GBP/USD",       pointValue: 1, tickSize: 0.00001, category: "forex"  },
+  USDJPY: { displayName: "USD/JPY",       pointValue: 1, tickSize: 0.001,   category: "forex"  },
+  AUDUSD: { displayName: "AUD/USD",       pointValue: 1, tickSize: 0.00001, category: "forex"  },
+  USDCAD: { displayName: "USD/CAD",       pointValue: 1, tickSize: 0.00001, category: "forex"  },
+  USDCHF: { displayName: "USD/CHF",       pointValue: 1, tickSize: 0.00001, category: "forex"  },
+  NZDUSD: { displayName: "NZD/USD",       pointValue: 1, tickSize: 0.00001, category: "forex"  },
+  XAUUSD: { displayName: "Gold (Spot)",   pointValue: 1, tickSize: 0.01,    category: "forex"  },
 };
+
+// Market category presets for the market selector UI
+const MARKET_CATEGORIES = {
+  futures: { label: "Futures",  symbols: ["NQ","MNQ","ES","MES","YM","MYM","RTY","M2K","CL","GC"] },
+  stock:   { label: "Stocks",   symbols: ["SPY","QQQ","AAPL","TSLA","NVDA","MSFT","AMZN","GOOGL","META","AMD"] },
+  crypto:  { label: "Crypto",   symbols: ["BTC","ETH","BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT"] },
+  forex:   { label: "Forex",    symbols: ["EURUSD","XAUUSD","GBPUSD","USDJPY","AUDUSD","USDCAD","USDCHF","NZDUSD"] },
+};
+
+function getMarketCategory(symbol) {
+  const sym = String(symbol || "").toUpperCase();
+  if (marketSpecs[sym]) return marketSpecs[sym].category || "stock";
+  if (sym.endsWith("USDT") || sym.endsWith("USDC") || sym.endsWith("BTC") || sym.endsWith("ETH")) return "crypto";
+  if (sym.length === 6 && /^[A-Z]{6}$/.test(sym)) return "forex";
+  if (sym === "XAUUSD" || sym === "XAGUSD" || sym === "XPTUSD") return "forex";
+  return "stock";
+}
+
+function formatPrice(value, symbol) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  const cat = getMarketCategory(symbol);
+  if (cat === "forex") {
+    const sym = String(symbol || "").toUpperCase();
+    if (sym.includes("JPY") || sym.includes("HUF")) return num.toFixed(3);
+    if (sym === "XAUUSD" || sym === "XAGUSD") return num.toFixed(2);
+    return num.toFixed(5);
+  }
+  return num.toFixed(2);
+}
 const dataSources = ["Manual Mode", "TradingView Webhook", "CSV Import", "Demo Broker", "Market Data API"];
 const accountTypeOptions = ["Personal Trading Account", "Funded / Prop Firm Account", "Demo / Practice Account"];
 const fundedProviders = ["None", "Lucid Trading", "Apex", "Topstep", "Take Profit Trader", "MyFundedFutures", "Bulenox", "Earn2Trade", "Other"];
@@ -1445,6 +1546,7 @@ export default function App() {
   const [priceHistory, setPriceHistory] = useState([]);
   const [candleHistory, setCandleHistory] = useState(() => loadCandleHistory());
   const previousMarketRef = useRef(profile.mainMarket);
+  const previousActiveTimeframeRef = useRef("");
   const [activeTimeframe, setActiveTimeframe] = useState("");
   const [tradingViewSignal, setTradingViewSignal] = useState(null);
   const [priceSource, setPriceSource] = useState("manual");
@@ -1549,6 +1651,27 @@ export default function App() {
     });
     setPriceHistory([]);
   }, [profile.mainMarket]);
+
+  // Timeframe switch — drop candle keys for the old timeframe under the current
+  // symbol so they cannot pollute zone calculations on the new timeframe.
+  useEffect(() => {
+    const previous = previousActiveTimeframeRef.current;
+    previousActiveTimeframeRef.current = activeTimeframe;
+    if (!previous || !activeTimeframe || previous === activeTimeframe) return;
+    const activeSym = String(profile.mainMarket || "").trim().toUpperCase();
+    const newKey = candleHistoryKey(activeSym, activeTimeframe);
+    setCandleHistory((current) => {
+      if (!current || typeof current !== "object") return current;
+      const next = {};
+      for (const [key, value] of Object.entries(current)) {
+        const keySym = String(key.split("|")[0] || "").toUpperCase();
+        if (keySym !== activeSym || key === newKey) {
+          if (Array.isArray(value)) next[key] = value;
+        }
+      }
+      return next;
+    });
+  }, [activeTimeframe]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     try {
@@ -2664,7 +2787,7 @@ export default function App() {
       Math.abs(nextPrice - previousMarketDefault) / previousMarketDefault > 0.5 &&
       (!Number.isFinite(newMarketDefault) || Math.abs(nextPrice - newMarketDefault) / newMarketDefault < 0.5);
 
-    if (symbolChanged) {
+    if (symbolChanged && profile.autoSwitchSymbol !== false) {
       updateProfile("mainMarket", nextMarket);
       setSupport(0);
       setResistance(0);
@@ -4720,7 +4843,8 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
           <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
             <div><span style={rowLabel}>Total candles</span><span style={rowValue}>{zoneDiagnostics.totalCandles ?? 0}</span></div>
             <div><span style={rowLabel}>Valid candles</span><span style={rowValue}>{zoneDiagnostics.validCandles ?? 0}</span></div>
-            <div><span style={rowLabel}>Rejected</span><span style={rowValue}>{zoneDiagnostics.rejected ?? 0}{zoneDiagnostics.rejected ? ` (broken: ${zoneDiagnostics.rejectedReasons?.broken_ohlc ?? 0}, out-of-band: ${zoneDiagnostics.rejectedReasons?.out_of_band ?? 0})` : ""}</span></div>
+            <div><span style={rowLabel}>Session candles</span><span style={{ ...rowValue, color: (zoneDiagnostics.sessionCandleCount ?? 0) >= 20 ? "#5eead4" : "#fde68a" }}>{zoneDiagnostics.sessionCandleCount ?? 0}</span></div>
+            <div><span style={rowLabel}>Rejected</span><span style={rowValue}>{zoneDiagnostics.rejected ?? 0}{zoneDiagnostics.rejected ? ` (broken: ${zoneDiagnostics.rejectedReasons?.broken_ohlc ?? 0}, band: ${zoneDiagnostics.rejectedReasons?.out_of_band ?? 0})` : ""}</span></div>
             <div><span style={rowLabel}>Symbol / TF</span><span style={rowValue}>{zoneDiagnostics.symbol || "—"} · {zoneDiagnostics.timeframe || "—"}</span></div>
             <div><span style={rowLabel}>Current price</span><span style={rowValue}>{Number.isFinite(zoneDiagnostics.currentPrice) ? Number(zoneDiagnostics.currentPrice).toFixed(2) : "—"}</span></div>
             <div><span style={rowLabel}>Session start (NY)</span><span style={rowValue}>{zoneDiagnostics.sessionStartLabel || "—"}</span></div>
@@ -4731,7 +4855,11 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
             <div><span style={rowLabel}>Zone source</span><span style={rowValue}>{zoneDiagnostics.zoneSource || "—"}</span></div>
             <div><span style={rowLabel}>Zones valid</span><span style={{ ...rowValue, color: zoneDiagnostics.zonesValid ? "#5eead4" : "#fca5a5" }}>{zoneDiagnostics.zonesValid ? "Yes" : `No${zoneDiagnostics.zoneReason ? ` — ${zoneDiagnostics.zoneReason}` : ""}`}</span></div>
           </div>
-          {zoneDiagnostics.totalCandles > 0 && zoneDiagnostics.validCandles < 20 ? (
+          {zoneDiagnostics.sessionCandleCount > 0 && zoneDiagnostics.sessionCandleCount < 20 ? (
+            <p style={{ background: "rgba(56,189,248,.08)", border: "1px solid rgba(56,189,248,.3)", borderRadius: "8px", color: "#7dd3fc", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
+              Need {20 - zoneDiagnostics.sessionCandleCount} more session candles for reliable zones.
+            </p>
+          ) : zoneDiagnostics.totalCandles > 0 && zoneDiagnostics.validCandles < 20 ? (
             <p style={{ background: "rgba(56,189,248,.08)", border: "1px solid rgba(56,189,248,.3)", borderRadius: "8px", color: "#7dd3fc", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
               Need more candles for reliable zones.
             </p>
@@ -4743,6 +4871,11 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
           ) : null}
           {zoneDiagnostics.totalCandles > 0 && zoneDiagnostics.rejected > 0 && zoneDiagnostics.validCandles === 0 ? (
             <p style={{ background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.3)", borderRadius: "8px", color: "#fde68a", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
+              Collecting fresh TradingView candles…
+            </p>
+          ) : null}
+          {zoneDiagnostics.sessionCandleCount === 0 && zoneDiagnostics.validCandles === 0 && zoneDiagnostics.totalCandles === 0 ? (
+            <p style={{ background: "rgba(56,189,248,.08)", border: "1px solid rgba(56,189,248,.3)", borderRadius: "8px", color: "#7dd3fc", fontSize: "12px", fontWeight: 700, margin: "10px 0 0", padding: "8px 10px" }}>
               Collecting fresh TradingView candles…
             </p>
           ) : null}
@@ -5172,23 +5305,16 @@ function Dashboard({
     }),
     [liveCandleSeries, price, profile.mainMarket, chartTimeframeMinutes, sessionAnchorMs],
   );
-  // Always feed the level engines from real candles (filtered) when we have
-  // them. Falling back to chartDataToCandles(priceHistory) was the source of
-  // the unrealistic open-range / swing-high values reported by users.
-  const candles = useMemo(() => {
-    if (liveCandleSeries.length) return liveCandleSeries;
-    const chartData = priceHistory.length >= 2
-      ? priceHistory
-      : buildChartData({ price, entry, stop: engine.smartStop, support, resistance, trim1: engine.trim1, trim2: engine.trim2, runner: engine.runner });
-    return chartDataToCandles(chartData);
-  }, [liveCandleSeries, priceHistory, engine.runner, engine.smartStop, engine.trim1, engine.trim2, entry, price, resistance, support]);
+  // Zone engines always receive validated, session-scoped candles only.
+  // Synthetic fallbacks (chartDataToCandles, buildChartData) are no longer
+  // passed to zone detection — they were the source of wildly wrong levels.
   const zoneDetection = useMemo(
-    () => detectKeyLevelsFromCandles(candles, { entry, price, resistance, support, sessionAnchorMs }),
-    [candles, entry, price, resistance, support, sessionAnchorMs],
+    () => detectKeyLevelsFromCandles(liveCandleSeries, { entry, price, resistance, support, sessionAnchorMs }),
+    [liveCandleSeries, entry, price, resistance, support, sessionAnchorMs],
   );
   const marketStructure = useMemo(
-    () => analyzeMarketStructure(candles, { price, resistance, support, sessionAnchorMs }),
-    [candles, price, resistance, support, sessionAnchorMs],
+    () => analyzeMarketStructure(liveCandleSeries, { price, resistance, support, sessionAnchorMs }),
+    [liveCandleSeries, price, resistance, support, sessionAnchorMs],
   );
   const enrichedZoneDetection = useMemo(() => {
     const base = {
@@ -5292,28 +5418,37 @@ function Dashboard({
 
   // Telemetry surfaced in the Signal Debug panel so users can see exactly why
   // a zone is or isn't trustworthy.
-  const zoneDiagnostics = useMemo(() => ({
-    totalCandles: rawLiveCandleSeries.length,
-    validCandles: liveCandleSeries.length,
-    rejected: candleFilterResult.rejected,
-    rejectedReasons: candleFilterResult.reasons,
-    symbol: profile.mainMarket,
-    timeframe: activeTimeframe || chartTimeframe,
-    currentPrice: price,
-    sessionStartMs: sessionAnchorMs,
-    sessionStartLabel: sessionAnchorMs ? new Date(sessionAnchorMs).toLocaleString() : null,
-    openRangeAvailable: zoneDetection.openRangeAvailable !== false,
-    openRangeCandles: Number(zoneDetection.openRangeCandles ?? 0),
-    openRangeHigh: zoneDetection.openRangeHigh ?? null,
-    openRangeLow: zoneDetection.openRangeLow ?? null,
-    sessionHigh: enrichedZoneDetection.sessionHigh ?? null,
-    sessionLow: enrichedZoneDetection.sessionLow ?? null,
-    swingHighs: Array.isArray(marketStructure.swingHighs) ? marketStructure.swingHighs.length : 0,
-    swingLows: Array.isArray(marketStructure.swingLows) ? marketStructure.swingLows.length : 0,
-    zoneSource: enrichedZoneDetection.source || zoneDetection.source || "unknown",
-    zonesValid: enrichedZoneDetection.zonesValid !== false,
-    zoneReason: enrichedZoneDetection.zoneReason || "",
-  }), [rawLiveCandleSeries.length, liveCandleSeries.length, candleFilterResult, profile.mainMarket, activeTimeframe, chartTimeframe, price, sessionAnchorMs, zoneDetection, enrichedZoneDetection, marketStructure]);
+  const zoneDiagnostics = useMemo(() => {
+    const sessionCandleCount = Number.isFinite(sessionAnchorMs)
+      ? liveCandleSeries.filter((c) => {
+          const ts = c?.timestamp ? new Date(c.timestamp).getTime() : NaN;
+          return Number.isFinite(ts) && ts >= sessionAnchorMs;
+        }).length
+      : 0;
+    return {
+      totalCandles: rawLiveCandleSeries.length,
+      validCandles: liveCandleSeries.length,
+      sessionCandleCount,
+      rejected: candleFilterResult.rejected,
+      rejectedReasons: candleFilterResult.reasons,
+      symbol: profile.mainMarket,
+      timeframe: activeTimeframe || chartTimeframe,
+      currentPrice: price,
+      sessionStartMs: sessionAnchorMs,
+      sessionStartLabel: sessionAnchorMs ? new Date(sessionAnchorMs).toLocaleString() : null,
+      openRangeAvailable: zoneDetection.openRangeAvailable !== false,
+      openRangeCandles: Number(zoneDetection.openRangeCandles ?? 0),
+      openRangeHigh: zoneDetection.openRangeHigh ?? null,
+      openRangeLow: zoneDetection.openRangeLow ?? null,
+      sessionHigh: enrichedZoneDetection.sessionHigh ?? null,
+      sessionLow: enrichedZoneDetection.sessionLow ?? null,
+      swingHighs: Array.isArray(marketStructure.swingHighs) ? marketStructure.swingHighs.length : 0,
+      swingLows: Array.isArray(marketStructure.swingLows) ? marketStructure.swingLows.length : 0,
+      zoneSource: enrichedZoneDetection.source || zoneDetection.source || "unknown",
+      zonesValid: enrichedZoneDetection.zonesValid !== false,
+      zoneReason: enrichedZoneDetection.zoneReason || "",
+    };
+  }, [rawLiveCandleSeries.length, liveCandleSeries, candleFilterResult, profile.mainMarket, activeTimeframe, chartTimeframe, price, sessionAnchorMs, zoneDetection, enrichedZoneDetection, marketStructure]);
 
   const marketSpec = marketSpecs[profile.mainMarket] ?? customMarketSpec;
   const activeBias = normalizeActiveBias(levelBias);
@@ -5739,7 +5874,7 @@ function Dashboard({
 
   const cardOrder = normalizeCardOrder(effectiveLayout.cardOrder);
   const dashboardCards = {
-    alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} onAddLevels={handleOpenLevelsModal} onClearZones={() => { setSupport(0); setResistance(0); notify?.("Auto zones cleared.", "success"); }} /> : null,
+    alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} symbol={profile.mainMarket} onAddLevels={handleOpenLevelsModal} onClearZones={() => { setSupport(0); setResistance(0); notify?.("Auto zones cleared.", "success"); }} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
       candleSeries={liveCandleSeries}
       chartPrefs={chartPrefs}
@@ -5805,7 +5940,7 @@ function Dashboard({
     performanceStats: effectiveLayout.performanceStats ? <PerformanceStatsCard discipline={discipline} journalEntries={safeJournalEntries} tradeGrade={displayTradeGrade} /> : null,
     propFirmRules: effectiveLayout.propFirmRules ? <PropFirmRulesCard fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} /> : null,
     risk: effectiveLayout.risk ? <RiskGuardCard discipline={discipline} fundedMetrics={fundedMetrics} fundedWarnings={fundedWarnings} profile={profile} riskStatus={riskStatus} /> : null,
-    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard activeBias={activeBias} activeTradePlan={activeTradePlan} autoTradePlan={autoTradePlan} hasPlan={tradeState.hasPlan} missedEntry={missedEntry} onAutoGenerate={enrichedZoneDetection?.zonesValid ? handleAutoGeneratePlan : null} onAddLevels={handleOpenLevelsModal} onOpenManualBuilder={enrichedZoneDetection?.zonesValid ? handleOpenManualBuilder : null} planValidation={activePlanValidation} profile={profile} rewardRisk={rewardRisk} setupName={setupName} tradeGrade={displayTradeGrade} tradeState={tradeState} visualPlan={visualPlan} zonesValid={enrichedZoneDetection?.zonesValid !== false} /> : null,
+    tradePlan: effectiveLayout.tradePlan ? <TradePlanCard activeBias={activeBias} activeTradePlan={activeTradePlan} autoTradePlan={autoTradePlan} hasPlan={tradeState.hasPlan} missedEntry={missedEntry} onAutoGenerate={enrichedZoneDetection?.zonesValid ? handleAutoGeneratePlan : null} onAddLevels={handleOpenLevelsModal} onOpenManualBuilder={enrichedZoneDetection?.zonesValid ? handleOpenManualBuilder : null} planValidation={activePlanValidation} profile={profile} rewardRisk={rewardRisk} setupName={setupName} symbol={profile.mainMarket} tradeGrade={displayTradeGrade} tradeState={tradeState} visualPlan={visualPlan} zonesValid={enrichedZoneDetection?.zonesValid !== false} /> : null,
     watchlist: effectiveLayout.watchlist ? <WatchlistCard price={price} profile={profile} watchlist={safeWatchlist} /> : null,
   };
 
@@ -5997,15 +6132,24 @@ function Dashboard({
         tradingViewSignal={tradingViewSignal}
       />
 
-      <section style={styles.marketTopBar}>
-        <SelectField label="Market" value={profile.mainMarket} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
-        <div style={styles.marketTopMetric}>
-          <span>{marketSpec.displayName}</span>
-          <strong>${marketSpec.pointValue}/point</strong>
+      <section style={{ ...styles.marketTopBar, alignItems: "center" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+          <span style={{ color: "#64748b", fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Active Market</span>
+          <MarketSelector value={profile.mainMarket} onChange={(value) => updateProfile("mainMarket", value)} />
         </div>
         <div style={styles.marketTopMetric}>
-          <span>Tick Size</span>
+          <span>{marketSpec.displayName}</span>
+          <strong>{marketSpec.category === "forex" ? `pip value: ${marketSpec.tickSize}` : `$${marketSpec.pointValue}/point`}</strong>
+        </div>
+        <div style={styles.marketTopMetric}>
+          <span>Tick / Pip Size</span>
           <strong>{marketSpec.tickSize}</strong>
+        </div>
+        <div style={styles.marketTopMetric}>
+          <span>Market Type</span>
+          <strong style={{ textTransform: "capitalize", color: getMarketCategory(profile.mainMarket) === "futures" ? "#3b82f6" : getMarketCategory(profile.mainMarket) === "crypto" ? "#f59e0b" : getMarketCategory(profile.mainMarket) === "forex" ? "#8b5cf6" : "#10b981" }}>
+            {getMarketCategory(profile.mainMarket)}
+          </strong>
         </div>
       </section>
 
@@ -6289,7 +6433,7 @@ function Dashboard({
 }
 
 
-function AutoZonePanel({ zoneDetection, onClearZones, onAddLevels }) {
+function AutoZonePanel({ zoneDetection, symbol, onClearZones, onAddLevels }) {
   const repeatedRejectionHighs = Array.isArray(zoneDetection?.repeatedRejectionHighs)
     ? zoneDetection.repeatedRejectionHighs
     : [];
@@ -6330,11 +6474,11 @@ function AutoZonePanel({ zoneDetection, onClearZones, onAddLevels }) {
         <Metric label="Support Zone" value={zonesValid ? (zoneDetection.supportZone || "Manual") : "—"} tone="good" />
         <Metric label="Resistance Zone" value={zonesValid ? (zoneDetection.resistanceZone || "Manual") : "—"} tone="warn" />
         <Metric label="Middle Zone" value={zonesValid ? (zoneDetection.middleZone || "Wait") : "—"} />
-        <Metric label="Session High" value={formatOptionalPrice(zoneDetection.sessionHigh)} />
-        <Metric label="Session Low" value={formatOptionalPrice(zoneDetection.sessionLow)} />
+        <Metric label="Session High" value={formatOptionalPrice(zoneDetection.sessionHigh, symbol)} />
+        <Metric label="Session Low" value={formatOptionalPrice(zoneDetection.sessionLow, symbol)} />
         <Metric label="Open Range" value={zoneDetection.openRange || "Pending"} />
-        <Metric label="Swing High" value={formatOptionalPrice(zoneDetection.recentHigh)} tone="warn" />
-        <Metric label="Swing Low" value={formatOptionalPrice(zoneDetection.pullbackSupport)} tone="good" />
+        <Metric label="Swing High" value={formatOptionalPrice(zoneDetection.recentHigh, symbol)} tone="warn" />
+        <Metric label="Swing Low" value={formatOptionalPrice(zoneDetection.pullbackSupport, symbol)} tone="good" />
       </div>
       <div style={{ ...styles.coachPrompt, marginTop: "12px" }}>
         Rejection zones: highs {repeatedRejectionHighs.length ? repeatedRejectionHighs.join(", ") : "none yet"} · lows {repeatedRejectionLows.length ? repeatedRejectionLows.join(", ") : "none yet"}
@@ -6370,7 +6514,11 @@ function AutoZonePanel({ zoneDetection, onClearZones, onAddLevels }) {
   );
 }
 
-function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, missedEntry, onAutoGenerate, onAddLevels, onOpenManualBuilder, planValidation, profile, rewardRisk, setupName, tradeGrade, tradeState, visualPlan, zonesValid = true }) {
+function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, missedEntry, onAutoGenerate, onAddLevels, onOpenManualBuilder, planValidation, profile, rewardRisk, setupName, symbol, tradeGrade, tradeState, visualPlan, zonesValid = true }) {
+  const marketCat = getMarketCategory(symbol || profile?.mainMarket || "");
+  const unitLabel = marketCat === "forex" ? "pips" : marketCat === "crypto" ? "$" : marketCat === "stock" ? "shares" : "pts";
+  const unitColor = { futures: "#3b82f6", forex: "#a855f7", crypto: "#f59e0b", stock: "#10b981" }[marketCat] || "#64748b";
+  const fp = (v) => formatPrice(v, symbol || profile?.mainMarket || "");
   const planSource = activeTradePlan?.source || "Auto Zone";
   // Status label is derived from the unified tradeState so the Plan card cannot
   // disagree with the Manage / Active Trade cards.
@@ -6419,7 +6567,10 @@ function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, mi
   return (
     <section style={styles.tradePlanHero}>
       <p style={styles.cardLabel}>Trade Plan</p>
-      <h2 style={styles.tradePlanTitle}>{hasPlan ? `${setupName} Plan` : "No valid trade yet"}</h2>
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+        <h2 style={{ ...styles.tradePlanTitle, margin: 0 }}>{hasPlan ? `${setupName} Plan` : "No valid trade yet"}</h2>
+        <span style={{ background: unitColor + "22", border: `1px solid ${unitColor}55`, borderRadius: "6px", color: unitColor, fontSize: "11px", fontWeight: 700, padding: "2px 8px", textTransform: "uppercase" }}>{unitLabel}</span>
+      </div>
       <div style={{ ...styles.metricGrid, marginBottom: "14px" }}>
         <Metric label="Bias" value={normalizeActiveBias(activeBias)} tone={normalizeActiveBias(activeBias) === "neutral" ? "warn" : "good"} />
         <Metric label="Direction" value={activeTradePlan?.direction === "none" ? "None" : activeTradePlan?.direction || "None"} />
@@ -6430,11 +6581,11 @@ function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, mi
       {hasPlan ? (
         <>
           <div style={styles.planMetricGrid}>
-            <Metric label="Entry" tooltip={tooltipText.entry} value={visualPlan.entry.toFixed(2)} />
-            <Metric label="Stop" tooltip={tooltipText.stopLoss} value={visualPlan.stop.toFixed(2)} tone="bad" />
-            <Metric label="TP1" tooltip={tooltipText.trim1} value={visualPlan.trim1.toFixed(2)} tone="good" />
-            <Metric label="TP2" tooltip={tooltipText.trim2} value={visualPlan.trim2.toFixed(2)} tone="good" />
-            <Metric label="Runner" tooltip={tooltipText.runner} value={(visualPlan.runner ?? visualPlan.target).toFixed(2)} tone="good" />
+            <Metric label="Entry" tooltip={tooltipText.entry} value={fp(visualPlan.entry)} />
+            <Metric label="Stop" tooltip={tooltipText.stopLoss} value={fp(visualPlan.stop)} tone="bad" />
+            <Metric label="TP1" tooltip={tooltipText.trim1} value={fp(visualPlan.trim1)} tone="good" />
+            <Metric label="TP2" tooltip={tooltipText.trim2} value={fp(visualPlan.trim2)} tone="good" />
+            <Metric label="Runner" tooltip={tooltipText.runner} value={fp(visualPlan.runner ?? visualPlan.target)} tone="good" />
             <Metric label="Risk" value={`$${rewardRisk.risk.toFixed(2)}`} tone={rewardRisk.risk > profile.maxRiskPerTrade ? "bad" : "neutral"} />
             <Metric label="Reward/Risk" value={`${rewardRisk.ratio.toFixed(1)}R`} />
             <Metric label="Trade Grade" tooltip={tooltipText.tradeScore} value={`${tradeGrade.letter} ${tradeGrade.score}/100`} />
@@ -6443,7 +6594,7 @@ function TradePlanCard({ activeBias, activeTradePlan, autoTradePlan, hasPlan, mi
           {tradeGrade.entryQuality?.message ? <div style={tradeGrade.entryQuality.label === "Ideal" ? styles.coachPrompt : styles.priceWarning}>{tradeGrade.entryQuality.message}</div> : null}
           {!autoTradePlan.noTrade ? (
             <div style={{ ...styles.coachPrompt, marginTop: "14px" }}>
-              Auto plan: {autoTradePlan.direction.toUpperCase()} entry {autoTradePlan.entry.toFixed(2)}, stop {autoTradePlan.stop.toFixed(2)}, trims {autoTradePlan.trim1.toFixed(2)} / {autoTradePlan.trim2.toFixed(2)}, runner {autoTradePlan.runner.toFixed(2)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100. {autoTradePlan.reason}
+              Auto plan: {autoTradePlan.direction.toUpperCase()} entry {fp(autoTradePlan.entry)}, stop {fp(autoTradePlan.stop)}, trims {fp(autoTradePlan.trim1)} / {fp(autoTradePlan.trim2)}, runner {fp(autoTradePlan.runner)}. Risk ${autoTradePlan.riskDollars.toFixed(2)}. R/R {autoTradePlan.rewardRisk.toFixed(1)}. Score {autoTradePlan.score}/100. {autoTradePlan.reason}
             </div>
           ) : null}
           {rewardRisk.invalid || !planValidation?.valid ? <div style={styles.priceWarning}>{planValidation?.reason || rewardRisk.reason || "Invalid plan: targets are on the wrong side of entry."}</div> : null}
@@ -6809,16 +6960,35 @@ function detectKeyLevelsFromCandles(candles = [], fallback = {}) {
     };
   }
 
-  // Constrain analysis to current session candles. Falls back to the most
-  // recent 100 candles when timestamps aren't available so legacy mock data
-  // doesn't poison the levels.
+  // Constrain analysis to current session candles. When no anchor is available,
+  // fall back to the most recent 100 candles.
   const sessionAnchorMs = Number.isFinite(Number(fallback.sessionAnchorMs))
     ? Number(fallback.sessionAnchorMs)
     : null;
   const sessionCandles = sessionAnchorMs !== null
     ? clean.filter((c) => Number.isFinite(c.ts) && c.ts >= sessionAnchorMs)
     : clean.slice(-100);
-  const recent = sessionCandles.length >= 6 ? sessionCandles : clean.slice(-100);
+  // Never cross session boundaries: when an anchor is set, only use session candles.
+  const recent = sessionAnchorMs !== null
+    ? sessionCandles
+    : (sessionCandles.length >= 6 ? sessionCandles : clean.slice(-100));
+
+  if (!recent.length) {
+    return {
+      message: sessionAnchorMs !== null
+        ? "Collecting fresh TradingView candles…"
+        : "Add support/resistance manually or connect TradingView alerts.",
+      openRange: "",
+      openRangeAvailable: false,
+      openRangeCandles: 0,
+      openRangeHigh: null,
+      openRangeLow: null,
+      sessionCandleCount: 0,
+      sessionHigh: null,
+      sessionLow: null,
+      source: "insufficient",
+    };
+  }
 
   const highs = recent.map((candle) => candle.high);
   const lows = recent.map((candle) => candle.low);
@@ -6940,15 +7110,15 @@ function analyzeMarketStructure(candles = [], fallback = {}) {
     }))
     .filter((c) => [c.close, c.high, c.low, c.open].every(Number.isFinite));
 
-  // Restrict to the active session when an anchor is supplied. Otherwise cap
-  // to the last 100 valid candles — never the entire saved history.
+  // Restrict to the active session when an anchor is supplied. Never fall back to
+  // cross-session candles — that's what was producing multi-day highs/lows.
   const sessionAnchorMs = Number.isFinite(Number(fallback.sessionAnchorMs))
     ? Number(fallback.sessionAnchorMs)
     : null;
   const sessionScoped = sessionAnchorMs !== null
     ? clean.filter((c) => Number.isFinite(c.ts) && c.ts >= sessionAnchorMs)
     : [];
-  const recent = sessionScoped.length >= 6 ? sessionScoped : clean.slice(-100);
+  const recent = sessionAnchorMs !== null ? sessionScoped : clean.slice(-100);
 
   const currentPrice = Number(fallback.price ?? recent.at(-1)?.close ?? 0);
   if (!recent.length) {
@@ -7496,8 +7666,10 @@ function buildTradeBreakdownText({ activeTrade, disciplineGrade, market, rewardR
   ].join("\n");
 }
 
-function formatOptionalPrice(value) {
-  return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "Pending";
+function formatOptionalPrice(value, symbol) {
+  if (!Number.isFinite(Number(value))) return "Pending";
+  if (symbol) return formatPrice(value, symbol);
+  return Number(value).toFixed(2);
 }
 
 function fmt(value, digits = 2) {
@@ -8082,11 +8254,20 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   }
 
   if (autoTradePlan?.noTrade) return autoTradePlan.coachMessage || autoTradePlan.message || "No trade. Wait for confirmation.";
+
+  const marketCat = getMarketCategory(profile?.mainMarket || "");
+  const marketIdleHint = {
+    futures: "Respect session highs/lows and wait for a clean break or rejection at structure.",
+    stock:   "Watch open volatility and wait for a confirmed range or breakout with volume.",
+    crypto:  "Crypto liquidity is dynamic — wait for a clean zone test or volume confirmation.",
+    forex:   "Wait for London or NY session momentum before committing to a direction.",
+  }[marketCat] || "Waiting for valid setup. Price is between levels — no edge here yet.";
+
   if (normalizeActiveBias(activeBias) === "neutral" || activeTradePlan?.direction === "none") {
     if (!Number.isFinite(Number(support)) || !Number.isFinite(Number(resistance))) {
       return "Price connected. Add support and resistance levels to generate a plan.";
     }
-    return "Waiting for valid setup. Price is between levels — no edge here yet.";
+    return marketIdleHint;
   }
   if (!visualPlan?.entry || !visualPlan?.stop) return "Plan outdated. Regenerate from current market data.";
 
@@ -9351,7 +9532,7 @@ function ProfileFields({ profile, updateProfile }) {
         <Field label="Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
         <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
         <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
-        <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
+        <SelectField label="Main Market" value={profile.mainMarket} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
         <SelectField label="Account Type" value={accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
         <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
         <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
@@ -9482,11 +9663,27 @@ function SettingsPage({ applyAlert, debugMode, notificationPrefs, profile, setDe
             <Field label="Name" value={profile.traderName} onChange={(value) => updateProfile("traderName", value)} />
             <SelectField label="Experience Level" value={profile.traderExperienceLevel || "intermediate"} options={["beginner", "intermediate", "advanced"]} onChange={(value) => updateProfile("traderExperienceLevel", value)} />
             <SelectField label="Trader Style" value={profile.traderStyle} options={["scalper", "runner", "both"]} onChange={(value) => updateProfile("traderStyle", value)} />
-            <SelectField label="Main Market" value={profile.mainMarket} options={["MNQ", "NQ", "ES"]} onChange={(value) => updateProfile("mainMarket", value)} />
+            <SelectField label="Main Market" value={profile.mainMarket} options={markets} onChange={(value) => updateProfile("mainMarket", value)} />
             <SelectField label="Account Type" value={accountType} options={accountTypeOptions} onChange={(value) => updateProfile("accountType", value)} />
             <SelectField label="Platform" value={profile.fundedPlatform} options={fundedPlatforms} onChange={(value) => updateProfile("fundedPlatform", value)} />
             <Field label="Account Size" type="number" value={profile.accountSize} onChange={(value) => updateProfile("accountSize", value)} />
             <Field label="Starting Balance" type="number" value={profile.startingBalance} onChange={(value) => updateProfile("startingBalance", value)} />
+          </div>
+        ) : null}
+        {settingsTab === "General" ? (
+          <div style={styles.subPanel}>
+            <p style={styles.cardLabel}>TradingView Integration</p>
+            <label style={styles.switchRow}>
+              <input
+                type="checkbox"
+                checked={profile.autoSwitchSymbol !== false}
+                onChange={(event) => updateProfile("autoSwitchSymbol", event.target.checked)}
+              />
+              Auto-switch chart to latest TradingView symbol
+            </label>
+            <p style={{ ...styles.muted, fontSize: "12px", margin: "2px 0 0 24px" }}>
+              When enabled, the active market updates automatically when TradingView sends a signal for a different symbol.
+            </p>
           </div>
         ) : null}
         {settingsTab === "Advanced" ? (
@@ -9869,6 +10066,157 @@ function SelectField({ label, value, onChange, options }) {
         ))}
       </select>
     </label>
+  );
+}
+
+// Searchable market selector with category tabs and custom entry.
+function MarketSelector({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [tab, setTab] = useState("all");
+  const [custom, setCustom] = useState("");
+  const dropRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e) => { if (dropRef.current && !dropRef.current.contains(e.target)) { setOpen(false); setSearch(""); } };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [open]);
+
+  const catColors = { futures: "#3b82f6", stock: "#10b981", crypto: "#f59e0b", forex: "#8b5cf6" };
+  const cat = getMarketCategory(value);
+  const catColor = catColors[cat] || "#64748b";
+
+  const allSymbols = [...new Set([
+    ...Object.keys(marketDefaults),
+    ...Object.values(MARKET_CATEGORIES).flatMap((c) => c.symbols),
+  ])];
+
+  const inTab = (sym) => {
+    if (tab === "all") return true;
+    return getMarketCategory(sym) === tab;
+  };
+  const filtered = allSymbols.filter((s) => inTab(s) && (!search || s.toLowerCase().includes(search.toLowerCase())));
+
+  const select = (sym) => { onChange(sym.toUpperCase()); setOpen(false); setSearch(""); setCustom(""); };
+
+  const addCustom = () => { const s = custom.trim().toUpperCase(); if (s) select(s); };
+
+  const tabList = [["all", "All"], ["futures", "Futures"], ["stock", "Stocks"], ["crypto", "Crypto"], ["forex", "Forex"]];
+
+  return (
+    <div ref={dropRef} style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          alignItems: "center", background: "#09090b", border: `1px solid ${catColor}55`,
+          borderRadius: "10px", color: "#f8fafc", cursor: "pointer", display: "flex",
+          fontSize: "15px", fontWeight: 800, gap: "8px", padding: "7px 14px",
+        }}
+      >
+        <span style={{ background: `${catColor}20`, borderRadius: "4px", color: catColor, fontSize: "9px", fontWeight: 900, letterSpacing: "0.08em", padding: "2px 5px", textTransform: "uppercase" }}>{cat}</span>
+        {value}
+        <span style={{ color: "#64748b", fontSize: "10px" }}>{open ? "▴" : "▾"}</span>
+      </button>
+
+      {open && (
+        <div style={{
+          background: "#0a0f1e", border: "1px solid #1e293b", borderRadius: "14px",
+          boxShadow: "0 24px 64px rgba(0,0,0,.7)", left: 0, minWidth: "280px", maxWidth: "320px",
+          padding: "12px", position: "absolute", top: "calc(100% + 6px)", zIndex: 2000,
+        }}>
+          <input
+            autoFocus
+            placeholder="Search market…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { if (filtered.length === 1) select(filtered[0]); else if (search) select(search); }
+              if (e.key === "Escape") { setOpen(false); setSearch(""); }
+            }}
+            style={{
+              background: "#1e293b", border: "1px solid #334155", borderRadius: "7px",
+              color: "#f8fafc", fontSize: "13px", outline: "none", padding: "8px 11px", width: "100%",
+              boxSizing: "border-box",
+            }}
+          />
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", margin: "8px 0" }}>
+            {tabList.map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                style={{
+                  background: tab === key ? "#1e3a8a" : "#1e293b",
+                  border: "none", borderRadius: "5px",
+                  color: tab === key ? "#93c5fd" : "#64748b",
+                  cursor: "pointer", fontSize: "11px", fontWeight: 700, padding: "3px 8px",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "5px", maxHeight: "190px", overflowY: "auto" }}>
+            {filtered.map((sym) => {
+              const isCur = sym === value;
+              const scat = getMarketCategory(sym);
+              const scol = catColors[scat] || "#64748b";
+              return (
+                <button
+                  key={sym}
+                  onClick={() => select(sym)}
+                  style={{
+                    background: isCur ? "#1e3a8a" : "#111827",
+                    border: `1px solid ${isCur ? "#3b82f6" : scol + "30"}`,
+                    borderRadius: "7px", color: isCur ? "#93c5fd" : "#e2e8f0",
+                    cursor: "pointer", fontSize: "12px", fontWeight: 700, padding: "4px 10px",
+                  }}
+                >
+                  {sym}
+                </button>
+              );
+            })}
+            {!filtered.length && search && (
+              <button
+                onClick={() => select(search)}
+                style={{
+                  background: "#111827", border: "1px solid #334155", borderRadius: "7px",
+                  color: "#94a3b8", cursor: "pointer", fontSize: "12px", padding: "4px 10px", width: "100%",
+                }}
+              >
+                Use &quot;{search.toUpperCase()}&quot;
+              </button>
+            )}
+          </div>
+
+          <div style={{ borderTop: "1px solid #1e293b", display: "flex", gap: "6px", marginTop: "10px", paddingTop: "10px" }}>
+            <input
+              placeholder="Custom symbol (e.g. AAPL)…"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addCustom()}
+              style={{
+                background: "#1e293b", border: "1px solid #334155", borderRadius: "6px",
+                boxSizing: "border-box", color: "#f8fafc", flex: 1, fontSize: "12px",
+                outline: "none", padding: "6px 9px",
+              }}
+            />
+            <button
+              onClick={addCustom}
+              style={{
+                background: "#1e40af", border: "none", borderRadius: "6px", color: "#93c5fd",
+                cursor: "pointer", fontSize: "12px", fontWeight: 700, padding: "6px 12px",
+              }}
+            >
+              Add
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
