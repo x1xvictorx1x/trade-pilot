@@ -8847,6 +8847,18 @@ function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPric
       {!zonesValid && haveEnoughCandles ? (
         <p style={styles.chartZoneNote}>Analyzing market structure…</p>
       ) : null}
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px", flexWrap: "wrap" }}>
+        <span style={{ color: candles.length >= 3 ? "#22c55e" : "#64748b", fontSize: "11px", fontWeight: 700, letterSpacing: ".04em" }}>
+          {candles.length} candle{candles.length !== 1 ? "s" : ""}
+        </span>
+        {candles.length > 0 && (
+          <span style={{ color: "#475569", fontSize: "11px" }}>
+            {new Date(candles[0].timestamp ?? candles[0].time ?? 0).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            {" → "}
+            {new Date((candles.at(-1).timestamp ?? candles.at(-1).time ?? 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          </span>
+        )}
+      </div>
       <div className="tradepilot-chart-wrap" style={{ ...styles.chartWrap, height: `${chartHeight}px` }}>
         <TradingChart
           autoFit={chartPrefs?.autoFit !== false}

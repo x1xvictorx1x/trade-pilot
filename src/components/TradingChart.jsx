@@ -24,7 +24,7 @@ const CHART_THEME = {
   glow: "rgba(250, 204, 21, 0.45)",
 };
 
-const MIN_CANDLES_FOR_LIVE = 20;
+const MIN_CANDLES_FOR_LIVE = 3;
 
 function toSeconds(value) {
   if (value === null || value === undefined) return null;
@@ -138,6 +138,10 @@ export default function TradingChart({
   const markersRef = useRef(null);
   const priceLinesRef = useRef({});
   const hasInitiallyFitRef = useRef(false);
+  // Keeps candle data accessible to the chart-creation effect without adding
+  // it to that effect's dep array (which would destroy/recreate on every tick).
+  const candleDataRef = useRef([]);
+  const autoFitRef = useRef(autoFit);
   const [hoverCandle, setHoverCandle] = useState(null);
 
   const built = useMemo(() => buildCandleSeriesData(candles, { symbol }), [candles, symbol]);
@@ -241,6 +245,18 @@ export default function TradingChart({
     chartRef.current = chart;
     seriesRef.current = series;
 
+    // Load existing data immediately so the chart is never blank after a
+    // height-change recreation (the data effect won't re-fire if candleData
+    // didn't change, so we seed it here from the ref).
+    const existingData = candleDataRef.current;
+    if (existingData.length) {
+      series.setData(existingData);
+      if (autoFitRef.current) {
+        chart.timeScale().fitContent();
+        hasInitiallyFitRef.current = true;
+      }
+    }
+
     // OHLC tooltip — fires on every crosshair move; nulls out when leaving.
     const handleCrosshair = (param) => {
       if (!param || !param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
@@ -307,6 +323,19 @@ export default function TradingChart({
   }, [height]);
 
   useEffect(() => {
+    autoFitRef.current = autoFit;
+  }, [autoFit]);
+
+  useEffect(() => {
+    // Keep ref in sync so chart-recreation effect can access current data.
+    candleDataRef.current = candleData;
+    if (process.env.NODE_ENV !== "production") {
+      console.log(
+        "[TradingChart] candles →", candleData.length,
+        "first:", candleData[0] ? `t=${candleData[0].time} o=${candleData[0].open}` : "–",
+        "last:", candleData.at(-1) ? `t=${candleData.at(-1).time} c=${candleData.at(-1).close}` : "–",
+      );
+    }
     if (!seriesRef.current) return;
     seriesRef.current.setData(candleData);
     if (!hasInitiallyFitRef.current && candleData.length && chartRef.current && autoFit) {
@@ -553,20 +582,22 @@ export default function TradingChart({
         <div
           style={{
             alignItems: "center",
-            background: "transparent",
+            background: "rgba(13, 17, 23, 0.75)",
+            border: "1px solid rgba(110, 122, 145, 0.25)",
+            borderRadius: "10px",
             color: "#94a3b8",
             display: "flex",
             flexDirection: "column",
             fontSize: "13px",
-            gap: "4px",
+            gap: "6px",
             left: "50%",
-            padding: "12px 16px",
+            padding: "14px 20px",
             pointerEvents: "none",
             position: "absolute",
             top: "50%",
             transform: "translate(-50%, -50%)",
             textAlign: "center",
-            minWidth: "200px",
+            minWidth: "220px",
           }}
         >
           <span style={{ color: "#cbd5e1", fontSize: "13px", fontWeight: 600 }}>
