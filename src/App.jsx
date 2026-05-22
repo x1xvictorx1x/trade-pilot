@@ -1510,6 +1510,7 @@ export default function App() {
     lastTradeSetup: null,
   });
   const [chartOverlays, setChartOverlays] = useState({ poc: null, fvgType: null, fvgTop: null, fvgBottom: null, relVol: null, fvgScore: null, fvgQuality: null });
+  const safeChartOverlays = chartOverlays ?? { poc: null, relVol: null, fvgType: null, fvgTop: null, fvgBottom: null, fvgScore: null, fvgQuality: null };
   const [debugMode, setDebugMode] = useState(() => {
     try {
       return localStorage.getItem(debugModeStorageKey) === "true";
@@ -4854,6 +4855,7 @@ function SignalSourceCard({ activeSymbol, candleSeries, connectionError, current
 }
 
 function SignalDebugPanel({ applyAlert, chartOverlays, currentPrice, dataSource, lastUpdated, notify, priceSource, profile, timeframe, tradingViewSignal, webhookDebug, zoneDiagnostics }) {
+  const safeChartOverlays = chartOverlays ?? {};
   const [collapsed, setCollapsed] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendStatus, setSendStatus] = useState("");
@@ -5015,32 +5017,32 @@ function SignalDebugPanel({ applyAlert, chartOverlays, currentPrice, dataSource,
         <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
           <div>
             <span style={rowLabel}>POC</span>
-            <span style={{ ...rowValue, color: chartOverlays?.poc !== null && Number.isFinite(chartOverlays?.poc) ? "#22d3ee" : "#475569" }}>
-              {chartOverlays?.poc !== null && Number.isFinite(chartOverlays?.poc) ? Number(chartOverlays.poc).toFixed(2) : "—"}
+            <span style={{ ...rowValue, color: safeChartOverlays.poc !== null && Number.isFinite(safeChartOverlays.poc) ? "#22d3ee" : "#475569" }}>
+              {safeChartOverlays.poc !== null && Number.isFinite(safeChartOverlays.poc) ? Number(safeChartOverlays.poc).toFixed(2) : "—"}
             </span>
           </div>
           <div>
             <span style={rowLabel}>Rel Volume</span>
-            <span style={{ ...rowValue, color: chartOverlays?.relVol !== null && Number.isFinite(chartOverlays?.relVol) ? (chartOverlays.relVol >= 1.5 ? "#86efac" : "#94a3b8") : "#475569" }}>
-              {chartOverlays?.relVol !== null && Number.isFinite(chartOverlays?.relVol) ? `${Number(chartOverlays.relVol).toFixed(2)}x` : "—"}
+            <span style={{ ...rowValue, color: safeChartOverlays.relVol !== null && Number.isFinite(safeChartOverlays.relVol) ? (safeChartOverlays.relVol >= 1.5 ? "#86efac" : "#94a3b8") : "#475569" }}>
+              {safeChartOverlays.relVol !== null && Number.isFinite(safeChartOverlays.relVol) ? `${Number(safeChartOverlays.relVol).toFixed(2)}x` : "—"}
             </span>
           </div>
           <div>
             <span style={rowLabel}>FVG Type</span>
-            <span style={{ ...rowValue, color: chartOverlays?.fvgType === "bearish" ? "#f87171" : chartOverlays?.fvgType === "bullish" ? "#86efac" : "#475569" }}>
-              {chartOverlays?.fvgType || "—"}
+            <span style={{ ...rowValue, color: safeChartOverlays.fvgType === "bearish" ? "#f87171" : safeChartOverlays.fvgType === "bullish" ? "#86efac" : "#475569" }}>
+              {safeChartOverlays.fvgType || "—"}
             </span>
           </div>
           <div>
             <span style={rowLabel}>FVG Top</span>
             <span style={rowValue}>
-              {chartOverlays?.fvgTop !== null && Number.isFinite(chartOverlays?.fvgTop) ? Number(chartOverlays.fvgTop).toFixed(2) : "—"}
+              {safeChartOverlays.fvgTop !== null && Number.isFinite(safeChartOverlays.fvgTop) ? Number(safeChartOverlays.fvgTop).toFixed(2) : "—"}
             </span>
           </div>
           <div>
             <span style={rowLabel}>FVG Bottom</span>
             <span style={rowValue}>
-              {chartOverlays?.fvgBottom !== null && Number.isFinite(chartOverlays?.fvgBottom) ? Number(chartOverlays.fvgBottom).toFixed(2) : "—"}
+              {safeChartOverlays.fvgBottom !== null && Number.isFinite(safeChartOverlays.fvgBottom) ? Number(safeChartOverlays.fvgBottom).toFixed(2) : "—"}
             </span>
           </div>
           <div>
@@ -5063,14 +5065,14 @@ function SignalDebugPanel({ applyAlert, chartOverlays, currentPrice, dataSource,
           </div>
           <div>
             <span style={rowLabel}>FVG Quality</span>
-            <span style={{ ...rowValue, color: chartOverlays?.fvgQuality === "A" ? "#86efac" : chartOverlays?.fvgQuality === "B" ? "#fde68a" : "#94a3b8" }}>
-              {chartOverlays?.fvgQuality || "—"}
+            <span style={{ ...rowValue, color: safeChartOverlays.fvgQuality === "A" ? "#86efac" : safeChartOverlays.fvgQuality === "B" ? "#fde68a" : "#94a3b8" }}>
+              {safeChartOverlays.fvgQuality || "—"}
             </span>
           </div>
           <div>
             <span style={rowLabel}>FVG Score</span>
-            <span style={{ ...rowValue, color: chartOverlays?.fvgScore !== null && Number.isFinite(chartOverlays?.fvgScore) ? (chartOverlays.fvgScore >= 85 ? "#86efac" : chartOverlays.fvgScore >= 70 ? "#fde68a" : "#94a3b8") : "#475569" }}>
-              {chartOverlays?.fvgScore !== null && Number.isFinite(chartOverlays?.fvgScore) ? `${Number(chartOverlays.fvgScore).toFixed(0)} / 100` : "—"}
+            <span style={{ ...rowValue, color: safeChartOverlays.fvgScore !== null && Number.isFinite(safeChartOverlays.fvgScore) ? (safeChartOverlays.fvgScore >= 85 ? "#86efac" : safeChartOverlays.fvgScore >= 70 ? "#fde68a" : "#94a3b8") : "#475569" }}>
+              {safeChartOverlays.fvgScore !== null && Number.isFinite(safeChartOverlays.fvgScore) ? `${Number(safeChartOverlays.fvgScore).toFixed(0)} / 100` : "—"}
             </span>
           </div>
         </div>
@@ -6147,15 +6149,6 @@ function Dashboard({
   };
 
   const cardOrder = normalizeCardOrder(effectiveLayout.cardOrder);
-  const safeChartOverlays = chartOverlays ?? {
-    poc: null,
-    relVol: null,
-    fvgType: null,
-    fvgTop: null,
-    fvgBottom: null,
-    fvgScore: null,
-    fvgQuality: null,
-  };
   const dashboardCards = {
     alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} symbol={profile.mainMarket} onAddLevels={handleOpenLevelsModal} onClearZones={() => { setSupport(0); setResistance(0); notify?.("Auto zones cleared.", "success"); }} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
@@ -8871,6 +8864,7 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
 }
 
 function TradeChartPanel({ candleSeries, chartOverlays = {}, chartPrefs, chartTimeframe, currentPrice, debugMode = false, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
+  const safeChartOverlays = chartOverlays ?? {};
   const candles = Array.isArray(candleSeries) ? candleSeries : [];
   const haveEnoughCandles = candles.length >= 20;
   // Defer the "is the spacing reasonable?" decision to the upstream zone
@@ -9001,14 +8995,14 @@ function TradeChartPanel({ candleSeries, chartOverlays = {}, chartPrefs, chartTi
           candles={candles}
           currentPrice={currentPrice}
           debugMode={debugMode}
-          fvgData={chartOverlays?.fvgType ? { type: chartOverlays.fvgType, top: chartOverlays.fvgTop, bottom: chartOverlays.fvgBottom } : null}
-          fvgQuality={chartOverlays?.fvgQuality ?? null}
+          fvgData={safeChartOverlays.fvgType ? { type: safeChartOverlays.fvgType, top: safeChartOverlays.fvgTop, bottom: safeChartOverlays.fvgBottom } : null}
+          fvgQuality={safeChartOverlays.fvgQuality ?? null}
           height={chartHeight}
           lockPriceScale={chartPrefs?.lockPriceScale === true}
           markers={setupMarkers}
           plan={plan}
-          poc={chartOverlays?.poc ?? null}
-          relVol={chartOverlays?.relVol ?? null}
+          poc={safeChartOverlays.poc ?? null}
+          relVol={safeChartOverlays.relVol ?? null}
           resetSignal={resetSignal || 0}
           resistanceZone={resistanceZone}
           showZones={zonesValid}
