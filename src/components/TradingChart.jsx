@@ -3,6 +3,7 @@ import {
   createChart,
   CandlestickSeries,
   AreaSeries,
+  HistogramSeries,
   createSeriesMarkers,
 } from "lightweight-charts";
 
@@ -24,7 +25,7 @@ const CHART_THEME = {
   glow: "rgba(250, 204, 21, 0.45)",
 };
 
-const MIN_CANDLES_FOR_LIVE = 3;
+const MIN_CANDLES_FOR_LIVE = 20;
 
 function toSeconds(value) {
   if (value === null || value === undefined) return null;
@@ -47,10 +48,26 @@ function getMinVisibleRange(symbol, refPrice) {
 }
 
 function buildCandleSeriesData(candles, options = {}) {
-  if (!Array.isArray(candles)) return { data: [], expanded: 0 };
+  if (!Array.isArray(candles)) return { data: [], expanded: 0, rejected: 0 };
   const symbol = options.symbol || "";
+  const refPrice = Number(options.refPrice);
   const seen = new Map();
   let expanded = 0;
+  let rejected = 0;
+
+  // Per-market outlier threshold — candles more than this many points from
+  // the current price are almost certainly stale test data or a feed glitch.
+  let outlierThreshold = null;
+  if (Number.isFinite(refPrice) && refPrice > 0) {
+    const sym = String(symbol).toUpperCase();
+    if (sym === "NQ" || sym === "MNQ" || sym.startsWith("NQ") || sym.startsWith("MNQ")) outlierThreshold = 1000;
+    else if (sym === "ES" || sym === "MES" || sym.startsWith("ES") || sym.startsWith("MES")) outlierThreshold = 100;
+    else if (sym === "YM" || sym === "MYM") outlierThreshold = 1000;
+    else if (sym === "RTY" || sym === "M2K") outlierThreshold = 50;
+    else if (sym.startsWith("BTC")) outlierThreshold = refPrice * 0.08;
+    else outlierThreshold = refPrice * 0.10;
+  }
+
   for (const candle of candles) {
     if (!candle) continue;
     const time = toSeconds(candle.timestamp ?? candle.time);
@@ -59,6 +76,12 @@ function buildCandleSeriesData(candles, options = {}) {
     const low = Number(candle.low);
     const close = Number(candle.close);
     if (!Number.isFinite(time) || !Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) continue;
+    if (time <= 0) continue;
+    // Reject candles whose close is wildly different from current price.
+    if (outlierThreshold !== null && Math.abs(close - refPrice) > outlierThreshold) {
+      rejected += 1;
+      continue;
+    }
     let displayHigh = high;
     let displayLow = low;
     const range = Math.abs(displayHigh - displayLow);
@@ -74,6 +97,7 @@ function buildCandleSeriesData(candles, options = {}) {
   return {
     data: Array.from(seen.values()).sort((a, b) => a.time - b.time),
     expanded,
+    rejected,
   };
 }
 
@@ -119,10 +143,14 @@ export default function TradingChart({
   currentPrice,
   debugMode = false,
   emptyMessage = "Waiting for TradingView candles…",
+  fvgData = null,
+  fvgQuality = null,
   height = 480,
   lockPriceScale = false,
   markers,
   plan,
+  poc = null,
+  relVol = null,
   resetSignal = 0,
   resistanceZone,
   showZones = true,
@@ -141,15 +169,42 @@ export default function TradingChart({
   // Keeps candle data accessible to the chart-creation effect without adding
   // it to that effect's dep array (which would destroy/recreate on every tick).
   const candleDataRef = useRef([]);
+  const volumeSeriesRef = useRef(null);
+  const volumeDataRef = useRef([]);
   const autoFitRef = useRef(autoFit);
+  // Tracks the last symbol|timeframe pair that triggered a fitContent so we
+  // re-fit automatically when the user switches timeframe or symbol.
+  const lastFitKeyRef = useRef("");
+  const fvgOverlayRef = useRef(null);
+  // Stable ref holding the latest fvgData so chart event subscriptions can read it
+  // without being recreated on every render.
+  const fvgDataRef = useRef(fvgData);
+  const fvgUpdateRef = useRef(null);
   const [hoverCandle, setHoverCandle] = useState(null);
 
-  const built = useMemo(() => buildCandleSeriesData(candles, { symbol }), [candles, symbol]);
+  const built = useMemo(
+    () => buildCandleSeriesData(candles, { symbol, refPrice: currentPrice }),
+    [candles, symbol, currentPrice],
+  );
   const realCandles = useMemo(() => {
     // Hard-cap to last 300 candles — keeps the chart snappy and matches the
     // history pipeline's MAX_CANDLES_PER_KEY.
     return built.data.length > 300 ? built.data.slice(built.data.length - 300) : built.data;
   }, [built]);
+  const volumeData = useMemo(() => {
+    if (!Array.isArray(candles)) return [];
+    const seen = new Map();
+    for (const c of candles) {
+      if (!c) continue;
+      const time = toSeconds(c.timestamp ?? c.time);
+      const vol = Number(c.volume ?? c.vol ?? 0);
+      if (!Number.isFinite(time) || vol <= 0) continue;
+      const isUp = Number(c.close) >= Number(c.open);
+      seen.set(time, { time, value: vol, color: isUp ? "rgba(34,197,94,0.35)" : "rgba(244,63,94,0.35)" });
+    }
+    const arr = Array.from(seen.values()).sort((a, b) => a.time - b.time);
+    return arr.length > 300 ? arr.slice(arr.length - 300) : arr;
+  }, [candles]);
   const candleData = realCandles;
   const waitingForCandles = realCandles.length < MIN_CANDLES_FOR_LIVE;
   const visualRangeEnhanced = built.expanded > 0;
@@ -168,6 +223,37 @@ export default function TradingChart({
   const planValid = Boolean(plan)
     && Number.isFinite(Number(plan.entry)) && Number.isFinite(Number(plan.stop))
     && Number(plan.entry) > 0 && Number(plan.stop) > 0;
+
+  // Keep fvgDataRef current on every render so the stable update fn reads fresh data.
+  fvgDataRef.current = fvgData;
+
+  // Stable update function — reads from refs, writes directly to overlay DOM element.
+  // Called by chart event subscriptions and by the fvgData useEffect.
+  fvgUpdateRef.current = () => {
+    const el = fvgOverlayRef.current;
+    const series = seriesRef.current;
+    if (!el || !series) return;
+    const fd = fvgDataRef.current;
+    if (!fd || !Number.isFinite(Number(fd.top)) || !Number.isFinite(Number(fd.bottom))) {
+      el.style.display = "none";
+      return;
+    }
+    const topPx = series.priceToCoordinate(Number(fd.top));
+    const botPx = series.priceToCoordinate(Number(fd.bottom));
+    if (topPx === null || botPx === null) {
+      el.style.display = "none";
+      return;
+    }
+    const y1 = Math.min(topPx, botPx);
+    const y2 = Math.max(topPx, botPx);
+    const isBearish = fd.type === "bearish";
+    el.style.display = "block";
+    el.style.top = `${y1}px`;
+    el.style.height = `${Math.max(2, y2 - y1)}px`;
+    el.style.background = isBearish ? "rgba(239,83,80,0.09)" : "rgba(38,198,218,0.09)";
+    el.style.borderTop = `1px solid ${isBearish ? "rgba(239,83,80,0.55)" : "rgba(38,198,218,0.55)"}`;
+    el.style.borderBottom = `1px solid ${isBearish ? "rgba(239,83,80,0.55)" : "rgba(38,198,218,0.55)"}`;
+  };
 
   useEffect(() => {
     if (!containerRef.current) return undefined;
@@ -245,6 +331,21 @@ export default function TradingChart({
     chartRef.current = chart;
     seriesRef.current = series;
 
+    // Volume histogram — bottom 15% of chart, separate hidden price scale.
+    const volSeries = chart.addSeries(HistogramSeries, {
+      priceScaleId: "vol",
+      priceFormat: { type: "volume" },
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    chart.priceScale("vol").applyOptions({
+      scaleMargins: { top: 0.85, bottom: 0 },
+      visible: false,
+    });
+    volumeSeriesRef.current = volSeries;
+    const existingVol = volumeDataRef.current;
+    if (existingVol.length) volSeries.setData(existingVol);
+
     // Load existing data immediately so the chart is never blank after a
     // height-change recreation (the data effect won't re-fire if candleData
     // didn't change, so we seed it here from the ref).
@@ -299,10 +400,27 @@ export default function TradingChart({
       observer.observe(containerRef.current);
     }
 
+    // FVG box overlay — update pixel position on every chart pan/zoom.
+    const handleFvgUpdate = () => {
+      if (fvgUpdateRef.current) fvgUpdateRef.current();
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleFvgUpdate);
+    chart.subscribeCrosshairMove(handleFvgUpdate);
+
     return () => {
       window.removeEventListener("resize", handleResize);
       window.removeEventListener("orientationchange", handleOrientation);
       if (observer) observer.disconnect();
+      try {
+        chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleFvgUpdate);
+      } catch {
+        // ignore
+      }
+      try {
+        chart.unsubscribeCrosshairMove(handleFvgUpdate);
+      } catch {
+        // already disposed
+      }
       try {
         chart.unsubscribeCrosshairMove(handleCrosshair);
       } catch {
@@ -318,6 +436,7 @@ export default function TradingChart({
       supportAreaRef.current = null;
       resistanceAreaRef.current = null;
       markersRef.current = null;
+      volumeSeriesRef.current = null;
       priceLinesRef.current = {};
     };
   }, [height]);
@@ -327,22 +446,43 @@ export default function TradingChart({
   }, [autoFit]);
 
   useEffect(() => {
+    volumeDataRef.current = volumeData;
+    if (volumeSeriesRef.current) volumeSeriesRef.current.setData(volumeData);
+  }, [volumeData]);
+
+  // Recompute FVG overlay pixel position whenever fvgData changes.
+  useEffect(() => {
+    if (fvgUpdateRef.current) fvgUpdateRef.current();
+  }, [fvgData]);
+
+  useEffect(() => {
     // Keep ref in sync so chart-recreation effect can access current data.
     candleDataRef.current = candleData;
     if (process.env.NODE_ENV !== "production") {
       console.log(
         "[TradingChart] candles →", candleData.length,
+        `(rejected: ${built.rejected})`,
         "first:", candleData[0] ? `t=${candleData[0].time} o=${candleData[0].open}` : "–",
         "last:", candleData.at(-1) ? `t=${candleData.at(-1).time} c=${candleData.at(-1).close}` : "–",
       );
     }
     if (!seriesRef.current) return;
     seriesRef.current.setData(candleData);
-    if (!hasInitiallyFitRef.current && candleData.length && chartRef.current && autoFit) {
+    // Always force autoScale after setData so the price axis re-fits to the
+    // current visible data rather than a stale range from a previous symbol/TF.
+    if (chartRef.current) {
+      chartRef.current.applyOptions({ rightPriceScale: { autoScale: true } });
+    }
+    // Re-fit the time axis when: (a) this is the first load, or (b) the
+    // symbol or timeframe has changed (user switched instruments/TF).
+    const fitKey = `${symbol}|${timeframe}`;
+    const needsRefit = !hasInitiallyFitRef.current || fitKey !== lastFitKeyRef.current;
+    if (needsRefit && candleData.length && chartRef.current && autoFit) {
       chartRef.current.timeScale().fitContent();
       hasInitiallyFitRef.current = true;
+      lastFitKeyRef.current = fitKey;
     }
-  }, [candleData, autoFit]);
+  }, [candleData, autoFit, symbol, timeframe, built.rejected]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -524,7 +664,38 @@ export default function TradingChart({
       lineWidth: 1,
       title: "Runner",
     } : null);
-  }, [currentPrice, cleanSupport?.min, cleanSupport?.max, cleanSupport?.center, cleanResistance?.min, cleanResistance?.max, cleanResistance?.center, planValid, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner, showZones]);
+
+    // POC — session point of control from Pine Script signal.
+    ensurePriceLine(series, priceLinesRef, "poc", Number.isFinite(Number(poc)) ? {
+      price: Number(poc),
+      color: "#06b6d4",
+      lineStyle: 1,
+      lineWidth: 1,
+      axisLabelVisible: true,
+      title: "POC",
+    } : null);
+
+    // FVG — nearest fair value gap boundary lines (solid edges, institutional style).
+    // The transparent fill is rendered by fvgOverlayRef div (positioned absolutely).
+    const isFvgBearish = fvgData?.type === "bearish";
+    const fvgEdgeColor = isFvgBearish ? "rgba(239,83,80,0.75)" : "rgba(38,198,218,0.75)";
+    ensurePriceLine(series, priceLinesRef, "fvgTop", fvgData && Number.isFinite(Number(fvgData.top)) ? {
+      price: Number(fvgData.top),
+      color: fvgEdgeColor,
+      lineStyle: 0,
+      lineWidth: 1,
+      axisLabelVisible: true,
+      title: isFvgBearish ? "FVG▼" : "FVG▲",
+    } : null);
+    ensurePriceLine(series, priceLinesRef, "fvgBottom", fvgData && Number.isFinite(Number(fvgData.bottom)) ? {
+      price: Number(fvgData.bottom),
+      color: fvgEdgeColor,
+      lineStyle: 0,
+      lineWidth: 1,
+      axisLabelVisible: false,
+      title: "",
+    } : null);
+  }, [currentPrice, cleanSupport?.min, cleanSupport?.max, cleanSupport?.center, cleanResistance?.min, cleanResistance?.max, cleanResistance?.center, planValid, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner, showZones, poc, fvgData?.type, fvgData?.top, fvgData?.bottom]);
 
   // Tooltip placement — keep it inside the chart bounds. 12px nudge so it
   // doesn't sit directly under the cursor.
@@ -549,6 +720,18 @@ export default function TradingChart({
   return (
     <div style={{ position: "relative", width: "100%", height, touchAction: "none" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%", touchAction: "none" }} />
+      {/* FVG transparent box fill — positioned by priceToCoordinate, updated by chart events */}
+      <div
+        ref={fvgOverlayRef}
+        style={{
+          display: "none",
+          left: 0,
+          pointerEvents: "none",
+          position: "absolute",
+          right: "60px",
+          zIndex: 2,
+        }}
+      />
       {hoverCandle ? (
         <div style={tooltipStyle}>
           <div><span style={{ color: "#94a3b8" }}>O:</span> {hoverCandle.open.toFixed(2)}</div>
@@ -556,6 +739,25 @@ export default function TradingChart({
           <div><span style={{ color: "#94a3b8" }}>L:</span> {hoverCandle.low.toFixed(2)}</div>
           <div><span style={{ color: "#94a3b8" }}>C:</span> {hoverCandle.close.toFixed(2)}</div>
           <div><span style={{ color: "#94a3b8" }}>Range:</span> {hoverRange.toFixed(2)}</div>
+        </div>
+      ) : null}
+      {Number.isFinite(relVol) ? (
+        <div
+          style={{
+            background: relVol >= 1.5 ? "rgba(34,197,94,0.15)" : relVol <= 0.6 ? "rgba(234,179,8,0.15)" : "rgba(71,85,105,0.4)",
+            border: `1px solid ${relVol >= 1.5 ? "rgba(34,197,94,0.5)" : relVol <= 0.6 ? "rgba(234,179,8,0.5)" : "rgba(71,85,105,0.5)"}`,
+            borderRadius: "6px",
+            color: relVol >= 1.5 ? "#86efac" : relVol <= 0.6 ? "#fde68a" : "#94a3b8",
+            fontSize: "10px",
+            fontWeight: 700,
+            left: "10px",
+            letterSpacing: ".05em",
+            padding: "2px 7px",
+            position: "absolute",
+            top: "10px",
+          }}
+        >
+          Vol {relVol.toFixed(1)}x{fvgQuality && fvgQuality !== "Weak" ? ` · FVG ${fvgQuality}` : ""}
         </div>
       ) : null}
       {debugMode && visualRangeEnhanced ? (
@@ -572,10 +774,46 @@ export default function TradingChart({
             padding: "3px 8px",
             position: "absolute",
             textTransform: "uppercase",
-            top: "10px",
+            top: Number.isFinite(relVol) ? "34px" : "10px",
           }}
         >
           Visual range enhanced
+        </div>
+      ) : null}
+      {debugMode ? (
+        <div
+          style={{
+            background: "rgba(13,17,23,0.88)",
+            border: "1px solid rgba(71,85,105,0.6)",
+            borderRadius: "8px",
+            bottom: "10px",
+            color: "#94a3b8",
+            fontSize: "10px",
+            fontVariantNumeric: "tabular-nums",
+            left: "10px",
+            lineHeight: 1.7,
+            padding: "6px 10px",
+            pointerEvents: "none",
+            position: "absolute",
+            zIndex: 4,
+          }}
+        >
+          <div style={{ color: "#cbd5e1", fontWeight: 700, marginBottom: "2px" }}>Candle Debug</div>
+          <div>Raw input: {Array.isArray(candles) ? candles.length : 0}</div>
+          <div>After filter: {realCandles.length}</div>
+          {built.rejected > 0 && <div style={{ color: "#f97316" }}>Outliers rejected: {built.rejected}</div>}
+          <div>
+            First:{" "}
+            {realCandles[0]
+              ? `${new Date(realCandles[0].time * 1000).toISOString().slice(11, 16)}Z  p=${realCandles[0].close.toFixed(2)}`
+              : "–"}
+          </div>
+          <div>
+            Last:{" "}
+            {realCandles.at(-1)
+              ? `${new Date(realCandles.at(-1).time * 1000).toISOString().slice(11, 16)}Z  p=${realCandles.at(-1).close.toFixed(2)}`
+              : "–"}
+          </div>
         </div>
       ) : null}
       {waitingForCandles ? (

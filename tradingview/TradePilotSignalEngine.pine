@@ -1,309 +1,1614 @@
 //@version=6
-indicator("Trade Pilot Signal Engine", shorttitle="TPSE", overlay=true, max_labels_count=50, max_lines_count=50)
+indicator("Trade Pilot Signal Engine", shorttitle="TP Pro", overlay=true,
+          max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 
-// ============================================================
-// Trade Pilot Signal Engine — pro-level
-// Version: 5.0
-//
-// Sends complete trade setups (entry, stop, tp1, tp2, runner,
-// score, grade, reason) for B+ or A grade only. One active
-// idea, ATR-based stop buffer, session cap + cooldown so the
-// chart never spams. price_update streams every bar.
-//
-// Setup:
-//   1. Pine Editor -> paste -> Save -> Add to chart.
-//   2. Right-click chart -> Add alert.
-//   3. Condition: "Trade Pilot Signal Engine".
-//   4. Trigger: "Any alert() function call".
-//   5. Webhook URL: https://tradepilottool.com/api/webhook/tradingview
-//   6. Message: leave blank.
-// ============================================================
+// ════════════════════════════════════════════════════════════════
+// Trade Pilot Signal Engine  ·  Pro Edition 10.0
+// Institutional FVG system · Hard veto engine · MTF structure + bias panel
+// No str.format · bar_close only · lookahead_off on all HTF calls
+// ════════════════════════════════════════════════════════════════
 
-// ============================================================
-// INPUTS — Engine
-// ============================================================
-lookback        = input.int(20,    "S/R Lookback Bars",                       minval=5,   maxval=200,  group="Engine")
-emaFastLen      = input.int(9,     "EMA Fast",                                minval=2,   maxval=50,   group="Engine")
-emaSlowLen      = input.int(21,    "EMA Slow",                                minval=5,   maxval=200,  group="Engine")
-atrLen          = input.int(14,    "ATR Length (stop buffer)",                minval=2,   maxval=100,  group="Engine")
-bufferAtrMult   = input.float(0.25,"Stop Buffer (× ATR)",                     minval=0.0, maxval=2.0,  step=0.05, group="Engine")
-minSetupScore   = input.int(85,    "Min Setup Score (elite = 85)",            minval=0,   maxval=100,  group="Engine")
-minRR           = input.float(2.5, "Min Reward / Risk",                       minval=1.0, maxval=10.0, step=0.1,  group="Engine")
-maxPerSession   = input.int(1,     "Max signals per direction per session",   minval=1,   maxval=10,   group="Engine")
-cooldownBars    = input.int(30,    "Cooldown bars between signals",           minval=0,   maxval=200,  group="Engine")
-oppositeCooldown = input.int(5,    "Min bars between opposite-direction signals", minval=0, maxval=50, group="Engine")
-sendPriceUpdate = input.bool(true, "Stream price_update on every bar close",  group="Engine")
+pFmt(v)             => str.tostring(v, format.mintick)
+pPct(n, d)          => d > 0 ? str.tostring(math.round(n / d * 100)) + "%" : "—"
+f_ma(src, typ, len) =>
+    switch typ
+        "EMA" => ta.ema(src, len)
+        "SMA" => ta.sma(src, len)
+        "WMA" => ta.wma(src, len)
+        "HMA" => ta.hma(src, len)
+        =>       ta.ema(src, len)
 
-// ============================================================
-// INPUTS — Display
-// ============================================================
-showSignals     = input.bool(true,  "Show Signals",       group="Display")
-showZones       = input.bool(true,  "Show Zones",         group="Display")
-showEmas        = input.bool(false, "Show EMAs",          group="Display")
-showTradeLevels = input.bool(true,  "Show Trade Levels",  group="Display")
-showCoach       = input.bool(true,  "Show Coach Overlay", group="Display")
-focusMode       = input.bool(false, "Focus Mode (active idea + price + key level only)", group="Display")
+// MTF helpers
+f_bias(emaF, emaS, cls) =>
+    (emaF > emaS and cls > emaS ? "Bull" :
+     emaF < emaS and cls < emaS ? "Bear" :
+     "Chop")
 
-// ============================================================
-// SUPPORT, RESISTANCE, TREND, ATR
-// ============================================================
-support         = ta.lowest(low,   lookback)
-resistance      = ta.highest(high, lookback)
-priorSupport    = nz(support[1],    support)
-priorResistance = nz(resistance[1], resistance)
-emaFast         = ta.ema(close, emaFastLen)
-emaSlow         = ta.ema(close, emaSlowLen)
-atr             = ta.atr(atrLen)
-buffer          = atr * bufferAtrMult
+f_structure(lastPH, prevPH, lastPL, prevPL) =>
+    hh = not na(lastPH) and not na(prevPH) and lastPH > prevPH
+    lh = not na(lastPH) and not na(prevPH) and lastPH < prevPH
+    hl = not na(lastPL) and not na(prevPL) and lastPL > prevPL
+    ll = not na(lastPL) and not na(prevPL) and lastPL < prevPL
+    hh and hl ? "bullish" : lh and ll ? "bearish" : hh or hl ? "bull-trans" : lh or ll ? "bear-trans" : "neutral"
 
-rng       = math.max(priorResistance - priorSupport, syminfo.mintick * 4)
-zoneWidth = rng * 0.025
+f_biasBg(b) =>
+    (b == "Bull" ? color.new(#26A69A, 42) :
+     b == "Bear" ? color.new(#EF5350, 48) :
+     color.new(#37474F, 50))
 
-nearSupport    = math.abs(close - priorSupport)    <= rng * 0.18
-nearResistance = math.abs(close - priorResistance) <= rng * 0.18
-inMidRange     = close > priorSupport + rng * 0.30 and close < priorResistance - rng * 0.30
+f_biasTc(b) =>
+    (b == "Bull" ? color.new(#80CBC4, 5) :
+     b == "Bear" ? color.new(#EF9A9A, 5) :
+     color.new(color.gray, 20))
 
-bullishConfirm = close > open
-bearishConfirm = close < open
+// ── GROUP 1 · ZONES ─────────────────────────────────────────────
+g1 = "① Zones"
+showZones       = input.bool(true,    "Show Supply / Demand Zones", group=g1)
+mitigationType  = input.string("Wicks","Mitigation Type",           group=g1, options=["Wicks","Close"])
+allowOverlap    = input.bool(false,   "Allow Overlapping Zones",    group=g1)
+showVolDelta    = input.bool(false,   "Show Volume Delta",          group=g1)
+zonePivotLen    = input.int(10,       "Zone Pivot Lookback",        group=g1, minval=3, maxval=50)
 
-// Pin-bar style strong rejection: dominant wick into the level + bullish/bearish body.
-barRange  = math.max(high - low, syminfo.mintick)
-body      = math.abs(close - open)
-lowerWick = math.min(open, close) - low
-upperWick = high - math.max(open, close)
+// ── GROUP 2 · KEY LEVELS ────────────────────────────────────────
+g2 = "② Key Levels"
+showPDH         = input.bool(false,  "Previous Day High",            group=g2)
+showPDL         = input.bool(false,  "Previous Day Low",             group=g2)
+showPDC         = input.bool(false,  "Previous Day Close",           group=g2)
+showPDO         = input.bool(false,  "Previous Day Open",            group=g2)
+showPMH         = input.bool(true,   "PreMarket High",               group=g2)
+showPML         = input.bool(true,   "PreMarket Low",                group=g2)
+showOP          = input.bool(false,  "Opening Print",                group=g2)
+showONH         = input.bool(false,  "Overnight High",               group=g2)
+showONL         = input.bool(false,  "Overnight Low",                group=g2)
+showVWAP        = input.bool(true,   "Show VWAP",                    group=g2)
+showPOC         = input.bool(true,   "Show POC",                     group=g2)
+pocType         = input.string("Current Session","POC Type",         group=g2, options=["Current Session","Previous Day","Lookback"])
+pocLookback     = input.int(50,      "POC Lookback Bars",            group=g2, minval=10, maxval=500)
 
-strongBullishRejection = bullishConfirm and lowerWick >= body and lowerWick >= barRange * 0.4
-strongBearishRejection = bearishConfirm and upperWick >= body and upperWick >= barRange * 0.4
+// ── GROUP 3 · FVGs ──────────────────────────────────────────────
+g3 = "③ Fair Value Gaps"
+showFVG           = input.bool(true,  "Show FVGs",                   group=g3)
+minFVGPct         = input.float(0.05, "Min FVG %",                   group=g3, minval=0.01, maxval=2.0,  step=0.01)
+minFVGQuality     = input.string("B", "Min FVG Quality",             group=g3, options=["A","B","All"])
+showFVG50         = input.bool(false, "Show 50% Level",              group=g3)
+showFVGLabels     = input.bool(true,  "Show FVG Labels",             group=g3)
+fadeMitigated     = input.bool(true,  "Fade Mitigated FVG",         group=g3)
+removeFilled      = input.bool(true,  "Remove Filled Gaps",          group=g3)
+maxActiveFVGs     = input.int(3,      "Max Active FVGs",             group=g3, minval=1, maxval=20)
+fvgExpirationBars = input.int(60,     "Expire After X Bars",         group=g3, minval=5, maxval=300)
 
-// Close strength: closing in the top/bottom 35% of the bar's range.
-closeStrengthLong  = (close - low) >= barRange * 0.65
-closeStrengthShort = (high - close) >= barRange * 0.65
+// ── GROUP 4 · OPENING RANGE ─────────────────────────────────────
+g4 = "④ Opening Range"
+showOR          = input.bool(true,   "Show Opening Range",           group=g4)
+showORMid       = input.bool(true,   "Show OR Midpoint",             group=g4)
+orMinutes       = input.string("15", "Opening Range Time (min)",     group=g4, options=["5","15","30"])
+stopAfterBreak  = input.bool(true,   "Stop OR After Breakout",       group=g4)
+removePrevOR    = input.bool(true,   "Remove Previous OR",           group=g4)
+showSessBg      = input.bool(false,  "Session Shading",              group=g4)
+applySessionScore = input.bool(true, "Session Score Adjustments",    group=g4)
 
-// No-trade structural filters: tight chop and narrow S/R range.
-tightChop = barRange < atr * 0.5
-narrowSR  = rng      < atr * 3.0
+// ── GROUP 5 · RISK / TRADE LEVELS ───────────────────────────────
+g5 = "⑤ Risk / Trade Levels"
+showSLTP        = input.bool(true,   "Show SL & TP",                 group=g5)
+slType          = input.string("Zone Edge","Stop Loss Type",         group=g5, options=["Zone Edge","ATR","Structure"])
+slBufferTicks   = input.int(2,       "Stop Buffer (ticks)",          group=g5, minval=0, maxval=20)
+tp1RR           = input.float(2.0,   "TP1 R:R",                      group=g5, minval=0.5, maxval=10.0, step=0.1)
+tp2RR           = input.float(3.0,   "TP2 R:R",                      group=g5, minval=0.5, maxval=10.0, step=0.1)
+tp3RR           = input.float(5.0,   "TP3 R:R",                      group=g5, minval=0.5, maxval=15.0, step=0.1)
 
-// ============================================================
-// TRIGGER PATHS — strong rejection at level OR clean structure break + retest
-// ============================================================
-oldResLvl = priorResistance[lookback]
-oldSupLvl = priorSupport[lookback]
+// ── GROUP 6 · MOVING AVERAGES ────────────────────────────────────
+g6 = "⑥ Moving Averages"
+ma1On   = input.bool(true,    "MA 1", group=g6, inline="ma1")
+ma1Type = input.string("EMA", "",     group=g6, inline="ma1", options=["EMA","SMA","WMA","HMA"])
+ma1Len  = input.int(9,        "",     group=g6, inline="ma1", minval=1)
+ma1Col  = input.color(color.new(#4FC3F7, 0), "", group=g6, inline="ma1")
 
-brokeAboveRecently = not na(oldResLvl) and oldResLvl > 0 and ta.highest(high, lookback) > oldResLvl
-brokeBelowRecently = not na(oldSupLvl) and oldSupLvl > 0 and ta.lowest(low,  lookback) < oldSupLvl
+ma2On   = input.bool(true,    "MA 2", group=g6, inline="ma2")
+ma2Type = input.string("EMA", "",     group=g6, inline="ma2", options=["EMA","SMA","WMA","HMA"])
+ma2Len  = input.int(21,       "",     group=g6, inline="ma2", minval=1)
+ma2Col  = input.color(color.new(#FFB300, 0), "", group=g6, inline="ma2")
 
-// "Clean" break = a closing bar pushed beyond the old level by at least one ATR buffer.
-cleanBreakAbove = brokeAboveRecently and ta.highest(close, lookback) >= oldResLvl + buffer
-cleanBreakBelow = brokeBelowRecently and ta.lowest(close,  lookback) <= oldSupLvl - buffer
+ma3On   = input.bool(false,   "MA 3", group=g6, inline="ma3")
+ma3Type = input.string("SMA", "",     group=g6, inline="ma3", options=["EMA","SMA","WMA","HMA"])
+ma3Len  = input.int(50,       "",     group=g6, inline="ma3", minval=1)
+ma3Col  = input.color(color.new(#CE93D8, 0), "", group=g6, inline="ma3")
 
-longSupportBounce    = nearSupport    and strongBullishRejection and closeStrengthLong  and low  <= priorSupport    + zoneWidth * 4
-longBreakoutRetest   = cleanBreakAbove and bullishConfirm           and closeStrengthLong  and math.abs(close - oldResLvl) <= rng * 0.10 and close >= oldResLvl
-shortResRejection    = nearResistance and strongBearishRejection and closeStrengthShort and high >= priorResistance - zoneWidth * 4
-shortBreakdownRetest = cleanBreakBelow and bearishConfirm           and closeStrengthShort and math.abs(close - oldSupLvl) <= rng * 0.10 and close <= oldSupLvl
+ma4On   = input.bool(false,   "MA 4", group=g6, inline="ma4")
+ma4Type = input.string("SMA", "",     group=g6, inline="ma4", options=["EMA","SMA","WMA","HMA"])
+ma4Len  = input.int(200,      "",     group=g6, inline="ma4", minval=1)
+ma4Col  = input.color(color.new(#90A4AE, 0), "", group=g6, inline="ma4")
 
-longTriggered  = longSupportBounce or longBreakoutRetest
-shortTriggered = shortResRejection or shortBreakdownRetest
+// ── GROUP 7 · SIGNALS ────────────────────────────────────────────
+g7 = "⑦ Signals"
+showSignals     = input.bool(true,   "Show Trade Pilot Signals",     group=g7)
+minGrade        = input.string("B+", "Minimum Signal Grade",         group=g7, options=["A+","A","B+"])
+cooldownBars    = input.int(30,      "Cooldown Bars (base)",         group=g7, minval=0, maxval=200)
+focusMode       = input.bool(false,  "Focus Mode",                   group=g7)
+maxPerSession   = input.int(2,       "Max Signals per Session",      group=g7, minval=1, maxval=10)
+useMTF          = input.bool(true,   "MTF Trend Filter",             group=g7)
+showSetupType   = input.bool(true,   "Show Setup Type",              group=g7)
+showPostEntry   = input.bool(true,   "Show Post-Entry Coaching",     group=g7)
+showTradeStats  = input.bool(false,  "Show Session Stats",           group=g7)
+showRelVol      = input.bool(true,   "Highlight Volume Spikes",      group=g7)
 
-longReason  = longSupportBounce ? "support bounce" : longBreakoutRetest ? "breakout retest" : ""
-shortReason = shortResRejection ? "resistance rejection" : shortBreakdownRetest ? "breakdown retest" : ""
+// ── GROUP 8 · MULTI-TIMEFRAME ────────────────────────────────────
+gMTF = "⑧ Multi-Timeframe"
+showMTFPanel    = input.bool(true,   "Show MTF Bias Panel",       group=gMTF)
+mtfTF1          = input.string("5",  "Lower TF (min)",            group=gMTF, options=["1","3","5"])
+mtfTF2          = input.string("15", "Mid TF (min)",              group=gMTF, options=["15","30","60"])
+useMTFStructure = input.bool(true,   "Structure Veto (Mid TF)",   group=gMTF)
+showSignalWhy   = input.bool(true,   "Show Signal WHY",           group=gMTF)
 
-// ============================================================
-// TRADE LEVELS — entry / stop / tp1 / tp2 / runner
-// ============================================================
-longEntry    = close
-longStop     = priorSupport - buffer
-longRiskPts  = math.max(longEntry - longStop, syminfo.mintick)
-longTp1      = longEntry + longRiskPts * 2
-longTp2      = longEntry + longRiskPts * 3
-longRunner   = priorResistance
-longRR       = (priorResistance - longEntry) / longRiskPts
+// ── ENGINE ───────────────────────────────────────────────────────
+ge = "⚙ Engine"
+lookback            = input.int(20,    "S/R Lookback Bars",          group=ge, minval=5,  maxval=200)
+atrLen              = input.int(14,    "ATR Length",                 group=ge, minval=2,  maxval=100)
+bufferMult          = input.float(0.25,"Stop Buffer × ATR",          group=ge, minval=0.0,maxval=2.0, step=0.05)
+minRR               = input.float(2.0, "Min Reward:Risk",            group=ge, minval=1.0,maxval=10.0,step=0.1)
+oppCooldown         = input.int(5,     "Min bars between opposite signals", group=ge, minval=0, maxval=50)
+useVolFilter        = input.bool(true, "Relative Volume Filter",     group=ge)
+minRelVol           = input.float(0.7, "Min Rel Vol (breakouts)",    group=ge, minval=0.1, maxval=3.0, step=0.1)
+applyExhaustion     = input.bool(true, "Exhaustion / Extension Filter", group=ge)
+sendPriceUpdate     = input.bool(true, "Stream price_update",        group=ge)
 
-shortEntry   = close
-shortStop    = priorResistance + buffer
-shortRiskPts = math.max(shortStop - shortEntry, syminfo.mintick)
-shortTp1     = shortEntry - shortRiskPts * 2
-shortTp2     = shortEntry - shortRiskPts * 3
-shortRunner  = priorSupport
-shortRR      = (shortEntry - priorSupport) / shortRiskPts
+// ════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ════════════════════════════════════════════════════════════════
+atr     = ta.atr(atrLen)
+buf     = atr * bufferMult
+ma1Val  = f_ma(close, ma1Type, ma1Len)
+ma2Val  = f_ma(close, ma2Type, ma2Len)
+ma3Val  = f_ma(close, ma3Type, ma3Len)
+ma4Val  = f_ma(close, ma4Type, ma4Len)
+vwapVal = ta.vwap(hlc3)
 
-// ============================================================
-// SCORES (0-100)
-// ============================================================
-longProximity    = nearSupport ? 25.0 : 0.0
-longTrend        = emaFast > emaSlow ? 20.0 : (emaFast < emaSlow ? 0.0 : 10.0)
-longRRScore      = longRR >= 2.0 ? 25.0 : (longRR >= 1.5 ? 18.0 : (longRR >= 1.0 ? 10.0 : 0.0))
-longMidScore     = inMidRange ? 0.0 : 15.0
-longConfirmScore = longTriggered ? 15.0 : 0.0
-longSetupScore   = longProximity + longTrend + longRRScore + longMidScore + longConfirmScore
+// MA / VWAP plots
+plot(showVWAP                ? vwapVal : na, "VWAP",   color=color.new(#00E5FF,  5), linewidth=2)
+plot(ma1On and not focusMode ? ma1Val  : na, "EMA 9",  color=ma1Col, linewidth=1)
+plot(ma2On                   ? ma2Val  : na, "EMA 21", color=ma2Col, linewidth=1)
+plot(ma3On and not focusMode ? ma3Val  : na, "MA 50",  color=ma3Col, linewidth=1)
+plot(ma4On and not focusMode ? ma4Val  : na, "MA 200", color=ma4Col, linewidth=2)
 
-shortProximity    = nearResistance ? 25.0 : 0.0
-shortTrend        = emaFast < emaSlow ? 20.0 : (emaFast > emaSlow ? 0.0 : 10.0)
-shortRRScore      = shortRR >= 2.0 ? 25.0 : (shortRR >= 1.5 ? 18.0 : (shortRR >= 1.0 ? 10.0 : 0.0))
-shortMidScore     = inMidRange ? 0.0 : 15.0
-shortConfirmScore = shortTriggered ? 15.0 : 0.0
-shortSetupScore   = shortProximity + shortTrend + shortRRScore + shortMidScore + shortConfirmScore
+// ════════════════════════════════════════════════════════════════
+// SESSION DETECTION
+// ════════════════════════════════════════════════════════════════
+isPreMkt  = session.ispremarket
+isRegMkt  = session.ismarket
+isNewDay  = session.isfirstbar
+isRegOpen = isRegMkt and not isRegMkt[1]
 
-// ============================================================
-// QUALIFICATION — pick at most ONE active side per bar
-// Hard filters: trigger fired, not on opposite zone, not mid-range,
-// not tight chop, not narrow S/R, >= minRR, strict EMA trend, score >= minSetupScore.
-// (Opposite-direction cooldown is enforced below alongside same-side cooldown.)
-// ============================================================
-qualifiedLong  = longTriggered  and not nearResistance and not inMidRange and not tightChop and not narrowSR and longRR  >= minRR and emaFast > emaSlow and longSetupScore  >= minSetupScore
-qualifiedShort = shortTriggered and not nearSupport    and not inMidRange and not tightChop and not narrowSR and shortRR >= minRR and emaFast < emaSlow and shortSetupScore >= minSetupScore
+isNYOpen  = timeframe.isintraday and not na(time(timeframe.period, "0930-1030", "America/New_York"))
+isMidday  = timeframe.isintraday and not na(time(timeframe.period, "1130-1330", "America/New_York"))
+isPwrHour = timeframe.isintraday and not na(time(timeframe.period, "1500-1600", "America/New_York"))
+isOvernight = not isRegMkt and not isPreMkt
 
-activeLong  = qualifiedLong  and longSetupScore  >  shortSetupScore
-activeShort = qualifiedShort and shortSetupScore >  longSetupScore
+// ════════════════════════════════════════════════════════════════
+// HIGHER TIMEFRAME TREND  (lookahead_off = no repaint)
+// ════════════════════════════════════════════════════════════════
+htf = (
+    timeframe.period == "1"   ? "5"   :
+    timeframe.period == "3"   ? "15"  :
+    timeframe.period == "5"   ? "15"  :
+    timeframe.period == "10"  ? "30"  :
+    timeframe.period == "15"  ? "60"  :
+    timeframe.period == "30"  ? "60"  :
+    timeframe.period == "60"  ? "240" :
+    timeframe.period == "240" ? "D"   : "D")
 
-// ============================================================
-// SESSION + COOLDOWN GUARD
-// ============================================================
-var int sessionLongCount  = 0
-var int sessionShortCount = 0
-var int lastLongBar       = -10000
-var int lastShortBar      = -10000
+[htfEmaF, htfEmaS, htfClose] = request.security(syminfo.tickerid, htf,
+    [ta.ema(close, ma1Len), ta.ema(close, ma2Len), close],
+    lookahead=barmerge.lookahead_off)
 
-if session.isfirstbar
-    sessionLongCount  := 0
-    sessionShortCount := 0
+htfBullish = htfEmaF > htfEmaS and htfClose > htfEmaS
+htfBearish = htfEmaF < htfEmaS and htfClose < htfEmaS
 
-cooldownLongOk     = (bar_index - lastLongBar)  >= cooldownBars
-cooldownShortOk    = (bar_index - lastShortBar) >= cooldownBars
-oppositeOkForLong  = (bar_index - lastShortBar) >= oppositeCooldown
-oppositeOkForShort = (bar_index - lastLongBar)  >= oppositeCooldown
+// ════════════════════════════════════════════════════════════════
+// MTF BIAS + STRUCTURE  (fixed 5m/15m by default, user-configurable)
+// ════════════════════════════════════════════════════════════════
+[mtf1EmaF, mtf1EmaS, mtf1Close, mtf1PHraw, mtf1PLraw] = request.security(syminfo.tickerid, mtfTF1,
+    [ta.ema(close, 9), ta.ema(close, 21), close,
+     ta.pivothigh(high, 5, 5), ta.pivotlow(low, 5, 5)],
+    lookahead=barmerge.lookahead_off)
 
-fireLong  = activeLong  and cooldownLongOk  and oppositeOkForLong  and sessionLongCount  < maxPerSession
-fireShort = activeShort and cooldownShortOk and oppositeOkForShort and sessionShortCount < maxPerSession
+[mtf2EmaF, mtf2EmaS, mtf2Close, mtf2PHraw, mtf2PLraw] = request.security(syminfo.tickerid, mtfTF2,
+    [ta.ema(close, 9), ta.ema(close, 21), close,
+     ta.pivothigh(high, 5, 5), ta.pivotlow(low, 5, 5)],
+    lookahead=barmerge.lookahead_off)
 
-if fireLong
-    lastLongBar := bar_index
-    sessionLongCount += 1
-if fireShort
-    lastShortBar := bar_index
-    sessionShortCount += 1
+mtf1LastPH = ta.valuewhen(not na(mtf1PHraw), mtf1PHraw, 0)
+mtf1PrevPH = ta.valuewhen(not na(mtf1PHraw), mtf1PHraw, 1)
+mtf1LastPL = ta.valuewhen(not na(mtf1PLraw), mtf1PLraw, 0)
+mtf1PrevPL = ta.valuewhen(not na(mtf1PLraw), mtf1PLraw, 1)
 
-longGrade  = longSetupScore  >= 85 ? "A" : "B+"
-shortGrade = shortSetupScore >= 85 ? "A" : "B+"
+mtf2LastPH = ta.valuewhen(not na(mtf2PHraw), mtf2PHraw, 0)
+mtf2PrevPH = ta.valuewhen(not na(mtf2PHraw), mtf2PHraw, 1)
+mtf2LastPL = ta.valuewhen(not na(mtf2PLraw), mtf2PLraw, 0)
+mtf2PrevPL = ta.valuewhen(not na(mtf2PLraw), mtf2PLraw, 1)
 
-// ============================================================
-// CURRENT IDEA — sticky until a new signal of either side fires
-// ============================================================
-var string currentIdea  = "NO TRADE"
-var string currentGrade = ""
-var color  currentColor = color.new(color.gray, 30)
+mtf1Bias   = f_bias(mtf1EmaF, mtf1EmaS, mtf1Close)
+mtf2Bias   = f_bias(mtf2EmaF, mtf2EmaS, mtf2Close)
+mtf1Struct = f_structure(mtf1LastPH, mtf1PrevPH, mtf1LastPL, mtf1PrevPL)
+mtf2Struct = f_structure(mtf2LastPH, mtf2PrevPH, mtf2LastPL, mtf2PrevPL)
 
-if fireLong
-    currentIdea  := "LONG"
-    currentGrade := longGrade
-    currentColor := color.new(color.green, 20)
-if fireShort
-    currentIdea  := "SHORT"
-    currentGrade := shortGrade
-    currentColor := color.new(color.red, 20)
+// ════════════════════════════════════════════════════════════════
+// PREVIOUS DAY OHLC
+// ════════════════════════════════════════════════════════════════
+[pdh, pdl, pdc, pdo] = request.security(syminfo.tickerid, "D",
+    [high[1], low[1], close[1], open[1]], lookahead=barmerge.lookahead_on)
 
-isLongIdea  = currentIdea == "LONG"
-isShortIdea = currentIdea == "SHORT"
+// ════════════════════════════════════════════════════════════════
+// SESSION LEVEL TRACKERS
+// ════════════════════════════════════════════════════════════════
+var float pmHigh    = na
+var float pmLow     = na
+var float onHigh    = na
+var float onLow     = na
+var float openPrint = na
 
-// ============================================================
-// PLOTS — minimal, locale-clean
-// ============================================================
-showResistance = showZones and (not focusMode or isShortIdea)
-showSupport    = showZones and (not focusMode or isLongIdea)
-emasVisible    = showEmas  and not focusMode
+if isNewDay
+    pmHigh := na
+    pmLow  := na
+    onHigh := na
+    onLow  := na
 
-plot(showResistance ? resistance : na, "Resistance", color=color.new(color.red,    65), linewidth=1)
-plot(showSupport    ? support    : na, "Support",    color=color.new(color.green,  65), linewidth=1)
-plot(emasVisible    ? emaFast    : na, "EMA Fast",   color=color.new(color.blue,   75), linewidth=1)
-plot(emasVisible    ? emaSlow    : na, "EMA Slow",   color=color.new(color.purple, 75), linewidth=1)
+if isPreMkt
+    pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
+    pmLow  := na(pmLow)  ? low  : math.min(pmLow,  low)
 
-bgcolor(focusMode ? color.new(#020617, 88) : na)
+if isOvernight
+    onHigh := na(onHigh) ? high : math.max(onHigh, high)
+    onLow  := na(onLow)  ? low  : math.min(onLow,  low)
 
-// ============================================================
-// COACH OVERLAY — top-right state pill
-// ============================================================
-var table coachTable = table.new(position.top_right, 1, 1, border_width=1, border_color=color.new(color.gray, 60))
+if isRegOpen
+    openPrint := open
+
+// ════════════════════════════════════════════════════════════════
+// POC — Volume-by-Price bucket approximation
+// ════════════════════════════════════════════════════════════════
+POC_BUCKETS = 25
+
+var float[] pocBuckets   = array.new<float>(POC_BUCKETS, 0.0)
+var float   pocSessHigh  = na
+var float   pocSessLow   = na
+var float   pocLevelSess = na
+var float   pocLevelPrev = na
+
+if isRegOpen
+    if not na(pocLevelSess)
+        pocLevelPrev := pocLevelSess
+    array.fill(pocBuckets, 0.0)
+    pocSessHigh := high
+    pocSessLow  := low
+
+if isRegMkt
+    pocSessHigh := math.max(nz(pocSessHigh, high), high)
+    pocSessLow  := math.min(nz(pocSessLow,  low),  low)
+    rngPOC = pocSessHigh - pocSessLow
+    if rngPOC > 0
+        nb   = POC_BUCKETS
+        bidx = math.min(nb - 1, math.max(0, math.floor((hlc3 - pocSessLow) / rngPOC * nb)))
+        array.set(pocBuckets, bidx, array.get(pocBuckets, bidx) + volume)
+        maxV = 0.0
+        maxI = 0
+        for i = 0 to nb - 1
+            v = array.get(pocBuckets, i)
+            if v > maxV
+                maxV := v
+                maxI := i
+        pocLevelSess := pocSessLow + (maxI + 0.5) / nb * rngPOC
+
+// Lookback POC: volume-weighted price over N bars (VWAP approximation)
+pocLevelLookback = ta.sma(volume * hlc3, pocLookback) / math.max(ta.sma(volume, pocLookback), 1)
+
+pocLine = (
+    pocType == "Current Session" ? pocLevelSess :
+    pocType == "Previous Day"    ? pocLevelPrev :
+                                   pocLevelLookback)
+
+plot(showPOC ? pocLine : na, "POC",
+     color=color.new(#00BCD4, 70), linewidth=1, style=plot.style_linebr)
+
+// ════════════════════════════════════════════════════════════════
+// RELATIVE VOLUME + EXHAUSTION
+// ════════════════════════════════════════════════════════════════
+avgVol   = ta.sma(volume, 20)
+relVol   = na(avgVol) or avgVol == 0 ? 1.0 : volume / avgVol
+isHighVol = relVol >= 1.5
+isLowVol  = relVol < minRelVol
+
+// Volume spike visual
+plotshape(showRelVol and isHighVol and not focusMode,
+          title="Vol Spike", style=shape.circle, location=location.belowbar,
+          color=color.new(#FFC107, 10), size=size.tiny)
+
+// Momentum exhaustion: 3+ large candles in same direction into a level
+largeBullBody = close > open and (close - open) > atr * 0.5
+largeBearBody = close < open and (open - close) > atr * 0.5
+
+var int bullStreak = 0
+var int bearStreak = 0
+bullStreak := largeBullBody ? bullStreak + 1 : 0
+bearStreak := largeBearBody ? bearStreak + 1 : 0
+
+// Extension far beyond EMA + VWAP
+extAbove = not na(ma1Val) and not na(vwapVal) and close > math.max(ma1Val, vwapVal) * 1.015
+extBelow = not na(ma1Val) and not na(vwapVal) and close < math.min(ma1Val, vwapVal) * 0.985
+
+// ════════════════════════════════════════════════════════════════
+// RIGHT-RAIL INFRASTRUCTURE
+// ════════════════════════════════════════════════════════════════
+RL = 2
+
+var line lPDH = na
+var line lPDL = na
+var line lPDC = na
+var line lPDO = na
+var line lPMH = na
+var line lPML = na
+var line lOP  = na
+var line lONH = na
+var line lONL = na
+
+var label rlPDH  = na
+var label rlPDL  = na
+var label rlPMH  = na
+var label rlPML  = na
+var label rlOP   = na
+var label rlPOC  = na
+var label rlORH  = na
+var label rlORL  = na
+var label orNoteLabel = na
+
+var label rlEntry = na
+var label rlStop  = na
+var label rlTP1   = na
+var label rlTP2   = na
+var label rlTP3   = na
 
 if barstate.islast
-    if showCoach
-        coachText = currentIdea == "NO TRADE" ? "NO TRADE" : currentIdea + " (" + currentGrade + ")"
-        coachBg   = currentIdea == "NO TRADE" ? color.new(color.gray, 30) : currentColor
-        table.cell(coachTable, 0, 0, coachText, text_color=color.white, bgcolor=coachBg, text_size=size.normal)
-    else
-        table.clear(coachTable, 0, 0, 0, 0)
+    label.delete(rlPDH)
+    label.delete(rlPDL)
+    label.delete(rlPMH)
+    label.delete(rlPML)
+    label.delete(rlOP)
+    label.delete(rlPOC)
+    label.delete(rlORH)
+    label.delete(rlORL)
+    label.delete(orNoteLabel)
 
-// ============================================================
-// SIGNAL LABELS — single LONG / SHORT badge per fire
-// ============================================================
-if showSignals and fireLong
-    label.new(bar_index, low,
-              text="LONG " + longGrade,
-              style=label.style_label_up,
-              color=color.new(color.green, 10),
-              textcolor=color.white,
-              size=size.small,
-              yloc=yloc.belowbar)
+    // In focus mode, remove all key level lines so the chart stays clean
+    if focusMode
+        line.delete(lPDH)
+        line.delete(lPDL)
+        line.delete(lPDC)
+        line.delete(lPDO)
+        line.delete(lPMH)
+        line.delete(lPML)
+        line.delete(lOP)
+        line.delete(lONH)
+        line.delete(lONL)
 
-if showSignals and fireShort
-    label.new(bar_index, high,
-              text="SHORT " + shortGrade,
-              style=label.style_label_down,
-              color=color.new(color.red, 10),
-              textcolor=color.white,
-              size=size.small,
-              yloc=yloc.abovebar)
+    if showPDH and not na(pdh) and not focusMode
+        line.delete(lPDH)
+        lPDH  := line.new(bar_index - lookback, pdh, bar_index, pdh,
+                  color=color.new(#EF5350, 60), width=1,
+                  style=line.style_dashed, extend=extend.right)
+        rlPDH := label.new(bar_index + RL, pdh, "PDH  " + pFmt(pdh),
+                  style=label.style_label_left,
+                  color=color.new(#EF5350, 88),
+                  textcolor=color.new(#EF5350, 5), size=size.tiny)
 
-// ============================================================
-// TRADE LEVEL LINES — re-drawn on each new signal
-// ============================================================
-var line entryLine  = na
-var line stopLine   = na
-var line tp1Line    = na
-var line tp2Line    = na
-var line runnerLine = na
+    if showPDL and not na(pdl) and not focusMode
+        line.delete(lPDL)
+        lPDL  := line.new(bar_index - lookback, pdl, bar_index, pdl,
+                  color=color.new(#26A69A, 60), width=1,
+                  style=line.style_dashed, extend=extend.right)
+        rlPDL := label.new(bar_index + RL, pdl, "PDL  " + pFmt(pdl),
+                  style=label.style_label_left,
+                  color=color.new(#26A69A, 88),
+                  textcolor=color.new(#26A69A, 5), size=size.tiny)
 
-if showTradeLevels and (fireLong or fireShort)
-    line.delete(entryLine)
-    line.delete(stopLine)
-    line.delete(tp1Line)
-    line.delete(tp2Line)
-    line.delete(runnerLine)
+    if showPDC and not na(pdc) and not focusMode
+        line.delete(lPDC)
+        lPDC := line.new(bar_index - lookback, pdc, bar_index, pdc,
+                 color=color.new(color.gray, 60), width=1,
+                 style=line.style_dotted, extend=extend.right)
 
-    eVal  = fireLong ? longEntry  : shortEntry
-    sVal  = fireLong ? longStop   : shortStop
-    t1Val = fireLong ? longTp1    : shortTp1
-    t2Val = fireLong ? longTp2    : shortTp2
-    rnVal = fireLong ? longRunner : shortRunner
+    if showPDO and not na(pdo) and not focusMode
+        line.delete(lPDO)
+        lPDO := line.new(bar_index - lookback, pdo, bar_index, pdo,
+                 color=color.new(color.gray, 68), width=1,
+                 style=line.style_dotted, extend=extend.right)
 
-    entryLine  := line.new(bar_index, eVal,  bar_index + 1, eVal,  color=color.new(color.yellow, 10), width=1, style=line.style_solid,  extend=extend.right)
-    stopLine   := line.new(bar_index, sVal,  bar_index + 1, sVal,  color=color.new(color.red,    20), width=1, style=line.style_dashed, extend=extend.right)
-    tp1Line    := line.new(bar_index, t1Val, bar_index + 1, t1Val, color=color.new(color.green,  30), width=1, style=line.style_dotted, extend=extend.right)
-    tp2Line    := line.new(bar_index, t2Val, bar_index + 1, t2Val, color=color.new(color.green,  10), width=1, style=line.style_dotted, extend=extend.right)
-    runnerLine := line.new(bar_index, rnVal, bar_index + 1, rnVal, color=color.new(color.aqua,   40), width=1, style=line.style_dotted, extend=extend.right)
+    if showPMH and not na(pmHigh) and not focusMode
+        line.delete(lPMH)
+        lPMH  := line.new(bar_index - lookback, pmHigh, bar_index, pmHigh,
+                  color=color.new(#FF7043, 55), width=1,
+                  style=line.style_dotted, extend=extend.right)
+        rlPMH := label.new(bar_index + RL, pmHigh, "PMH  " + pFmt(pmHigh),
+                  style=label.style_label_left,
+                  color=color.new(#FF7043, 88),
+                  textcolor=color.new(#FF7043, 5), size=size.tiny)
 
-if not showTradeLevels
-    line.delete(entryLine)
-    line.delete(stopLine)
-    line.delete(tp1Line)
-    line.delete(tp2Line)
-    line.delete(runnerLine)
+    if showPML and not na(pmLow) and not focusMode
+        line.delete(lPML)
+        lPML  := line.new(bar_index - lookback, pmLow, bar_index, pmLow,
+                  color=color.new(#FF7043, 55), width=1,
+                  style=line.style_dotted, extend=extend.right)
+        rlPML := label.new(bar_index + RL, pmLow, "PML  " + pFmt(pmLow),
+                  style=label.style_label_left,
+                  color=color.new(#FF7043, 88),
+                  textcolor=color.new(#FF7043, 5), size=size.tiny)
 
-// ============================================================
-// ALERTS — pure string concatenation only
-// ============================================================
-ts = str.tostring(time)
+    if showOP and not na(openPrint) and not focusMode
+        line.delete(lOP)
+        lOP  := line.new(bar_index - lookback, openPrint, bar_index, openPrint,
+                 color=color.new(color.yellow, 40), width=1,
+                 style=line.style_solid, extend=extend.right)
+        rlOP := label.new(bar_index + RL, openPrint, "OP  " + pFmt(openPrint),
+                 style=label.style_label_left,
+                 color=color.new(color.yellow, 88),
+                 textcolor=color.new(color.yellow, 5), size=size.tiny)
 
-if sendPriceUpdate
-    alert('{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"timeframe":"' + timeframe.period + '","open":' + str.tostring(open) + ',"high":' + str.tostring(high) + ',"low":' + str.tostring(low) + ',"close":' + str.tostring(close) + ',"volume":' + str.tostring(volume) + ',"signal":"price_update","timestamp":"' + ts + '"}', alert.freq_once_per_bar_close)
+    if showONH and not na(onHigh) and not focusMode
+        line.delete(lONH)
+        lONH := line.new(bar_index - lookback, onHigh, bar_index, onHigh,
+                 color=color.new(#607D8B, 60), width=1,
+                 style=line.style_dotted, extend=extend.right)
+
+    if showONL and not na(onLow) and not focusMode
+        line.delete(lONL)
+        lONL := line.new(bar_index - lookback, onLow, bar_index, onLow,
+                 color=color.new(#607D8B, 60), width=1,
+                 style=line.style_dotted, extend=extend.right)
+
+    if showPOC and not na(pocLine)
+        rlPOC := label.new(bar_index + RL, pocLine, "POC  " + pFmt(pocLine),
+                  style=label.style_label_left,
+                  color=color.new(color.black, 15),
+                  textcolor=color.white, size=size.small)
+
+// ════════════════════════════════════════════════════════════════
+// SUPPLY / DEMAND ZONES
+// ════════════════════════════════════════════════════════════════
+pivHigh  = ta.pivothigh(high, zonePivotLen, zonePivotLen)
+pivLow   = ta.pivotlow(low,  zonePivotLen, zonePivotLen)
+zoneH    = atr * 0.35
+maxZones = 6
+
+SC_BG_ACT = color.new(#EF5350, 88)
+SC_BG_DIM = color.new(#EF5350, 94)
+SC_BD_ACT = color.new(#EF5350, 60)
+SC_BD_DIM = color.new(#EF5350, 82)
+DC_BG_ACT = color.new(#26A69A, 88)
+DC_BG_DIM = color.new(#26A69A, 94)
+DC_BD_ACT = color.new(#26A69A, 60)
+DC_BD_DIM = color.new(#26A69A, 82)
+
+var box[] supplyBoxes = array.new<box>()
+var box[] demandBoxes = array.new<box>()
+
+if showZones and not focusMode and not na(pivHigh)
+    zTop = pivHigh + zoneH * 0.25
+    zBot = pivHigh - zoneH * 0.75
+    overlaps = false
+    if not allowOverlap and array.size(supplyBoxes) > 0
+        for i = 0 to array.size(supplyBoxes) - 1
+            b = array.get(supplyBoxes, i)
+            if not na(b) and zTop >= box.get_bottom(b) and zBot <= box.get_top(b)
+                overlaps := true
+                break
+    if not overlaps
+        if array.size(supplyBoxes) >= maxZones
+            box.delete(array.shift(supplyBoxes))
+        array.push(supplyBoxes,
+            box.new(bar_index - zonePivotLen * 2, zTop, bar_index - zonePivotLen, zBot,
+                    border_color=SC_BD_DIM, bgcolor=SC_BG_DIM, border_width=1, extend=extend.right))
+
+if showZones and not focusMode and not na(pivLow)
+    zTop = pivLow + zoneH * 0.75
+    zBot = pivLow - zoneH * 0.25
+    overlaps = false
+    if not allowOverlap and array.size(demandBoxes) > 0
+        for i = 0 to array.size(demandBoxes) - 1
+            b = array.get(demandBoxes, i)
+            if not na(b) and zTop >= box.get_bottom(b) and zBot <= box.get_top(b)
+                overlaps := true
+                break
+    if not overlaps
+        if array.size(demandBoxes) >= maxZones
+            box.delete(array.shift(demandBoxes))
+        array.push(demandBoxes,
+            box.new(bar_index - zonePivotLen * 2, zTop, bar_index - zonePivotLen, zBot,
+                    border_color=DC_BD_DIM, bgcolor=DC_BG_DIM, border_width=1, extend=extend.right))
+
+if focusMode
+    if array.size(supplyBoxes) > 0
+        for _ci = array.size(supplyBoxes) - 1 to 0
+            box.delete(array.get(supplyBoxes, _ci))
+        array.clear(supplyBoxes)
+    if array.size(demandBoxes) > 0
+        for _ci = array.size(demandBoxes) - 1 to 0
+            box.delete(array.get(demandBoxes, _ci))
+        array.clear(demandBoxes)
+else
+    if array.size(supplyBoxes) > 0
+        for i = array.size(supplyBoxes) - 1 to 0
+            b = array.get(supplyBoxes, i)
+            if not na(b)
+                bTop = box.get_top(b)
+                bBot = box.get_bottom(b)
+                if (mitigationType == "Wicks" ? high >= bBot : close >= bBot)
+                    box.delete(b)
+                    array.remove(supplyBoxes, i)
+                else
+                    near = close >= bBot - atr * 2 and close <= bTop + atr
+                    box.set_bgcolor(b,      near ? SC_BG_ACT : SC_BG_DIM)
+                    box.set_border_color(b, near ? SC_BD_ACT : SC_BD_DIM)
+
+    if array.size(demandBoxes) > 0
+        for i = array.size(demandBoxes) - 1 to 0
+            b = array.get(demandBoxes, i)
+            if not na(b)
+                bTop = box.get_top(b)
+                bBot = box.get_bottom(b)
+                if (mitigationType == "Wicks" ? low <= bTop : close <= bTop)
+                    box.delete(b)
+                    array.remove(demandBoxes, i)
+                else
+                    near = close >= bBot - atr and close <= bTop + atr * 2
+                    box.set_bgcolor(b,      near ? DC_BG_ACT : DC_BG_DIM)
+                    box.set_border_color(b, near ? DC_BD_ACT : DC_BD_DIM)
+
+// ════════════════════════════════════════════════════════════════
+// FAIR VALUE GAPS — Institutional quality system
+// ════════════════════════════════════════════════════════════════
+// Colors: soft teal-green for bullish, soft red for bearish
+// Transparency: 88% fill (very subtle), 68% border (visible edge)
+FVG_BULL_FILL   = color.new(#26C6DA, 92)
+FVG_BULL_BORDER = color.new(#26C6DA, 75)
+FVG_BEAR_FILL   = color.new(#EF5350, 92)
+FVG_BEAR_BORDER = color.new(#EF5350, 76)
+FVG_BULL_FADE   = color.new(#26C6DA, 96)
+FVG_BULL_BFADE  = color.new(#26C6DA, 88)
+FVG_BEAR_FADE   = color.new(#EF5350, 96)
+FVG_BEAR_BFADE  = color.new(#EF5350, 88)
+
+// FVG quality score 0–100.
+// Inputs: gap size, displacement body, relVol, is bullish FVG.
+// Factors: gap/ATR (25), displacement/ATR (25), relVol (20), trend align (20), session (10).
+f_fvgScore(gapSize, dispBody, rv, isBull) =>
+    safeAtr = math.max(atr, syminfo.mintick)
+    s_gap  = (gapSize / safeAtr >= 1.5 ? 25.0 :
+             gapSize / safeAtr >= 1.0 ? 18.0 :
+             gapSize / safeAtr >= 0.7 ? 12.0 :
+             gapSize / safeAtr >= 0.5 ?  8.0 : 0.0)
+    s_disp = (dispBody / safeAtr >= 1.2 ? 25.0 :
+             dispBody / safeAtr >= 0.9 ? 18.0 :
+             dispBody / safeAtr >= 0.6 ? 12.0 : 0.0)
+    s_vol  = rv >= 2.0 ? 20.0 : rv >= 1.5 ? 15.0 : rv >= 1.1 ? 10.0 : rv >= 0.7 ? 5.0 : 0.0
+    trendOk  = isBull ? htfBullish : htfBearish
+    trendNeut = not htfBullish and not htfBearish
+    s_trend = trendOk ? 20.0 : trendNeut ? 10.0 : 0.0
+    s_sess  = (isNYOpen or isPwrHour) ? 10.0 : isMidday ? 0.0 : 5.0
+    math.min(100.0, s_gap + s_disp + s_vol + s_trend + s_sess)
+
+f_fvgGrade(score) =>
+    score >= 85.0 ? "A" : score >= 70.0 ? "B" : "Weak"
+
+f_fvgQualOk(score) =>
+    (minFVGQuality == "A"   ? score >= 85.0 :
+     minFVGQuality == "B"   ? score >= 70.0 :
+     true)
+
+bullFVGFound = low > high[2]
+bearFVGFound = high < low[2]
+fvgMinSize   = close * minFVGPct / 100.0
+
+// Parallel score arrays — same index as the corresponding box array.
+var box[]   bullFVGs      = array.new<box>()
+var float[] bullFVGScores = array.new<float>()
+var box[]   bearFVGs      = array.new<box>()
+var float[] bearFVGScores = array.new<float>()
+
+// Displacement candle is bar[-1] (the candle that created the gap momentum).
+dispBody1 = math.abs(close[1] - open[1])
+
+// ── Bullish FVG creation ─────────────────────────────────────────
+if showFVG and bullFVGFound and (low - high[2]) >= fvgMinSize
+    gapSz = low - high[2]
+    rv1   = nz(relVol, 1.0)
+    // Quality pre-filter: displacement body + volume
+    if dispBody1 >= atr * 0.6 and (rv1 >= 1.1 or dispBody1 >= atr * 0.7)
+        sc = f_fvgScore(gapSz, dispBody1, rv1, true)
+        if f_fvgQualOk(sc)
+            if array.size(bullFVGs) >= maxActiveFVGs
+                box.delete(array.shift(bullFVGs))
+                array.shift(bullFVGScores)
+            lbl = showFVGLabels ? "FVG " + f_fvgGrade(sc) : ""
+            array.push(bullFVGs, box.new(bar_index - 2, low, bar_index + fvgExpirationBars, high[2],
+                    border_color=FVG_BULL_BORDER, bgcolor=FVG_BULL_FILL, border_width=1,
+                    text=lbl, text_size=size.tiny,
+                    text_color=color.new(#26C6DA, 55),
+                    text_halign=text.align_center, text_valign=text.align_center))
+            array.push(bullFVGScores, sc)
+            if showFVG50
+                line.new(bar_index - 2, (low + high[2]) / 2.0,
+                         bar_index + fvgExpirationBars, (low + high[2]) / 2.0,
+                         color=color.new(#26C6DA, 70), style=line.style_dotted)
+
+// ── Bearish FVG creation ─────────────────────────────────────────
+if showFVG and bearFVGFound and (low[2] - high) >= fvgMinSize
+    gapSz = low[2] - high
+    rv1   = nz(relVol, 1.0)
+    if dispBody1 >= atr * 0.6 and (rv1 >= 1.1 or dispBody1 >= atr * 0.7)
+        sc = f_fvgScore(gapSz, dispBody1, rv1, false)
+        if f_fvgQualOk(sc)
+            if array.size(bearFVGs) >= maxActiveFVGs
+                box.delete(array.shift(bearFVGs))
+                array.shift(bearFVGScores)
+            lbl = showFVGLabels ? "FVG " + f_fvgGrade(sc) : ""
+            array.push(bearFVGs, box.new(bar_index - 2, low[2], bar_index + fvgExpirationBars, high,
+                    border_color=FVG_BEAR_BORDER, bgcolor=FVG_BEAR_FILL, border_width=1,
+                    text=lbl, text_size=size.tiny,
+                    text_color=color.new(#EF5350, 55),
+                    text_halign=text.align_center, text_valign=text.align_center))
+            array.push(bearFVGScores, sc)
+            if showFVG50
+                line.new(bar_index - 2, (low[2] + high) / 2.0,
+                         bar_index + fvgExpirationBars, (low[2] + high) / 2.0,
+                         color=color.new(#EF5350, 70), style=line.style_dotted)
+
+// ── FVG lifecycle: expire, fill, fade ────────────────────────────
+if showFVG and array.size(bullFVGs) > 0
+    for i = array.size(bullFVGs) - 1 to 0
+        b = array.get(bullFVGs, i)
+        if not na(b)
+            bTop = box.get_top(b)
+            bBot = box.get_bottom(b)
+            expired = bar_index > box.get_right(b)
+            filled  = removeFilled and low <= bBot
+            if expired or filled
+                box.delete(b)
+                array.remove(bullFVGs, i)
+                array.remove(bullFVGScores, i)
+            else if close >= bBot and close <= bTop
+                box.set_bgcolor(b,      color.new(#26C6DA, 78))
+                box.set_border_color(b, color.new(#26C6DA, 40))
+            else if fadeMitigated and low <= bTop
+                box.set_bgcolor(b,      FVG_BULL_FADE)
+                box.set_border_color(b, FVG_BULL_BFADE)
+            else
+                box.set_bgcolor(b,      FVG_BULL_FILL)
+                box.set_border_color(b, FVG_BULL_BORDER)
+
+if showFVG and array.size(bearFVGs) > 0
+    for i = array.size(bearFVGs) - 1 to 0
+        b = array.get(bearFVGs, i)
+        if not na(b)
+            bTop = box.get_top(b)
+            bBot = box.get_bottom(b)
+            expired = bar_index > box.get_right(b)
+            filled  = removeFilled and high >= bTop
+            if expired or filled
+                box.delete(b)
+                array.remove(bearFVGs, i)
+                array.remove(bearFVGScores, i)
+            else if close >= bBot and close <= bTop
+                box.set_bgcolor(b,      color.new(#EF5350, 78))
+                box.set_border_color(b, color.new(#EF5350, 40))
+            else if fadeMitigated and high >= bBot
+                box.set_bgcolor(b,      FVG_BEAR_FADE)
+                box.set_border_color(b, FVG_BEAR_BFADE)
+            else
+                box.set_bgcolor(b,      FVG_BEAR_FILL)
+                box.set_border_color(b, FVG_BEAR_BORDER)
+
+// ════════════════════════════════════════════════════════════════
+// OPENING RANGE
+// ════════════════════════════════════════════════════════════════
+orMinsNum    = orMinutes == "5" ? 5 : orMinutes == "15" ? 15 : 30
+tfMins       = timeframe.isintraday ? timeframe.multiplier : 1440
+orBarsNeeded = math.max(1, math.ceil(orMinsNum / tfMins))
+
+var float orHigh     = na
+var float orLow      = na
+var int   orStartBar = na
+var bool  orComplete = false
+var bool  orBroken   = false
+var box   orBox      = na
+var line  orMidLine  = na
+var label orBrkLabel = na
+
+if isRegOpen
+    orHigh := high
+    orLow := low
+    orStartBar := bar_index
+    orComplete := false
+    orBroken := false
+    label.delete(orBrkLabel)
+    orBrkLabel := na
+    if removePrevOR
+        box.delete(orBox)
+        line.delete(orMidLine)
+        orBox := na
+        orMidLine := na
+
+barsInto = na(orStartBar) ? na : bar_index - orStartBar
+
+if not na(barsInto) and barsInto < orBarsNeeded and not orComplete
+    orHigh := math.max(orHigh, high)
+    orLow  := math.min(orLow,  low)
+
+if not na(barsInto) and barsInto == orBarsNeeded and not orComplete
+    orComplete := true
+    if showOR
+        box.delete(orBox)
+        orBox := box.new(orStartBar, orHigh, bar_index, orLow,
+                         border_color=color.new(#FFC107, 55),
+                         bgcolor=color.new(#FFC107, 93),
+                         border_width=2, extend=extend.right)
+        if showORMid and not na(orHigh) and not na(orLow)
+            line.delete(orMidLine)
+            orMidLine := line.new(orStartBar, (orHigh + orLow) * 0.5,
+                         bar_index + 1, (orHigh + orLow) * 0.5,
+                         color=color.new(#FFC107, 72), width=1,
+                         style=line.style_dotted, extend=extend.right)
+
+if orComplete and stopAfterBreak and not orBroken and not na(orHigh)
+    if close > orHigh or close < orLow
+        orBroken := true
+        if not na(orBox)
+            box.set_extend(orBox, extend.none)
+        if not na(orMidLine)
+            line.set_extend(orMidLine, extend.none)
+
+orBreakLong  = orComplete and not orBroken and not na(orHigh) and close > orHigh and close[1] <= nz(orHigh[1], orHigh)
+orBreakShort = orComplete and not orBroken and not na(orLow)  and close < orLow  and close[1] >= nz(orLow[1],  orLow)
+
+// OR retest: after break, price returns near ORH/ORL (tests it as new S/R)
+orRetestHigh = showOR and orBroken and not na(orHigh) and close > orHigh - atr * 0.5 and close < orHigh + atr * 0.3
+orRetestLow  = showOR and orBroken and not na(orLow)  and close < orLow  + atr * 0.5 and close > orLow  - atr * 0.3
+
+plotshape(orRetestHigh, "OR Retest H",
+          style=shape.diamond, location=location.abovebar,
+          color=color.new(#FFC107, 45), size=size.tiny)
+plotshape(orRetestLow, "OR Retest L",
+          style=shape.diamond, location=location.belowbar,
+          color=color.new(#FFC107, 45), size=size.tiny)
+
+if showOR and orBreakLong and na(orBrkLabel)
+    orBrkLabel := label.new(bar_index, orHigh, "OR Break ↑",
+                  style=label.style_label_down,
+                  color=color.new(#FFC107, 65), textcolor=color.white,
+                  size=size.small, yloc=yloc.price)
+if showOR and orBreakShort and na(orBrkLabel)
+    orBrkLabel := label.new(bar_index, orLow, "OR Break ↓",
+                  style=label.style_label_up,
+                  color=color.new(#FFC107, 65), textcolor=color.white,
+                  size=size.small, yloc=yloc.price)
+
+// ── OR right-rail labels + forming note (runs after OR state is set) ─
+if barstate.islast
+    label.delete(rlORH)
+    label.delete(rlORL)
+    label.delete(orNoteLabel)
+    if showOR and orComplete and not na(orHigh) and not na(orLow)
+        rlORH := label.new(bar_index + RL, orHigh, "ORH  " + pFmt(orHigh),
+                  style=label.style_label_left,
+                  color=color.new(#FFC107, 86),
+                  textcolor=color.new(#FFC107, 0), size=size.tiny)
+        rlORL := label.new(bar_index + RL, orLow, "ORL  " + pFmt(orLow),
+                  style=label.style_label_left,
+                  color=color.new(#FFC107, 86),
+                  textcolor=color.new(#FFC107, 0), size=size.tiny)
+    if showOR and not orComplete and isRegMkt
+        orNoteLabel := label.new(bar_index, high, "No trading  —  OR forming",
+                       style=label.style_label_down,
+                       color=color.new(#FFC107, 82),
+                       textcolor=color.new(#FFC107, 5), size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════
+// SIGNAL ENGINE  v9 — hard veto system, FVG quality scoring
+// All conditions evaluate on confirmed close (series values)
+// ════════════════════════════════════════════════════════════════
+support      = ta.lowest(low,   lookback)
+resist       = ta.highest(high, lookback)
+highestClose = ta.highest(close, lookback)
+lowestClose  = ta.lowest(close,  lookback)
+highestHigh3 = ta.highest(high, 3)
+lowestLow3   = ta.lowest(low,  3)
+priorSup = nz(support[1], support)
+priorRes = nz(resist[1],  resist)
+
+emaFast = ma1Val
+emaSlow = ma2Val
+
+// Current TF bias + multi-TF alignment
+curBias    = f_bias(emaFast, emaSlow, close)
+allBull    = curBias == "Bull" and mtf1Bias == "Bull" and mtf2Bias == "Bull"
+allBear    = curBias == "Bear" and mtf1Bias == "Bear" and mtf2Bias == "Bear"
+twoBull    = not allBull and ((curBias == "Bull" and mtf1Bias == "Bull") or (curBias == "Bull" and mtf2Bias == "Bull") or (mtf1Bias == "Bull" and mtf2Bias == "Bull"))
+twoBear    = not allBear and ((curBias == "Bear" and mtf1Bias == "Bear") or (curBias == "Bear" and mtf2Bias == "Bear") or (mtf1Bias == "Bear" and mtf2Bias == "Bear"))
+overallBias = allBull ? "BULL" : allBear ? "BEAR" : twoBull ? "BULL LEAN" : twoBear ? "BEAR LEAN" : "MIXED"
+
+rng      = math.max(priorRes - priorSup, syminfo.mintick * 4)
+zoneW    = rng * 0.025
+nearSup  = math.abs(close - priorSup) <= rng * 0.18
+nearRes  = math.abs(close - priorRes) <= rng * 0.18
+midRange = close > priorSup + rng * 0.30 and close < priorRes - rng * 0.30
+
+barRng = math.max(high - low, syminfo.mintick)
+body   = math.abs(close - open)
+lWick  = math.min(open, close) - low
+uWick  = high - math.max(open, close)
+
+bullBar = close > open
+bearBar = close < open
+strongBullRej = bullBar and lWick >= body and lWick >= barRng * 0.4
+strongBearRej = bearBar and uWick >= body and uWick >= barRng * 0.4
+closeTopPct   = (close - low)  >= barRng * 0.65
+closeBotPct   = (high - close) >= barRng * 0.65
+
+chop     = barRng < atr * 0.5
+narrowSR = rng    < atr * 3.0
+
+oldRes = priorRes[lookback]
+oldSup = priorSup[lookback]
+
+brokeAbove = not na(oldRes) and oldRes > 0 and resist       > oldRes
+brokeBelow = not na(oldSup) and oldSup > 0 and support      < oldSup
+cleanUp    = brokeAbove and highestClose >= oldRes + buf
+cleanDown  = brokeBelow and lowestClose  <= oldSup - buf
+
+longBounce  = nearSup and strongBullRej and closeTopPct and low  <= priorSup + zoneW * 4
+longRetest  = cleanUp  and bullBar      and closeTopPct and math.abs(close - oldRes) <= rng * 0.10 and close >= oldRes
+shortReject = nearRes  and strongBearRej and closeBotPct and high >= priorRes - zoneW * 4
+shortRetest = cleanDown and bearBar     and closeBotPct and math.abs(close - oldSup) <= rng * 0.10 and close <= oldSup
+
+longFired  = longBounce  or longRetest
+shortFired = shortReject or shortRetest
+longWhy  = longBounce  ? "support bounce"       : longRetest  ? "breakout retest"  : ""
+shortWhy = shortReject ? "resistance rejection" : shortRetest ? "breakdown retest" : ""
+
+// ── Liquidity sweep detection for better stop placement ──────────
+sweptSup = lowestLow3   < priorSup - zoneW and close > priorSup
+sweptRes = highestHigh3 > priorRes + zoneW and close < priorRes
+
+// Wick sweep markers — context layer, hidden in Focus Mode
+plotshape(sweptSup and not focusMode, "Swept Sup",
+          style=shape.triangleup, location=location.belowbar,
+          color=color.new(#00BFA5, 20), size=size.tiny)
+plotshape(sweptRes and not focusMode, "Swept Res",
+          style=shape.triangledown, location=location.abovebar,
+          color=color.new(#EF5350, 20), size=size.tiny)
+
+tickBuf     = syminfo.mintick * slBufferTicks
+longEntry   = close
+longStop    = (slType == "ATR"   ? close - atr * 1.5 :
+              sweptSup          ? lowestLow3 - buf :
+                                  priorSup - buf - tickBuf)
+longRisk    = math.max(longEntry - longStop, syminfo.mintick)
+longTP1     = longEntry + longRisk * tp1RR
+longTP2     = longEntry + longRisk * tp2RR
+longTP3     = longEntry + longRisk * tp3RR
+longRR      = (priorRes - longEntry) / longRisk
+
+shortEntry  = close
+shortStop   = (slType == "ATR"   ? close + atr * 1.5 :
+              sweptRes          ? highestHigh3 + buf :
+                                  priorRes + buf + tickBuf)
+shortRisk   = math.max(shortStop - shortEntry, syminfo.mintick)
+shortTP1    = shortEntry - shortRisk * tp1RR
+shortTP2    = shortEntry - shortRisk * tp2RR
+shortTP3    = shortEntry - shortRisk * tp3RR
+shortRR     = (shortEntry - priorSup) / shortRisk
+
+// ── Setup type classification ─────────────────────────────────────
+lTrapReclaim  = longFired  and sweptSup and close > priorSup
+sTrapReclaim  = shortFired and sweptRes and close < priorRes
+
+// Trap reclaim markers — high-confidence reversal, visible even in Focus Mode
+plotshape(lTrapReclaim and showSignals, "Reclaim ↑",
+          style=shape.circle, location=location.belowbar,
+          color=color.new(#00BFA5, 30), size=size.tiny)
+plotshape(sTrapReclaim and showSignals, "Reclaim ↓",
+          style=shape.circle, location=location.abovebar,
+          color=color.new(#EF5350, 30), size=size.tiny)
+
+lContinuation = longFired  and emaFast > emaSlow and math.abs(close - emaFast) <= atr * 0.8 and not lTrapReclaim
+sContinuation = shortFired and emaFast < emaSlow and math.abs(close - emaFast) <= atr * 0.8 and not sTrapReclaim
+lBreakout     = longRetest  and not lTrapReclaim
+sBreakout     = shortRetest and not sTrapReclaim
+lReversal     = longFired   and emaFast < emaSlow
+sReversal     = shortFired  and emaFast > emaSlow
+
+lSetupType = (
+    lTrapReclaim  ? "Trap Reclaim" :
+    lContinuation ? "Continuation" :
+    lBreakout     ? "Breakout"     :
+    lReversal     ? "Reversal"     : "S/R Bounce")
+
+sSetupType = (
+    sTrapReclaim  ? "Trap Reclaim" :
+    sContinuation ? "Continuation" :
+    sBreakout     ? "Breakout"     :
+    sReversal     ? "Reversal"     : "S/R Bounce")
+
+// ── BASE SCORE (max 80) ────────────────────────────────────────────
+lBase = (nearSup  ? 20.0 : 0.0)
+      + (emaFast > emaSlow ? 15.0 : emaFast < emaSlow ? 0.0 : 8.0)
+      + (longRR  >= 2.0 ? 20.0 : longRR  >= 1.5 ? 14.0 : longRR  >= 1.0 ? 8.0 : 0.0)
+      + (midRange ? 0.0 : 10.0)
+      + (longFired  ? 15.0 : 0.0)
+
+sBase = (nearRes  ? 20.0 : 0.0)
+      + (emaFast < emaSlow ? 15.0 : emaFast > emaSlow ? 0.0 : 8.0)
+      + (shortRR >= 2.0 ? 20.0 : shortRR >= 1.5 ? 14.0 : shortRR >= 1.0 ? 8.0 : 0.0)
+      + (midRange ? 0.0 : 10.0)
+      + (shortFired ? 15.0 : 0.0)
+
+// ── SESSION ADJUSTMENT ────────────────────────────────────────────
+sessAdj = (applySessionScore ?
+    (isNYOpen    ?  8.0 : isPwrHour  ?  8.0 :
+     isMidday    ? -15.0 : isPreMkt   ? -8.0 :
+     isOvernight ? -18.0 : 0.0) : 0.0)
+
+// ── MTF ADJUSTMENT (3-TF alignment weighted) ──────────────────────
+lMTFAdj = (
+    not useMTF ? 0.0 :
+    allBull    ?  18.0 :
+    twoBull    ?  10.0 :
+    htfBullish ?   6.0 :
+    allBear    ? -28.0 :
+    twoBear    ? -18.0 :
+    htfBearish ? -20.0 : 0.0)
+
+sMTFAdj = (
+    not useMTF ? 0.0 :
+    allBear    ?  18.0 :
+    twoBear    ?  10.0 :
+    htfBearish ?   6.0 :
+    allBull    ? -28.0 :
+    twoBull    ? -18.0 :
+    htfBullish ? -20.0 : 0.0)
+
+// ── VOLUME ADJUSTMENT ─────────────────────────────────────────────
+lVolAdj = not useVolFilter ? 0.0 : isHighVol ?  8.0 : isLowVol ? -8.0 : 0.0
+sVolAdj = lVolAdj
+
+// ── SETUP TYPE ADJUSTMENT ─────────────────────────────────────────
+lTypeAdj = lTrapReclaim ? 12.0 : lContinuation ? 8.0 : lReversal ? -10.0 : 0.0
+sTypeAdj = sTrapReclaim ? 12.0 : sContinuation ? 8.0 : sReversal ? -10.0 : 0.0
+
+// ── POC ADJUSTMENT ────────────────────────────────────────────────
+pocNearL     = not na(pocLine) and math.abs(close - pocLine) < atr * 0.5
+pocReclaimL  = not na(pocLine) and close > pocLine and low[1] < pocLine
+pocReclaimS  = not na(pocLine) and close < pocLine and high[1] > pocLine
+pocChop      = not na(pocLine) and math.abs(close - pocLine) < atr * 0.3
+lPOCAdj      = pocReclaimL ? 8.0 : pocNearL ? 4.0 : pocChop ? -8.0 : 0.0
+sPOCAdj      = pocReclaimS ? 8.0 : pocNearL ? 4.0 : pocChop ? -8.0 : 0.0
+
+// ── FVG CONFLUENCE SCORING (quality-aware) ────────────────────────
+// Find nearest FVG (runs every bar for webhook accuracy).
+var float nearFvgTop   = na
+var float nearFvgBot   = na
+var string nearFvgTyp  = "none"
+var float  nearFvgScor = 0.0
+var string nearFvgGrd  = "Weak"
+
+nearFvgTop  := na
+nearFvgBot  := na
+nearFvgTyp  := "none"
+nearFvgScor := 0.0
+nearFvgGrd  := "Weak"
+_nfDist = 999999.0
+if array.size(bullFVGs) > 0
+    for _i = 0 to array.size(bullFVGs) - 1
+        _b = array.get(bullFVGs, _i)
+        if not na(_b)
+            _mid = (box.get_top(_b) + box.get_bottom(_b)) / 2.0
+            _d   = math.abs(_mid - close)
+            if _d < _nfDist
+                _nfDist    := _d
+                nearFvgTop  := box.get_top(_b)
+                nearFvgBot  := box.get_bottom(_b)
+                nearFvgTyp  := "bullish"
+                nearFvgScor := array.size(bullFVGScores) > _i ? array.get(bullFVGScores, _i) : 0.0
+                nearFvgGrd  := f_fvgGrade(nearFvgScor)
+if array.size(bearFVGs) > 0
+    for _i = 0 to array.size(bearFVGs) - 1
+        _b = array.get(bearFVGs, _i)
+        if not na(_b)
+            _mid = (box.get_top(_b) + box.get_bottom(_b)) / 2.0
+            _d   = math.abs(_mid - close)
+            if _d < _nfDist
+                _nfDist    := _d
+                nearFvgTop  := box.get_top(_b)
+                nearFvgBot  := box.get_bottom(_b)
+                nearFvgTyp  := "bearish"
+                nearFvgScor := array.size(bearFVGScores) > _i ? array.get(bearFVGScores, _i) : 0.0
+                nearFvgGrd  := f_fvgGrade(nearFvgScor)
+
+// FVG confluence adjustments using quality score.
+// Long: boost if bullish FVG below/at entry and price reclaiming.
+// Short: boost if bearish FVG above entry and price rejecting.
+// Downgrade if opposing FVG blocks path to TP1.
+lFVGBlock = false
+sFVGBlock = false
+lFVGBoost = false
+sFVGBoost = false
+
+if array.size(bearFVGs) > 0
+    for i = 0 to array.size(bearFVGs) - 1
+        b = array.get(bearFVGs, i)
+        if not na(b) and box.get_bottom(b) > longEntry and box.get_top(b) < longTP1
+            lFVGBlock := true
+            break
+if array.size(bullFVGs) > 0
+    for i = 0 to array.size(bullFVGs) - 1
+        b = array.get(bullFVGs, i)
+        if not na(b) and box.get_top(b) < shortEntry and box.get_bottom(b) > shortTP1
+            sFVGBlock := true
+            break
+
+// Bullish FVG near/below entry = confluence for long
+if nearFvgTyp == "bullish" and not na(nearFvgBot) and nearFvgBot <= longEntry and nearFvgTop >= longEntry - atr * 1.5
+    lFVGBoost := true
+// Bearish FVG near/above entry = confluence for short
+if nearFvgTyp == "bearish" and not na(nearFvgTop) and nearFvgTop >= shortEntry and nearFvgBot <= shortEntry + atr * 1.5
+    sFVGBoost := true
+
+fvgQualMult = nearFvgScor / 100.0
+lFVGAdj = lFVGBoost ? 8.0 * fvgQualMult : lFVGBlock ? -6.0 : 0.0
+sFVGAdj = sFVGBoost ? 8.0 * fvgQualMult : sFVGBlock ? -6.0 : 0.0
+
+// ── SIGNAL WHY TEXT ────────────────────────────────────────────────
+lWhyMTF  = allBull ? "all TFs bull" : twoBull ? "2/3 TFs bull" : htfBullish ? "HTF bull" : ""
+sWhyMTF  = allBear ? "all TFs bear" : twoBear ? "2/3 TFs bear" : htfBearish ? "HTF bear" : ""
+lWhyFVG  = lFVGBoost ? " · FVG " + nearFvgGrd : lFVGBlock ? " · FVG blocked" : ""
+sWhyFVG  = sFVGBoost ? " · FVG " + nearFvgGrd : sFVGBlock ? " · FVG blocked" : ""
+lWhyFull = longWhy + (lWhyMTF != "" ? " · " + lWhyMTF : "") + lWhyFVG
+sWhyFull = shortWhy + (sWhyMTF != "" ? " · " + sWhyMTF : "") + sWhyFVG
+
+// ── EXHAUSTION PENALTY ────────────────────────────────────────────
+exhaustedLong  = bullStreak >= 3 and nearRes
+exhaustedShort = bearStreak >= 3 and nearSup
+overExtLong    = extAbove and nearRes
+overExtShort   = extBelow and nearSup
+
+lExhPenalty = (
+    not applyExhaustion ? 0.0 :
+    exhaustedLong  ? -40.0 : overExtLong  ? -20.0 : 0.0)
+sExhPenalty = (
+    not applyExhaustion ? 0.0 :
+    exhaustedShort ? -40.0 : overExtShort ? -20.0 : 0.0)
+
+// ── FINAL SCORES ─────────────────────────────────────────────────
+lScore = math.min(100.0, lBase + sessAdj + lMTFAdj + lVolAdj + lTypeAdj + lPOCAdj + lFVGAdj + lExhPenalty)
+sScore = math.min(100.0, sBase + sessAdj + sMTFAdj + sVolAdj + sTypeAdj + sPOCAdj + sFVGAdj + sExhPenalty)
+
+gradeAplus = 88.0
+gradeA     = 82.0
+gradeB     = 73.0
+minScore   = minGrade == "A+" ? gradeAplus : minGrade == "A" ? gradeA : gradeB
+longGrade  = allBull and lScore >= gradeAplus ? "A+" : lScore >= gradeA ? "A" : "B+"
+shortGrade = allBear and sScore >= gradeAplus ? "A+" : sScore >= gradeA ? "A" : "B+"
+
+// ════════════════════════════════════════════════════════════════
+// HARD VETO SYSTEM
+// Any single veto = NO TRADE. Prefer discipline over mediocre setups.
+// ════════════════════════════════════════════════════════════════
+vetoLong  = (not na(vwapVal) and close < vwapVal)
+           or (not na(emaSlow) and close < emaSlow)
+           or htfBearish
+           or (body < atr * 0.4 and not strongBullRej)
+           or isLowVol
+           or (not na(priorRes) and math.abs(close - priorRes) <= atr * 0.8 and close < priorRes)
+           or (useMTFStructure and mtf2Struct == "bearish")
+
+vetoShort = (not na(vwapVal) and close > vwapVal)
+           or (not na(emaSlow) and close > emaSlow)
+           or htfBullish
+           or (body < atr * 0.4 and not strongBearRej)
+           or isLowVol
+           or (not na(priorSup) and math.abs(close - priorSup) <= atr * 0.8 and close > priorSup)
+           or (useMTFStructure and mtf2Struct == "bullish")
+
+// ── QUALIFICATION — hard binary filters + score + veto ────────────
+qualL = longFired  and not nearRes  and not midRange and not chop and not narrowSR
+      and longRR  >= minRR and emaFast > emaSlow and lScore >= minScore
+      and not vetoLong
+      and (minGrade != "A+" or allBull)
+qualS = shortFired and not nearSup  and not midRange and not chop and not narrowSR
+      and shortRR >= minRR and emaFast < emaSlow and sScore >= minScore
+      and not vetoShort
+      and (minGrade != "A+" or allBear)
+
+activeL = qualL and lScore > sScore
+activeS = qualS and sScore > lScore
+
+// ── ADAPTIVE COOLDOWN ─────────────────────────────────────────────
+emaSep       = math.abs(emaFast - emaSlow)
+emaRel       = atr > 0 ? emaSep / atr : 1.0
+adaptiveCool = (
+    emaRel < 0.4 or narrowSR ? cooldownBars * 2 :
+    emaRel > 1.2              ? math.max(10, math.round(cooldownBars * 0.6)) :
+                                cooldownBars)
+
+// ── SESSION + COOLDOWN GUARD ─────────────────────────────────────
+var int sessLong  = 0
+var int sessShort = 0
+var int lastLong  = -10000
+var int lastShort = -10000
+
+if session.isfirstbar
+    sessLong  := 0
+    sessShort := 0
+
+cdLongOk  = (bar_index - lastLong)  >= adaptiveCool
+cdShortOk = (bar_index - lastShort) >= adaptiveCool
+oppLongOk = (bar_index - lastShort) >= oppCooldown
+oppShrtOk = (bar_index - lastLong)  >= oppCooldown
+
+fireLong  = showSignals and activeL and cdLongOk  and oppLongOk and sessLong  < maxPerSession
+fireShort = showSignals and activeS and cdShortOk and oppShrtOk and sessShort < maxPerSession
 
 if fireLong
-    alert('{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"timeframe":"' + timeframe.period + '","signal":"trade_setup","direction":"long","entry":' + str.tostring(longEntry) + ',"stop":' + str.tostring(longStop) + ',"tp1":' + str.tostring(longTp1) + ',"tp2":' + str.tostring(longTp2) + ',"runner":' + str.tostring(longRunner) + ',"setupScore":' + str.tostring(longSetupScore) + ',"grade":"' + longGrade + '","reason":"' + longReason + '","timestamp":"' + ts + '"}', alert.freq_once_per_bar_close)
+    lastLong := bar_index
+    sessLong += 1
+if fireShort
+    lastShort := bar_index
+    sessShort += 1
+
+// ── STICKY IDEA + STOP-HIT RESET ─────────────────────────────────
+var string idea      = "NO TRADE"
+var string ideaGrade = ""
+var color  ideaColor = color.new(color.gray, 40)
+var float ideaE  = na
+var float ideaS  = na
+var float ideaT1 = na
+var float ideaT2 = na
+var float ideaT3 = na
+var string activeSetupType = ""
+var string ideaWhy = ""
+var int    ideaBar = -1
+
+if fireLong
+    idea       := "LONG"
+    ideaGrade  := longGrade
+    ideaColor  := color.new(#00BFA5, 20)
+    ideaE      := longEntry
+    ideaS      := longStop
+    ideaT1     := longTP1
+    ideaT2     := longTP2
+    ideaT3     := longTP3
+    activeSetupType := lSetupType
+    ideaBar    := bar_index
+    ideaWhy    := lWhyFull
+if fireShort
+    idea       := "SHORT"
+    ideaGrade  := shortGrade
+    ideaColor  := color.new(#E53935, 20)
+    ideaE      := shortEntry
+    ideaS      := shortStop
+    ideaT1     := shortTP1
+    ideaT2     := shortTP2
+    ideaT3     := shortTP3
+    activeSetupType := sSetupType
+    ideaBar    := bar_index
+    ideaWhy    := sWhyFull
+
+// Stop hit: reset idea if price closes through stop level
+if idea == "LONG" and not na(ideaS) and bar_index > ideaBar and close < ideaS
+    idea            := "NO TRADE"
+    activeSetupType := ""
+    ideaWhy         := ""
+if idea == "SHORT" and not na(ideaS) and bar_index > ideaBar and close > ideaS
+    idea            := "NO TRADE"
+    activeSetupType := ""
+    ideaWhy         := ""
+
+// ── POST-ENTRY COACHING STATE ─────────────────────────────────────
+var string postMsg   = ""
+var bool   tp1Passed = false
+var bool   tp2Passed = false
+
+if fireLong or fireShort
+    postMsg   := "HOLD  —  let it develop"
+    tp1Passed := false
+    tp2Passed := false
+
+if idea == "LONG" and not na(ideaT1)
+    if high >= ideaT1 and not tp1Passed
+        tp1Passed := true
+    if high >= ideaT2 and not tp2Passed
+        tp2Passed := true
+    postMsg := (
+        high >= ideaT3                           ? "TP3 ✓  —  trail or close runner" :
+        tp2Passed                                ? "TP2 ✓  —  trail stop" :
+        tp1Passed                                ? "TP1 ✓  —  stop at entry" :
+        close < ideaE + (ideaT1 - ideaE) * 0.15 ? "HOLD  —  early, be patient" :
+                                                   "HOLD  —  developing")
+
+if idea == "SHORT" and not na(ideaT1)
+    if low <= ideaT1 and not tp1Passed
+        tp1Passed := true
+    if low <= ideaT2 and not tp2Passed
+        tp2Passed := true
+    postMsg := (
+        low <= ideaT3                            ? "TP3 ✓  —  trail or close runner" :
+        tp2Passed                                ? "TP2 ✓  —  trail stop" :
+        tp1Passed                                ? "TP1 ✓  —  stop at entry" :
+        close > ideaE - (ideaE - ideaT1) * 0.15 ? "HOLD  —  early, be patient" :
+                                                   "HOLD  —  developing")
+
+if idea == "NO TRADE"
+    postMsg   := ""
+    tp1Passed := false
+    tp2Passed := false
+
+// ── SESSION STATS TRACKING ───────────────────────────────────────
+var int  statsSigs  = 0
+var int  statsTP1   = 0
+var int  statsTP2   = 0
+var bool trackActive = false
+var float trackTP1 = na
+var float trackTP2 = na
+var string trackDir = ""
+
+if session.isfirstbar
+    statsSigs   := 0
+    statsTP1    := 0
+    statsTP2    := 0
+    trackActive := false
+
+if fireLong or fireShort
+    statsSigs += 1
+    trackActive := true
+    trackTP1  := fireLong ? longTP1  : shortTP1
+    trackTP2  := fireLong ? longTP2  : shortTP2
+    trackDir  := fireLong ? "long" : "short"
+
+if trackActive and not na(trackTP1)
+    tp1h = trackDir == "long" ? high >= trackTP1 : low <= trackTP1
+    tp2h = trackDir == "long" ? high >= trackTP2 : low <= trackTP2
+    if tp2h
+        statsTP1    += 1
+        statsTP2    += 1
+        trackActive := false
+    else if tp1h
+        statsTP1    += 1
+        trackActive := false
+
+// ════════════════════════════════════════════════════════════════
+// SIGNAL LABELS — compact pill, fades on new signal
+// ════════════════════════════════════════════════════════════════
+var label[] sigLabels = array.new<label>()
+
+if fireLong or fireShort
+    if array.size(sigLabels) > 0
+        for i = 0 to array.size(sigLabels) - 1
+            lb = array.get(sigLabels, i)
+            if not na(lb)
+                label.set_color(lb, color.new(color.gray, 78))
+                label.set_textcolor(lb, color.new(color.gray, 40))
+
+    lbl = fireLong ?
+          label.new(bar_index, low,
+                    "▲  LONG  " + longGrade,
+                    style=label.style_label_up,
+                    color=color.new(#00BFA5, 12), textcolor=color.white,
+                    size=size.small, yloc=yloc.belowbar) :
+          label.new(bar_index, high,
+                    "▼  SHORT  " + shortGrade,
+                    style=label.style_label_down,
+                    color=color.new(#E53935, 12), textcolor=color.white,
+                    size=size.small, yloc=yloc.abovebar)
+    array.push(sigLabels, lbl)
+    if array.size(sigLabels) > 5
+        label.delete(array.shift(sigLabels))
+
+// ════════════════════════════════════════════════════════════════
+// TP / SL LINES
+// ════════════════════════════════════════════════════════════════
+var line lEntry = na
+var line lStop  = na
+var line lTP1   = na
+var line lTP2   = na
+var line lTP3   = na
+
+if showSLTP and (fireLong or fireShort)
+    line.delete(lEntry)
+    line.delete(lStop)
+    line.delete(lTP1)
+    line.delete(lTP2)
+    line.delete(lTP3)
+
+    eV  = fireLong ? longEntry  : shortEntry
+    sV  = fireLong ? longStop   : shortStop
+    t1V = fireLong ? longTP1    : shortTP1
+    t2V = fireLong ? longTP2    : shortTP2
+    t3V = fireLong ? longTP3    : shortTP3
+
+    lEntry := line.new(bar_index, eV,  bar_index+1, eV,
+               color=color.new(#FFD54F, 18), width=1,
+               style=line.style_solid, extend=extend.right)
+    lStop  := line.new(bar_index, sV,  bar_index+1, sV,
+               color=color.new(#EF5350, 22), width=1,
+               style=line.style_dashed, extend=extend.right)
+    lTP1   := line.new(bar_index, t1V, bar_index+1, t1V,
+               color=color.new(#66BB6A, 32), width=1,
+               style=line.style_dotted, extend=extend.right)
+    lTP2   := line.new(bar_index, t2V, bar_index+1, t2V,
+               color=color.new(#4DB6AC, 32), width=1,
+               style=line.style_dotted, extend=extend.right)
+    lTP3   := line.new(bar_index, t3V, bar_index+1, t3V,
+               color=color.new(#80DEEA, 38), width=1,
+               style=line.style_dotted, extend=extend.right)
+
+if not showSLTP
+    line.delete(lEntry)
+    line.delete(lStop)
+    line.delete(lTP1)
+    line.delete(lTP2)
+    line.delete(lTP3)
+
+// ── TP/SL right-rail labels ──────────────────────────────────────
+if barstate.islast
+    label.delete(rlEntry)
+    label.delete(rlStop)
+    label.delete(rlTP1)
+    label.delete(rlTP2)
+    label.delete(rlTP3)
+
+    if showSLTP and idea != "NO TRADE" and not na(ideaE)
+        rlEntry := label.new(bar_index+RL, ideaE,  "Entry  " + pFmt(ideaE),
+                   style=label.style_label_left,
+                   color=color.new(#FFD54F, 85), textcolor=color.new(#FFD54F, 0), size=size.tiny)
+        rlStop  := label.new(bar_index+RL, ideaS,  "Stop  "  + pFmt(ideaS),
+                   style=label.style_label_left,
+                   color=color.new(#EF5350, 85), textcolor=color.new(#EF5350, 0), size=size.tiny)
+        rlTP1   := label.new(bar_index+RL, ideaT1, "TP1  "   + pFmt(ideaT1),
+                   style=label.style_label_left,
+                   color=color.new(#66BB6A, 85), textcolor=color.new(#66BB6A, 0), size=size.tiny)
+        rlTP2   := label.new(bar_index+RL, ideaT2, "TP2  "   + pFmt(ideaT2),
+                   style=label.style_label_left,
+                   color=color.new(#4DB6AC, 85), textcolor=color.new(#4DB6AC, 0), size=size.tiny)
+        rlTP3   := label.new(bar_index+RL, ideaT3, "TP3  "   + pFmt(ideaT3),
+                   style=label.style_label_left,
+                   color=color.new(#80DEEA, 85), textcolor=color.new(#80DEEA, 0), size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════
+// S/R BASIC PLOTS (only when zones disabled)
+// ════════════════════════════════════════════════════════════════
+plot(not showZones and (not focusMode or idea == "SHORT") ? resist   : na,
+     "Resistance", color=color.new(#EF5350, 65), linewidth=1)
+plot(not showZones and (not focusMode or idea == "LONG")  ? support  : na,
+     "Support",    color=color.new(#26A69A, 65), linewidth=1)
+
+// ════════════════════════════════════════════════════════════════
+// COACH TABLE — top right, 4 rows
+// ════════════════════════════════════════════════════════════════
+var table coach = table.new(position.top_right, 1, 4,
+                            border_width=1, border_color=color.new(color.gray, 72))
+
+if barstate.islast
+    txt0 = idea == "NO TRADE" ? "· · ·" : idea + "   " + ideaGrade
+    bg0  = idea == "NO TRADE" ? color.new(#131722, 25) : ideaColor
+    table.cell(coach, 0, 0, txt0,
+               text_color=color.white, bgcolor=bg0, text_size=size.normal)
+
+    txt1 = (idea != "NO TRADE" and showSetupType) ? activeSetupType : ""
+    bg1  = txt1 != "" ? color.new(#131722, 55) : color.new(#131722, 95)
+    tc1  = txt1 != "" ? color.new(color.silver, 10) : color.new(color.gray, 95)
+    table.cell(coach, 0, 1, txt1,
+               text_color=tc1, bgcolor=bg1, text_size=size.tiny)
+
+    whyStr = showSignalWhy and ideaWhy != "" ? ideaWhy : ""
+    bgW    = whyStr != "" ? color.new(#131722, 62) : color.new(#131722, 95)
+    tcW    = whyStr != "" ? color.new(#80DEEA, 15) : color.new(color.gray, 95)
+    table.cell(coach, 0, 2, whyStr,
+               text_color=tcW, bgcolor=bgW, text_size=size.tiny)
+
+    txt3 = (idea != "NO TRADE" and showPostEntry) ? postMsg : ""
+    bg3  = txt3 != "" ? color.new(#131722, 55) : color.new(#131722, 95)
+    tc3  = txt3 != "" ? color.new(color.silver, 15) : color.new(color.gray, 95)
+    table.cell(coach, 0, 3, txt3,
+               text_color=tc3, bgcolor=bg3, text_size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════
+// SESSION STATS TABLE — bottom right
+// ════════════════════════════════════════════════════════════════
+var table statsTable = table.new(position.bottom_right, 2, 4,
+                                 border_width=1, border_color=color.new(color.gray, 82))
+
+if barstate.islast and showTradeStats
+    hBg = color.new(#131722, 40)
+    dBg = color.new(#131722, 65)
+    hTc = color.new(color.silver, 20)
+    dTc = color.new(color.gray, 15)
+
+    table.cell(statsTable, 0, 0, "Session", text_color=hTc, bgcolor=hBg, text_size=size.tiny)
+    table.cell(statsTable, 1, 0, str.tostring(statsSigs) + " sig",
+               text_color=hTc, bgcolor=hBg, text_size=size.tiny)
+
+    table.cell(statsTable, 0, 1, "TP1", text_color=dTc, bgcolor=dBg, text_size=size.tiny)
+    table.cell(statsTable, 1, 1, str.tostring(statsTP1) + "/" + str.tostring(statsSigs) +
+               "  " + pPct(statsTP1, statsSigs),
+               text_color=dTc, bgcolor=dBg, text_size=size.tiny)
+
+    table.cell(statsTable, 0, 2, "TP2", text_color=dTc, bgcolor=dBg, text_size=size.tiny)
+    table.cell(statsTable, 1, 2, str.tostring(statsTP2) + "/" + str.tostring(statsSigs) +
+               "  " + pPct(statsTP2, statsSigs),
+               text_color=dTc, bgcolor=dBg, text_size=size.tiny)
+
+    rvTxt = "RV  " + str.tostring(relVol, "#.##") + "x"
+    rvBg  = isHighVol ? color.new(#26A69A, 45) : isLowVol ? color.new(#EF5350, 55) : dBg
+    table.cell(statsTable, 0, 3, "Rel Vol", text_color=dTc, bgcolor=rvBg, text_size=size.tiny)
+    table.cell(statsTable, 1, 3, rvTxt, text_color=color.white, bgcolor=rvBg, text_size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════
+// VOLUME DELTA TABLE — bottom left
+// ════════════════════════════════════════════════════════════════
+buyVol   = high != low ? volume * (close - low) / (high - low) : volume * 0.5
+volDelta = buyVol - (volume - buyVol)
+
+var table deltaTable = table.new(position.bottom_left, 2, 1,
+                                 border_width=1, border_color=color.new(color.gray, 82))
+
+if barstate.islast and showVolDelta
+    dC = volDelta >= 0 ? color.new(#26A69A, 28) : color.new(#EF5350, 28)
+    table.cell(deltaTable, 0, 0, "Δ",
+               text_color=color.new(color.gray, 25),
+               bgcolor=color.new(#131722, 35), text_size=size.tiny)
+    table.cell(deltaTable, 1, 0, str.tostring(math.round(volDelta)),
+               text_color=color.white, bgcolor=dC, text_size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════
+// MTF BIAS PANEL — top left
+// Rows: header | current TF | lower TF | mid TF | overall
+// ════════════════════════════════════════════════════════════════
+var table mtfTable = table.new(position.top_left, 2, 5,
+                               border_width=1, border_color=color.new(color.gray, 80))
+
+if barstate.islast and showMTFPanel and not focusMode
+    hBg = color.new(#131722, 35)
+    hTc = color.new(color.silver, 15)
+    dBg = color.new(#131722, 55)
+    table.cell(mtfTable, 0, 0, "TF",   text_color=hTc, bgcolor=hBg, text_size=size.tiny)
+    table.cell(mtfTable, 1, 0, "Bias", text_color=hTc, bgcolor=hBg, text_size=size.tiny)
+
+    tfLbl = timeframe.period == "D" ? "1D" : timeframe.period == "W" ? "1W" : timeframe.period + "m"
+    table.cell(mtfTable, 0, 1, tfLbl,    text_color=hTc, bgcolor=dBg, text_size=size.tiny)
+    table.cell(mtfTable, 1, 1, curBias,  text_color=f_biasTc(curBias), bgcolor=f_biasBg(curBias), text_size=size.tiny)
+
+    table.cell(mtfTable, 0, 2, mtfTF1 + "m", text_color=hTc, bgcolor=dBg, text_size=size.tiny)
+    table.cell(mtfTable, 1, 2, mtf1Bias,     text_color=f_biasTc(mtf1Bias), bgcolor=f_biasBg(mtf1Bias), text_size=size.tiny)
+
+    table.cell(mtfTable, 0, 3, mtfTF2 + "m", text_color=hTc, bgcolor=dBg, text_size=size.tiny)
+    table.cell(mtfTable, 1, 3, mtf2Bias,     text_color=f_biasTc(mtf2Bias), bgcolor=f_biasBg(mtf2Bias), text_size=size.tiny)
+
+    obBg = (allBull ? color.new(#26A69A, 35) : allBear ? color.new(#EF5350, 38) :
+            twoBull ? color.new(#26A69A, 58) : twoBear ? color.new(#EF5350, 58) : color.new(#37474F, 50))
+    obTc = (allBull or twoBull ? color.new(#80CBC4, 0) :
+            allBear or twoBear ? color.new(#EF9A9A, 0) : color.new(color.gray, 10))
+    table.cell(mtfTable, 0, 4, "Overall",   text_color=hTc,  bgcolor=hBg,  text_size=size.tiny)
+    table.cell(mtfTable, 1, 4, overallBias, text_color=obTc, bgcolor=obBg, text_size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════
+// BACKGROUND — focus mode / session shading
+// ════════════════════════════════════════════════════════════════
+bgC = (
+    focusMode     ? color.new(#020617, 90) :
+    not showSessBg ? na :
+    isPreMkt       ? color.new(#1A237E, 96) :
+    isNYOpen       ? color.new(#F57F17, 97) :
+    isPwrHour      ? color.new(#1B5E20, 97) : na)
+bgcolor(bgC)
+
+// ════════════════════════════════════════════════════════════════
+// ALERTS — bar_close, no str.format, full payload
+// ════════════════════════════════════════════════════════════════
+ts       = str.tostring(time)
+rvStr    = str.tostring(relVol, "#.##")
+pocStr   = na(pocLine)     ? "null" : str.tostring(pocLine, format.mintick)
+nFvgTop  = na(nearFvgTop)  ? "null" : str.tostring(nearFvgTop, format.mintick)
+nFvgBot  = na(nearFvgBot)  ? "null" : str.tostring(nearFvgBot, format.mintick)
+nFvgScoreStr = str.tostring(math.round(nearFvgScor))
+
+if sendPriceUpdate
+    alert('{"symbol":"' + syminfo.ticker +
+          '","price":'  + str.tostring(close) +
+          ',"timeframe":"' + timeframe.period +
+          '","open":'   + str.tostring(open) +
+          ',"high":'    + str.tostring(high) +
+          ',"low":'     + str.tostring(low) +
+          ',"close":'   + str.tostring(close) +
+          ',"volume":'  + str.tostring(volume) +
+          ',"relativeVolume":' + rvStr +
+          ',"poc":'     + pocStr +
+          ',"nearestFvgType":"' + nearFvgTyp +
+          '","nearestFvgTop":' + nFvgTop +
+          ',"nearestFvgBottom":' + nFvgBot +
+          ',"nearestFvgQuality":"' + nearFvgGrd +
+          '","nearestFvgScore":' + nFvgScoreStr +
+          ',"mtfBias":"' + overallBias +
+          '","mtf1Bias":"' + mtf1Bias +
+          '","mtf2Bias":"' + mtf2Bias +
+          '","signal":"price_update"' +
+          ',"timestamp":"' + ts + '"}',
+          alert.freq_once_per_bar_close)
+
+// FVG confluence reason for trade_setup payloads
+lFvgReason = (lFVGBoost ? "bullish FVG below entry — confluence" :
+              lFVGBlock ? "bearish FVG blocking TP1" : "none")
+sFvgReason = (sFVGBoost ? "bearish FVG above entry — confluence" :
+              sFVGBlock ? "bullish FVG blocking TP1" : "none")
+
+if fireLong
+    alert('{"symbol":"' + syminfo.ticker +
+          '","price":'  + str.tostring(close) +
+          ',"timeframe":"' + timeframe.period +
+          '","signal":"trade_setup","direction":"long"' +
+          ',"entry":'   + str.tostring(longEntry) +
+          ',"stop":'    + str.tostring(longStop) +
+          ',"tp1":'     + str.tostring(longTP1) +
+          ',"tp2":'     + str.tostring(longTP2) +
+          ',"tp3":'     + str.tostring(longTP3) +
+          ',"setupScore":' + str.tostring(lScore) +
+          ',"grade":"'  + longGrade +
+          '","setupType":"' + lSetupType +
+          '","reason":"' + longWhy +
+          '","relativeVolume":' + rvStr +
+          ',"poc":'     + pocStr +
+          ',"nearestFvgType":"' + nearFvgTyp +
+          '","nearestFvgTop":' + nFvgTop +
+          ',"nearestFvgBottom":' + nFvgBot +
+          ',"nearestFvgQuality":"' + nearFvgGrd +
+          '","nearestFvgScore":' + nFvgScoreStr +
+          ',"fvgConfluence":' + (lFVGBoost ? "true" : "false") +
+          ',"fvgReason":"' + lFvgReason +
+          '","mtfBias":"' + overallBias +
+          '","mtf1Bias":"' + mtf1Bias +
+          '","mtf2Bias":"' + mtf2Bias +
+          '","signalWhy":"' + lWhyFull +
+          '","timestamp":"' + ts + '"}',
+          alert.freq_once_per_bar_close)
 
 if fireShort
-    alert('{"symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"timeframe":"' + timeframe.period + '","signal":"trade_setup","direction":"short","entry":' + str.tostring(shortEntry) + ',"stop":' + str.tostring(shortStop) + ',"tp1":' + str.tostring(shortTp1) + ',"tp2":' + str.tostring(shortTp2) + ',"runner":' + str.tostring(shortRunner) + ',"setupScore":' + str.tostring(shortSetupScore) + ',"grade":"' + shortGrade + '","reason":"' + shortReason + '","timestamp":"' + ts + '"}', alert.freq_once_per_bar_close)
+    alert('{"symbol":"' + syminfo.ticker +
+          '","price":'  + str.tostring(close) +
+          ',"timeframe":"' + timeframe.period +
+          '","signal":"trade_setup","direction":"short"' +
+          ',"entry":'   + str.tostring(shortEntry) +
+          ',"stop":'    + str.tostring(shortStop) +
+          ',"tp1":'     + str.tostring(shortTP1) +
+          ',"tp2":'     + str.tostring(shortTP2) +
+          ',"tp3":'     + str.tostring(shortTP3) +
+          ',"setupScore":' + str.tostring(sScore) +
+          ',"grade":"'  + shortGrade +
+          '","setupType":"' + sSetupType +
+          '","reason":"' + shortWhy +
+          '","relativeVolume":' + rvStr +
+          ',"poc":'     + pocStr +
+          ',"nearestFvgType":"' + nearFvgTyp +
+          '","nearestFvgTop":' + nFvgTop +
+          ',"nearestFvgBottom":' + nFvgBot +
+          ',"nearestFvgQuality":"' + nearFvgGrd +
+          '","nearestFvgScore":' + nFvgScoreStr +
+          ',"fvgConfluence":' + (sFVGBoost ? "true" : "false") +
+          ',"fvgReason":"' + sFvgReason +
+          '","mtfBias":"' + overallBias +
+          '","mtf1Bias":"' + mtf1Bias +
+          '","mtf2Bias":"' + mtf2Bias +
+          '","signalWhy":"' + sWhyFull +
+          '","timestamp":"' + ts + '"}',
+          alert.freq_once_per_bar_close)
 
-// ============================================================
-// NAMED ALERTCONDITIONS
-// ============================================================
-alertcondition(true,        title="TradePilot Price Update",  message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}},"signal":"price_update","timestamp":"{{timenow}}"}')
-alertcondition(fireLong,    title="TradePilot Long Setup",    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"long","timestamp":"{{timenow}}"}')
-alertcondition(fireShort,   title="TradePilot Short Setup",   message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"short","timestamp":"{{timenow}}"}')
+alertcondition(true,       title="TP Price Update",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"price_update","timestamp":"{{timenow}}"}')
+alertcondition(fireLong,   title="TP Long Setup",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"long","timestamp":"{{timenow}}"}')
+alertcondition(fireShort,  title="TP Short Setup",
+    message='{"symbol":"{{ticker}}","price":{{close}},"timeframe":"{{interval}}","signal":"trade_setup","direction":"short","timestamp":"{{timenow}}"}')

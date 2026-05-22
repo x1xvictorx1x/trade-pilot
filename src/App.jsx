@@ -446,6 +446,9 @@ function pickCandleSeries(history, symbol, timeframe) {
   if (!history || typeof history !== "object") return [];
   const exact = candleHistoryKey(symbol, timeframe);
   if (exact && Array.isArray(history[exact]) && history[exact].length) return history[exact];
+  // If a specific timeframe was requested but no exact match exists, return
+  // nothing — do not cross-contaminate 1m candles onto a 5m chart or vice versa.
+  if (timeframe && String(timeframe).trim()) return [];
   const symbolOnly = candleHistoryKey(symbol);
   if (symbolOnly) {
     const matches = Object.entries(history)
@@ -1506,6 +1509,7 @@ export default function App() {
     lastCandleTime: null,
     lastTradeSetup: null,
   });
+  const [chartOverlays, setChartOverlays] = useState({ poc: null, fvgType: null, fvgTop: null, fvgBottom: null, relVol: null, fvgScore: null, fvgQuality: null });
   const [debugMode, setDebugMode] = useState(() => {
     try {
       return localStorage.getItem(debugModeStorageKey) === "true";
@@ -2281,8 +2285,8 @@ export default function App() {
         // background data; below 75 is treated as "no high-quality setup yet".
         const isHighQualitySetup = incomingSignal === "trade_setup"
           && Number.isFinite(incomingScore)
-          && incomingScore >= 75
-          && (incomingGrade === "A" || incomingGrade === "B+");
+          && incomingScore >= 73
+          && (incomingGrade === "A+" || incomingGrade === "A" || incomingGrade === "B+");
         if (isHighQualitySetup) {
           const direction = signal.direction || "setup";
           notify(`${incomingGrade} ${direction} setup received.`, "success", {
@@ -2719,6 +2723,7 @@ export default function App() {
         direction: alert.direction || null,
         timeframe: tfRaw || null,
         timestamp: signalTime,
+        validSetup: signalKind === "trade_setup",
       },
     }));
 
@@ -2769,12 +2774,36 @@ export default function App() {
           updatedAt: signalTime,
         };
       });
+      // price_update carries poc + relativeVolume + FVG fields — capture before early return.
+      const puPoc = Number.isFinite(Number(alert.poc)) ? Number(alert.poc) : null;
+      const puRelVol = Number.isFinite(Number(alert.relativeVolume)) ? Number(alert.relativeVolume) : null;
+      const puFvgTop = Number.isFinite(Number(alert.nearestFvgTop)) ? Number(alert.nearestFvgTop) : null;
+      const puFvgBottom = Number.isFinite(Number(alert.nearestFvgBottom)) ? Number(alert.nearestFvgBottom) : null;
+      const puFvgType = alert.nearestFvgType && alert.nearestFvgType !== "none"
+        ? String(alert.nearestFvgType).toLowerCase() : null;
+      const puFvgScore = Number.isFinite(Number(alert.nearestFvgScore)) ? Number(alert.nearestFvgScore) : null;
+      const puFvgQuality = alert.nearestFvgQuality ? String(alert.nearestFvgQuality) : null;
+      if (puPoc !== null || puRelVol !== null || puFvgType !== null) {
+        setChartOverlays((prev) => ({
+          ...prev,
+          poc: puPoc ?? prev.poc,
+          relVol: puRelVol ?? prev.relVol,
+          fvgType: puFvgType ?? prev.fvgType,
+          fvgTop: puFvgTop ?? prev.fvgTop,
+          fvgBottom: puFvgBottom ?? prev.fvgBottom,
+          fvgScore: puFvgScore ?? prev.fvgScore,
+          fvgQuality: puFvgQuality ?? prev.fvgQuality,
+        }));
+      }
       return;
     }
 
     const setupScore = Number.isFinite(Number(alert.setupScore)) ? Number(alert.setupScore) : null;
     const setupGrade = alert.grade ? String(alert.grade).toUpperCase() : null;
-    const isTradeSetup = signalKind === "trade_setup" && Number.isFinite(setupScore) && setupScore >= 65;
+    // B+ minimum in Pine is 73; Pine only fires trade_setup when fireLong/fireShort
+    // passes all veto + score + cooldown gates, so if it arrived it's already valid.
+    // 73 here is defense-in-depth against stale or replayed payloads.
+    const isTradeSetup = signalKind === "trade_setup" && Number.isFinite(setupScore) && setupScore >= 73;
     setTradingViewSignal({
       symbol: resolved.symbol,
       market: nextMarket,
@@ -2786,6 +2815,7 @@ export default function App() {
       direction: alert.direction || null,
       timestamp: signalTime,
       candle: alert.candle || null,
+      validSetup: isTradeSetup,
     });
     if (isTradeSetup) {
       const tradeSetup = {
@@ -2797,6 +2827,8 @@ export default function App() {
         symbol: resolved.symbol,
         timeframe: tfRaw || null,
         signal: signalKind,
+        validSetup: true,
+        vetoPassed: true,
       };
       setLastTradeSetup(tradeSetup);
       setWebhookDebug((current) => ({ ...current, lastTradeSetup: tradeSetup }));
@@ -3005,6 +3037,28 @@ export default function App() {
     });
     if (dataSource !== "TradingView Webhook") setDataSource("TradingView Webhook");
     if (!autoPrice) setAutoPrice(true);
+    // Parse chart overlays (POC, FVG, relative volume, quality) sent by Pine Script v9+.
+    const pocVal = Number.isFinite(Number(alert.poc)) ? Number(alert.poc) : null;
+    const fvgTop = Number.isFinite(Number(alert.nearestFvgTop)) ? Number(alert.nearestFvgTop) : null;
+    const fvgBottom = Number.isFinite(Number(alert.nearestFvgBottom)) ? Number(alert.nearestFvgBottom) : null;
+    const fvgType = alert.nearestFvgType && alert.nearestFvgType !== "none" && (fvgTop !== null || fvgBottom !== null)
+      ? String(alert.nearestFvgType).toLowerCase()
+      : null;
+    const relVolVal = Number.isFinite(Number(alert.relativeVolume)) ? Number(alert.relativeVolume) : null;
+    const fvgScoreVal = Number.isFinite(Number(alert.nearestFvgScore)) ? Number(alert.nearestFvgScore) : null;
+    const fvgQualityVal = alert.nearestFvgQuality ? String(alert.nearestFvgQuality) : null;
+    if (pocVal !== null || fvgType !== null || relVolVal !== null) {
+      setChartOverlays((prev) => ({
+        poc: pocVal ?? prev.poc,
+        fvgType: fvgType ?? prev.fvgType,
+        fvgTop: fvgTop ?? prev.fvgTop,
+        fvgBottom: fvgBottom ?? prev.fvgBottom,
+        relVol: relVolVal ?? prev.relVol,
+        fvgScore: fvgScoreVal ?? prev.fvgScore,
+        fvgQuality: fvgQualityVal ?? prev.fvgQuality,
+      }));
+    }
+
     if (isTradeSetup) {
       setPriceStatus(`Trade Pilot: ${setupGrade || "B+"} ${alert.direction === "short" ? "short" : "long"} setup (${setupScore ?? "?"})`);
       setFastMessage(`${setupGrade || "B+"} ${alert.direction === "short" ? "short" : "long"} setup at ${Number.isFinite(nextPrice) ? nextPrice.toFixed(2) : "market price"}.`);
@@ -4799,7 +4853,7 @@ function SignalSourceCard({ activeSymbol, candleSeries, connectionError, current
   );
 }
 
-function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, notify, priceSource, profile, timeframe, tradingViewSignal, webhookDebug, zoneDiagnostics }) {
+function SignalDebugPanel({ applyAlert, chartOverlays, currentPrice, dataSource, lastUpdated, notify, priceSource, profile, timeframe, tradingViewSignal, webhookDebug, zoneDiagnostics }) {
   const [collapsed, setCollapsed] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendStatus, setSendStatus] = useState("");
@@ -4855,6 +4909,11 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
       low: 27435,
       close: 27444.25,
       volume: 1000,
+      relativeVolume: 1.8,
+      poc: 27430.5,
+      nearestFvgType: "bullish",
+      nearestFvgTop: 27460.0,
+      nearestFvgBottom: 27448.75,
       signal: "price_update",
       timestamp: now.toISOString(),
     };
@@ -4949,6 +5008,72 @@ function SignalDebugPanel({ applyAlert, currentPrice, dataSource, lastUpdated, n
         <pre style={{ background: "rgba(2,6,23,.85)", border: "1px solid #1e293b", borderRadius: "8px", color: "#cbd5e1", fontSize: "11px", margin: "4px 0 0", maxHeight: "180px", overflow: "auto", padding: "8px 10px" }}>
           {debug.rawPayload ? JSON.stringify(debug.rawPayload, null, 2) : "No payload yet."}
         </pre>
+      </div>
+
+      <div style={{ borderTop: "1px solid #1e293b", marginTop: "14px", paddingTop: "12px" }}>
+        <p style={{ ...styles.cardLabel, margin: "0 0 8px" }}>Chart Overlays (after applyAlert)</p>
+        <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+          <div>
+            <span style={rowLabel}>POC</span>
+            <span style={{ ...rowValue, color: chartOverlays?.poc !== null && Number.isFinite(chartOverlays?.poc) ? "#22d3ee" : "#475569" }}>
+              {chartOverlays?.poc !== null && Number.isFinite(chartOverlays?.poc) ? Number(chartOverlays.poc).toFixed(2) : "—"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>Rel Volume</span>
+            <span style={{ ...rowValue, color: chartOverlays?.relVol !== null && Number.isFinite(chartOverlays?.relVol) ? (chartOverlays.relVol >= 1.5 ? "#86efac" : "#94a3b8") : "#475569" }}>
+              {chartOverlays?.relVol !== null && Number.isFinite(chartOverlays?.relVol) ? `${Number(chartOverlays.relVol).toFixed(2)}x` : "—"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>FVG Type</span>
+            <span style={{ ...rowValue, color: chartOverlays?.fvgType === "bearish" ? "#f87171" : chartOverlays?.fvgType === "bullish" ? "#86efac" : "#475569" }}>
+              {chartOverlays?.fvgType || "—"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>FVG Top</span>
+            <span style={rowValue}>
+              {chartOverlays?.fvgTop !== null && Number.isFinite(chartOverlays?.fvgTop) ? Number(chartOverlays.fvgTop).toFixed(2) : "—"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>FVG Bottom</span>
+            <span style={rowValue}>
+              {chartOverlays?.fvgBottom !== null && Number.isFinite(chartOverlays?.fvgBottom) ? Number(chartOverlays.fvgBottom).toFixed(2) : "—"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>Payload has poc?</span>
+            <span style={{ ...rowValue, color: debug.rawPayload && "poc" in debug.rawPayload ? "#86efac" : "#f87171" }}>
+              {"poc" in (debug.rawPayload || {}) ? `Yes — ${debug.rawPayload.poc}` : "No"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>Payload has relVol?</span>
+            <span style={{ ...rowValue, color: debug.rawPayload && "relativeVolume" in debug.rawPayload ? "#86efac" : "#f87171" }}>
+              {"relativeVolume" in (debug.rawPayload || {}) ? `Yes — ${debug.rawPayload.relativeVolume}` : "No"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>Payload has FVG?</span>
+            <span style={{ ...rowValue, color: debug.rawPayload && "nearestFvgType" in debug.rawPayload ? "#86efac" : "#64748b" }}>
+              {"nearestFvgType" in (debug.rawPayload || {}) ? `Yes — ${debug.rawPayload.nearestFvgType}` : "No (trade_setup only)"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>FVG Quality</span>
+            <span style={{ ...rowValue, color: chartOverlays?.fvgQuality === "A" ? "#86efac" : chartOverlays?.fvgQuality === "B" ? "#fde68a" : "#94a3b8" }}>
+              {chartOverlays?.fvgQuality || "—"}
+            </span>
+          </div>
+          <div>
+            <span style={rowLabel}>FVG Score</span>
+            <span style={{ ...rowValue, color: chartOverlays?.fvgScore !== null && Number.isFinite(chartOverlays?.fvgScore) ? (chartOverlays.fvgScore >= 85 ? "#86efac" : chartOverlays.fvgScore >= 70 ? "#fde68a" : "#94a3b8") : "#475569" }}>
+              {chartOverlays?.fvgScore !== null && Number.isFinite(chartOverlays?.fvgScore) ? `${Number(chartOverlays.fvgScore).toFixed(0)} / 100` : "—"}
+            </span>
+          </div>
+        </div>
       </div>
 
       {feedStatus === "stale" ? (
@@ -6026,6 +6151,7 @@ function Dashboard({
     alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} symbol={profile.mainMarket} onAddLevels={handleOpenLevelsModal} onClearZones={() => { setSupport(0); setResistance(0); notify?.("Auto zones cleared.", "success"); }} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
       candleSeries={liveCandleSeries}
+      chartOverlays={chartOverlays}
       chartPrefs={chartPrefs}
       chartTimeframe={chartTimeframe}
       currentPrice={price}
@@ -6253,6 +6379,7 @@ function Dashboard({
       {debugMode ? (
         <SignalDebugPanel
           applyAlert={applyAlert}
+          chartOverlays={chartOverlays}
           currentPrice={price}
           dataSource={dataSource}
           lastUpdated={lastUpdated}
@@ -8734,7 +8861,7 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   return `Grade D setup (${score}/100). Do not trade: ${issue || "setup does not meet quality threshold"}.`;
 }
 
-function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPrice, debugMode = false, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
+function TradeChartPanel({ candleSeries, chartOverlays, chartPrefs, chartTimeframe, currentPrice, debugMode = false, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
   const candles = Array.isArray(candleSeries) ? candleSeries : [];
   const haveEnoughCandles = candles.length >= 20;
   // Defer the "is the spacing reasonable?" decision to the upstream zone
@@ -8865,10 +8992,14 @@ function TradeChartPanel({ candleSeries, chartPrefs, chartTimeframe, currentPric
           candles={candles}
           currentPrice={currentPrice}
           debugMode={debugMode}
+          fvgData={chartOverlays?.fvgType ? { type: chartOverlays.fvgType, top: chartOverlays.fvgTop, bottom: chartOverlays.fvgBottom } : null}
+          fvgQuality={chartOverlays?.fvgQuality ?? null}
           height={chartHeight}
           lockPriceScale={chartPrefs?.lockPriceScale === true}
           markers={setupMarkers}
           plan={plan}
+          poc={chartOverlays?.poc ?? null}
+          relVol={chartOverlays?.relVol ?? null}
           resetSignal={resetSignal || 0}
           resistanceZone={resistanceZone}
           showZones={zonesValid}
