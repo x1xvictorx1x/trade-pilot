@@ -3740,6 +3740,7 @@ export default function App() {
             updateDiscipline={updateDiscipline}
             updateProfile={updateProfile}
             watchlist={watchlist}
+            chartOverlays={activeChartOverlays}
           />
         ) : null}
         {activePage === "connections" ? (
@@ -5515,6 +5516,7 @@ function Dashboard({
   updateDiscipline,
   updateProfile,
   watchlist,
+  chartOverlays,
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [journalNote, setJournalNote] = useState("");
@@ -6163,7 +6165,7 @@ function Dashboard({
     alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} symbol={profile.mainMarket} onAddLevels={handleOpenLevelsModal} onClearZones={() => { setSupport(0); setResistance(0); notify?.("Auto zones cleared.", "success"); }} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
       candleSeries={liveCandleSeries}
-      chartOverlays={activeChartOverlays}
+      chartOverlays={chartOverlays}
       chartPrefs={chartPrefs}
       chartTimeframe={chartTimeframe}
       currentPrice={price}
@@ -6391,7 +6393,7 @@ function Dashboard({
       {debugMode ? (
         <SignalDebugPanel
           applyAlert={applyAlert}
-          chartOverlays={activeChartOverlays}
+          chartOverlays={chartOverlays}
           currentPrice={price}
           dataSource={dataSource}
           lastUpdated={lastUpdated}
