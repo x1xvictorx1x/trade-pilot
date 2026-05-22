@@ -6147,11 +6147,20 @@ function Dashboard({
   };
 
   const cardOrder = normalizeCardOrder(effectiveLayout.cardOrder);
+  const safeChartOverlays = chartOverlays ?? {
+    poc: null,
+    relVol: null,
+    fvgType: null,
+    fvgTop: null,
+    fvgBottom: null,
+    fvgScore: null,
+    fvgQuality: null,
+  };
   const dashboardCards = {
     alerts: effectiveLayout.alerts ? <AutoZonePanel zoneDetection={enrichedZoneDetection} symbol={profile.mainMarket} onAddLevels={handleOpenLevelsModal} onClearZones={() => { setSupport(0); setResistance(0); notify?.("Auto zones cleared.", "success"); }} /> : null,
     chart: effectiveLayout.chart ? <TradeChartPanel
       candleSeries={liveCandleSeries}
-      chartOverlays={chartOverlays}
+      chartOverlays={safeChartOverlays}
       chartPrefs={chartPrefs}
       chartTimeframe={chartTimeframe}
       currentPrice={price}
@@ -6379,7 +6388,7 @@ function Dashboard({
       {debugMode ? (
         <SignalDebugPanel
           applyAlert={applyAlert}
-          chartOverlays={chartOverlays}
+          chartOverlays={safeChartOverlays}
           currentPrice={price}
           dataSource={dataSource}
           lastUpdated={lastUpdated}
@@ -8861,7 +8870,7 @@ function getLiveCoachMessage({ activeBias, activeTrade, activePosition, activeTr
   return `Grade D setup (${score}/100). Do not trade: ${issue || "setup does not meet quality threshold"}.`;
 }
 
-function TradeChartPanel({ candleSeries, chartOverlays, chartPrefs, chartTimeframe, currentPrice, debugMode = false, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
+function TradeChartPanel({ candleSeries, chartOverlays = {}, chartPrefs, chartTimeframe, currentPrice, debugMode = false, entry, lastTradeSetup, onResetChart, resetSignal, runner, setChartPrefs, setChartTimeframe, stop, support, resistance, symbol, timeframe, trim1, trim2, zoneDetection = {} }) {
   const candles = Array.isArray(candleSeries) ? candleSeries : [];
   const haveEnoughCandles = candles.length >= 20;
   // Defer the "is the spacing reasonable?" decision to the upstream zone
