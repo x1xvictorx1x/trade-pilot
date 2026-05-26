@@ -130,6 +130,7 @@ showSetupType   = input.bool(true,   "Show Setup Type",              group=g7)
 showPostEntry   = input.bool(true,   "Show Post-Entry Coaching",     group=g7)
 showTradeStats  = input.bool(false,  "Show Session Stats",           group=g7)
 showRelVol      = input.bool(true,   "Highlight Volume Spikes",      group=g7)
+showSigLabels   = input.bool(true,   "Show Signal Text Labels",       group=g7)
 
 // ── GROUP 8 · MULTI-TIMEFRAME ────────────────────────────────────
 gMTF = "⑧ Multi-Timeframe"
@@ -718,6 +719,8 @@ var bool  orComplete = false
 var bool  orBroken   = false
 var box   orBox      = na
 var line  orMidLine  = na
+var line  orHighLine = na
+var line  orLowLine  = na
 var label orBrkLabel = na
 
 if isRegOpen
@@ -731,8 +734,12 @@ if isRegOpen
     if removePrevOR
         box.delete(orBox)
         line.delete(orMidLine)
+        line.delete(orHighLine)
+        line.delete(orLowLine)
         orBox := na
         orMidLine := na
+        orHighLine := na
+        orLowLine := na
 
 barsInto = na(orStartBar) ? na : bar_index - orStartBar
 
@@ -745,14 +752,22 @@ if not na(barsInto) and barsInto == orBarsNeeded and not orComplete
     if showOR
         box.delete(orBox)
         orBox := box.new(orStartBar, orHigh, bar_index, orLow,
-                         border_color=color.new(#FFC107, 55),
-                         bgcolor=color.new(#FFC107, 93),
+                         border_color=color.new(#1565C0, 55),
+                         bgcolor=color.new(#1E88E5, 95),
                          border_width=2, extend=extend.right)
+        line.delete(orHighLine)
+        orHighLine := line.new(orStartBar, orHigh, bar_index + 1, orHigh,
+                     color=color.new(#42A5F5, 25), width=2,
+                     style=line.style_solid, extend=extend.right)
+        line.delete(orLowLine)
+        orLowLine  := line.new(orStartBar, orLow,  bar_index + 1, orLow,
+                     color=color.new(#42A5F5, 25), width=2,
+                     style=line.style_solid, extend=extend.right)
         if showORMid and not na(orHigh) and not na(orLow)
             line.delete(orMidLine)
             orMidLine := line.new(orStartBar, (orHigh + orLow) * 0.5,
                          bar_index + 1, (orHigh + orLow) * 0.5,
-                         color=color.new(#FFC107, 72), width=1,
+                         color=color.new(#42A5F5, 60), width=1,
                          style=line.style_dotted, extend=extend.right)
 
 if orComplete and stopAfterBreak and not orBroken and not na(orHigh)
@@ -762,6 +777,7 @@ if orComplete and stopAfterBreak and not orBroken and not na(orHigh)
             box.set_extend(orBox, extend.none)
         if not na(orMidLine)
             line.set_extend(orMidLine, extend.none)
+        // ORH/ORL lines keep extending after break — they become key S/R levels
 
 orBreakLong  = orComplete and not orBroken and not na(orHigh) and close > orHigh and close[1] <= nz(orHigh[1], orHigh)
 orBreakShort = orComplete and not orBroken and not na(orLow)  and close < orLow  and close[1] >= nz(orLow[1],  orLow)
@@ -1283,16 +1299,21 @@ if trackActive and not na(trackTP1)
 
 // ════════════════════════════════════════════════════════════════
 // SIGNAL LABELS — compact pill, fades on new signal
+// Controlled by showSigLabels input; focusMode shows only latest.
 // ════════════════════════════════════════════════════════════════
 var label[] sigLabels = array.new<label>()
 
-if fireLong or fireShort
+if showSigLabels and (fireLong or fireShort)
     if array.size(sigLabels) > 0
-        for i = 0 to array.size(sigLabels) - 1
+        for i = array.size(sigLabels) - 1 to 0
             lb = array.get(sigLabels, i)
             if not na(lb)
-                label.set_color(lb, color.new(color.gray, 78))
-                label.set_textcolor(lb, color.new(color.gray, 40))
+                if focusMode
+                    label.delete(lb)
+                    array.remove(sigLabels, i)
+                else
+                    label.set_color(lb, color.new(color.gray, 78))
+                    label.set_textcolor(lb, color.new(color.gray, 40))
 
     lbl = fireLong ?
           label.new(bar_index, low,
@@ -1517,6 +1538,10 @@ nFvgTop  = na(nearFvgTop)  ? "null" : str.tostring(nearFvgTop, format.mintick)
 nFvgBot  = na(nearFvgBot)  ? "null" : str.tostring(nearFvgBot, format.mintick)
 nFvgScoreStr = str.tostring(math.round(nearFvgScor))
 
+orHighStr    = na(orHigh) ? "null" : str.tostring(orHigh, format.mintick)
+orLowStr     = na(orLow)  ? "null" : str.tostring(orLow,  format.mintick)
+orCompleteStr = orComplete ? "true" : "false"
+
 if sendPriceUpdate
     alert('{"symbol":"' + syminfo.ticker +
           '","price":'  + str.tostring(close) +
@@ -1536,7 +1561,10 @@ if sendPriceUpdate
           ',"mtfBias":"' + overallBias +
           '","mtf1Bias":"' + mtf1Bias +
           '","mtf2Bias":"' + mtf2Bias +
-          '","signal":"price_update"' +
+          '","orHigh":' + orHighStr +
+          ',"orLow":' + orLowStr +
+          ',"orComplete":' + orCompleteStr +
+          ',"signal":"price_update"' +
           ',"timestamp":"' + ts + '"}',
           alert.freq_once_per_bar_close)
 
@@ -1551,6 +1579,7 @@ if fireLong
           '","price":'  + str.tostring(close) +
           ',"timeframe":"' + timeframe.period +
           '","signal":"trade_setup","direction":"long"' +
+          ',"validSetup":true' +
           ',"entry":'   + str.tostring(longEntry) +
           ',"stop":'    + str.tostring(longStop) +
           ',"tp1":'     + str.tostring(longTP1) +
@@ -1581,6 +1610,7 @@ if fireShort
           '","price":'  + str.tostring(close) +
           ',"timeframe":"' + timeframe.period +
           '","signal":"trade_setup","direction":"short"' +
+          ',"validSetup":true' +
           ',"entry":'   + str.tostring(shortEntry) +
           ',"stop":'    + str.tostring(shortStop) +
           ',"tp1":'     + str.tostring(shortTP1) +

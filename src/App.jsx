@@ -2864,7 +2864,10 @@ export default function App() {
         ? String(alert.nearestFvgType).toLowerCase() : null;
       const puFvgScore = Number.isFinite(Number(alert.nearestFvgScore)) ? Number(alert.nearestFvgScore) : null;
       const puFvgQuality = alert.nearestFvgQuality ? String(alert.nearestFvgQuality) : null;
-      if (puPoc !== null || puRelVol !== null || puFvgType !== null) {
+      const puOrHigh = Number.isFinite(Number(alert.orHigh)) ? Number(alert.orHigh) : null;
+      const puOrLow = Number.isFinite(Number(alert.orLow)) ? Number(alert.orLow) : null;
+      const puOrComplete = alert.orComplete === true || alert.orComplete === "true";
+      if (puPoc !== null || puRelVol !== null || puFvgType !== null || puOrHigh !== null) {
         setChartOverlays((prev) => ({
           ...prev,
           poc: puPoc ?? prev.poc,
@@ -2874,6 +2877,9 @@ export default function App() {
           fvgBottom: puFvgBottom ?? prev.fvgBottom,
           fvgScore: puFvgScore ?? prev.fvgScore,
           fvgQuality: puFvgQuality ?? prev.fvgQuality,
+          orHigh: puOrHigh ?? prev.orHigh,
+          orLow: puOrLow ?? prev.orLow,
+          orComplete: puOrHigh !== null ? puOrComplete : prev.orComplete,
         }));
       }
       return;
@@ -5087,6 +5093,27 @@ function SignalDebugPanel({ applyAlert, chartOverlays, currentPrice, dataSource,
         ) : (
           <span style={rowValue}>None received yet.</span>
         )}
+      </div>
+
+      <div style={{ borderTop: "1px solid #1e293b", display: "grid", gap: "10px", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", marginTop: "12px", paddingTop: "12px" }}>
+        <div>
+          <span style={rowLabel}>ORH (from webhook)</span>
+          <span style={{ ...rowValue, color: Number.isFinite(chartOverlays?.orHigh) ? "#60a5fa" : "#475569" }}>
+            {Number.isFinite(chartOverlays?.orHigh) ? Number(chartOverlays.orHigh).toFixed(2) : "—"}
+          </span>
+        </div>
+        <div>
+          <span style={rowLabel}>ORL (from webhook)</span>
+          <span style={{ ...rowValue, color: Number.isFinite(chartOverlays?.orLow) ? "#60a5fa" : "#475569" }}>
+            {Number.isFinite(chartOverlays?.orLow) ? Number(chartOverlays.orLow).toFixed(2) : "—"}
+          </span>
+        </div>
+        <div>
+          <span style={rowLabel}>OR Complete</span>
+          <span style={{ ...rowValue, color: chartOverlays?.orComplete ? "#86efac" : "#94a3b8" }}>
+            {chartOverlays?.orComplete ? "Yes" : "No / unknown"}
+          </span>
+        </div>
       </div>
 
       <div style={{ marginTop: "12px" }}>
