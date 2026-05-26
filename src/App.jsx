@@ -2887,10 +2887,15 @@ export default function App() {
 
     const setupScore = Number.isFinite(Number(alert.setupScore)) ? Number(alert.setupScore) : null;
     const setupGrade = alert.grade ? String(alert.grade).toUpperCase() : null;
-    // B+ minimum in Pine is 73; Pine only fires trade_setup when fireLong/fireShort
-    // passes all veto + score + cooldown gates, so if it arrived it's already valid.
-    // 73 here is defense-in-depth against stale or replayed payloads.
-    const isTradeSetup = signalKind === "trade_setup" && Number.isFinite(setupScore) && setupScore >= 73;
+    // Pine fires trade_setup only when all veto+score+cooldown gates pass.
+    // Defense-in-depth: also require score >= 73 (B+ floor) and grade B+/A/A+.
+    const validGrades = ["B+", "A", "A+"];
+    const gradeOk = !setupGrade || validGrades.includes(setupGrade);
+    const validSetupFlag = alert.validSetup === true || alert.validSetup === "true";
+    const isTradeSetup = signalKind === "trade_setup"
+      && Number.isFinite(setupScore) && setupScore >= 73
+      && gradeOk
+      && (validSetupFlag || !("validSetup" in alert));
     setTradingViewSignal({
       symbol: resolved.symbol,
       market: nextMarket,

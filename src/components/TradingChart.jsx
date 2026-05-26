@@ -7,27 +7,29 @@ import {
   createSeriesMarkers,
 } from "lightweight-charts";
 
-// TradingView-style dark palette: dim background, soft grid, bright wicks.
+// Institutional dark palette — muted teal/red, minimal noise.
 const CHART_THEME = {
   background: "#0d1117",
   text: "#d1d4dc",
-  grid: "rgba(70, 78, 95, 0.28)",
-  border: "rgba(110, 122, 145, 0.45)",
-  up: "#22c55e",
-  down: "#f43f5e",
-  support: "#22c55e",
-  resistance: "#f43f5e",
+  grid: "rgba(70, 78, 95, 0.22)",
+  border: "rgba(110, 122, 145, 0.35)",
+  up: "#26c6da",           // institutional teal (not neon green)
+  down: "#ef5350",         // soft red
+  wickUp: "rgba(38,198,218,0.65)",
+  wickDown: "rgba(239,83,80,0.65)",
+  support: "#26c6da",
+  resistance: "#ef5350",
   entry: "#38bdf8",
   stop: "#f97316",
   tp: "#84cc16",
   runner: "#a855f7",
   price: "#facc15",
   glow: "rgba(250, 204, 21, 0.45)",
-  orLine: "#3b82f6",
-  orBox: "rgba(59,130,246,0.08)",
-  orBoxBorder: "rgba(59,130,246,0.55)",
-  orRetest: "rgba(59,130,246,0.22)",
-  orRetestBorder: "#3b82f6",
+  orLine: "rgba(59,130,246,0.85)",
+  orBox: "rgba(30,64,175,0.07)",
+  orBoxBorder: "rgba(59,130,246,0.40)",
+  orRetestBull: "rgba(34,197,94,0.22)",
+  orRetestBear: "rgba(239,83,80,0.22)",
 };
 
 const MIN_CANDLES_FOR_LIVE = 20;
@@ -311,7 +313,7 @@ export default function TradingChart({
       const vol = Number(c.volume ?? c.vol ?? 0);
       if (!Number.isFinite(time) || vol <= 0) continue;
       const isUp = Number(c.close) >= Number(c.open);
-      seen.set(time, { time, value: vol, color: isUp ? "rgba(34,197,94,0.35)" : "rgba(244,63,94,0.35)" });
+      seen.set(time, { time, value: vol, color: isUp ? "rgba(38,198,218,0.45)" : "rgba(239,83,80,0.45)" });
     }
     return Array.from(seen.values()).sort((a, b) => a.time - b.time);
   }, [candles]);
@@ -364,13 +366,19 @@ export default function TradingChart({
       }
       const y1 = Math.min(topPx, botPx);
       const y2 = Math.max(topPx, botPx);
+      const boxH = Math.max(2, y2 - y1);
       const isBearish = fd.type === "bearish";
       el.style.display = "block";
       el.style.top = `${y1}px`;
-      el.style.height = `${Math.max(2, y2 - y1)}px`;
-      el.style.background = isBearish ? "rgba(239,83,80,0.09)" : "rgba(38,198,218,0.09)";
-      el.style.borderTop = `1px solid ${isBearish ? "rgba(239,83,80,0.55)" : "rgba(38,198,218,0.55)"}`;
-      el.style.borderBottom = `1px solid ${isBearish ? "rgba(239,83,80,0.55)" : "rgba(38,198,218,0.55)"}`;
+      el.style.height = `${boxH}px`;
+      el.style.background = isBearish ? "rgba(239,83,80,0.12)" : "rgba(38,198,218,0.12)";
+      el.style.borderTop = `1px solid ${isBearish ? "rgba(239,83,80,0.60)" : "rgba(38,198,218,0.60)"}`;
+      el.style.borderBottom = `1px solid ${isBearish ? "rgba(239,83,80,0.60)" : "rgba(38,198,218,0.60)"}`;
+      const labelEl = el.querySelector(".fvg-center-label");
+      if (labelEl) {
+        labelEl.style.display = boxH > 16 ? "block" : "none";
+        labelEl.style.color = isBearish ? "rgba(239,83,80,0.45)" : "rgba(38,198,218,0.45)";
+      }
     };
 
     // OR overlay update — repositions the OR box and retest rectangle on pan/zoom.
@@ -427,14 +435,22 @@ export default function TradingChart({
               if (t1 != null && t2 != null) barW = Math.max(8, Math.abs(t2 - t1) * 0.8);
             }
             const boxH = 20;
+            const isTop = rc.side === "top";
+            const retestBg = isTop ? CHART_THEME.orRetestBear : CHART_THEME.orRetestBull;
+            const retestBorder = isTop ? "rgba(239,83,80,0.75)" : "rgba(34,197,94,0.75)";
+            const retestTextColor = isTop ? "#fca5a5" : "#86efac";
             retestEl.style.display = "block";
             retestEl.style.left = `${rx - barW / 2}px`;
             retestEl.style.width = `${barW}px`;
             retestEl.style.top = `${ry - boxH / 2}px`;
             retestEl.style.height = `${boxH}px`;
+            retestEl.style.background = retestBg;
+            retestEl.style.borderColor = retestBorder;
             const labelEl = retestEl.querySelector(".or-retest-label");
             if (labelEl) {
-              if (rc.side === "top") {
+              labelEl.style.color = retestTextColor;
+              labelEl.textContent = isTop ? "ORH" : "ORL";
+              if (isTop) {
                 labelEl.style.top = "auto";
                 labelEl.style.bottom = `${boxH + 2}px`;
               } else {
@@ -466,7 +482,7 @@ export default function TradingChart({
       },
       rightPriceScale: {
         borderColor: CHART_THEME.border,
-        scaleMargins: { top: 0.15, bottom: 0.15 },
+        scaleMargins: { top: 0.10, bottom: 0.22 },
         autoScale: true,
         entireTextOnly: true,
       },
@@ -514,8 +530,8 @@ export default function TradingChart({
       downColor: CHART_THEME.down,
       borderUpColor: CHART_THEME.up,
       borderDownColor: CHART_THEME.down,
-      wickUpColor: CHART_THEME.up,
-      wickDownColor: CHART_THEME.down,
+      wickUpColor: CHART_THEME.wickUp,
+      wickDownColor: CHART_THEME.wickDown,
       borderVisible: true,
       wickVisible: true,
       priceLineVisible: false,
@@ -532,7 +548,7 @@ export default function TradingChart({
       lastValueVisible: false,
     });
     chart.priceScale("vol").applyOptions({
-      scaleMargins: { top: 0.85, bottom: 0 },
+      scaleMargins: { top: 0.88, bottom: 0 },
       visible: false,
     });
     volumeSeriesRef.current = volSeries;
@@ -714,7 +730,7 @@ export default function TradingChart({
       chart.applyOptions({
         rightPriceScale: {
           autoScale: true,
-          scaleMargins: { top: 0.15, bottom: 0.15 },
+          scaleMargins: { top: 0.10, bottom: 0.22 },
         },
       });
       hasInitiallyFitRef.current = true;
@@ -762,26 +778,31 @@ export default function TradingChart({
     if (!series) return;
     // Only render the latest valid setup marker — old arrows just clutter
     // the chart and confuse the user about what is actionable now.
-    const fixedMarkers = Array.isArray(markers)
+    // Only show the latest signal marker — older ones are noise.
+    const allMarkers = Array.isArray(markers)
       ? markers
           .map((marker) => {
             if (!marker) return null;
             const time = toSeconds(marker.time ?? marker.timestamp);
             if (!Number.isFinite(time)) return null;
             const isShort = marker.direction === "short";
+            const grade = marker.grade ? ` ${marker.grade}` : "";
             return {
               time,
               position: marker.position || (isShort ? "aboveBar" : "belowBar"),
               color: marker.color || (isShort ? CHART_THEME.down : CHART_THEME.up),
-              shape: marker.shape || (isShort ? "arrowDown" : "arrowUp"),
-              text: marker.text || marker.label || (isShort ? "▼ SHORT" : "▲ LONG"),
+              shape: isShort ? "arrowDown" : "arrowUp",
+              text: marker.text || (isShort ? `▼ SHORT${grade}` : `▲ LONG${grade}`),
               size: 1,
             };
           })
           .filter(Boolean)
           .sort((a, b) => a.time - b.time)
-          .slice(-1)
       : [];
+    // Latest marker bright, previous one faded
+    const fixedMarkers = allMarkers.slice(-2).map((m, i, arr) =>
+      i < arr.length - 1 ? { ...m, color: "rgba(148,163,184,0.45)" } : m
+    );
     if (!markersRef.current) {
       markersRef.current = createSeriesMarkers(series, fixedMarkers);
     } else {
@@ -897,12 +918,12 @@ export default function TradingChart({
       title: "",
     } : null);
 
-    // OR price lines — ORH and ORL extend across the full chart as dashed blue lines.
+    // OR price lines — ORH and ORL as subtle dashed blue lines; axis label only.
     const orActive = showOR && orData?.orh != null;
     ensurePriceLine(series, priceLinesRef, "orh", orActive ? {
       price: orData.orh,
       color: CHART_THEME.orLine,
-      lineStyle: 1,
+      lineStyle: 2,
       lineWidth: 1,
       axisLabelVisible: true,
       title: showORLabels ? "ORH" : "",
@@ -910,14 +931,14 @@ export default function TradingChart({
     ensurePriceLine(series, priceLinesRef, "orl", orActive ? {
       price: orData.orl,
       color: CHART_THEME.orLine,
-      lineStyle: 1,
+      lineStyle: 2,
       lineWidth: 1,
       axisLabelVisible: true,
       title: showORLabels ? "ORL" : "",
     } : null);
     ensurePriceLine(series, priceLinesRef, "ormid", orActive && orData.ormid != null ? {
       price: orData.ormid,
-      color: "rgba(59,130,246,0.35)",
+      color: "rgba(59,130,246,0.25)",
       lineStyle: 2,
       lineWidth: 1,
       axisLabelVisible: false,
@@ -978,7 +999,22 @@ export default function TradingChart({
           right: "60px",
           zIndex: 2,
         }}
-      />
+      >
+        <span
+          className="fvg-center-label"
+          style={{
+            fontSize: "9px",
+            fontWeight: 700,
+            left: "5px",
+            letterSpacing: ".12em",
+            position: "absolute",
+            top: "50%",
+            transform: "translateY(-50%)",
+          }}
+        >
+          FVG
+        </span>
+      </div>
 
       {/* OR box — thin blue outline from OR start to OR end, height = ORH to ORL */}
       <div
@@ -1010,13 +1046,12 @@ export default function TradingChart({
         </span>
       </div>
 
-      {/* OR retest rectangle — small blue box around the retest candle */}
+      {/* OR retest indicator — colored bar at retest candle; green=ORL reclaim, red=ORH rejection */}
       <div
         ref={orRetestRef}
         style={{
-          background: CHART_THEME.orRetest,
-          border: `1.5px solid ${CHART_THEME.orRetestBorder}`,
-          borderRadius: "2px",
+          border: "1.5px solid",
+          borderRadius: "3px",
           display: "none",
           pointerEvents: "none",
           position: "absolute",
@@ -1026,18 +1061,15 @@ export default function TradingChart({
         <span
           className="or-retest-label"
           style={{
-            color: CHART_THEME.orLine,
             fontSize: "9px",
-            fontWeight: 700,
+            fontWeight: 800,
             left: "50%",
             letterSpacing: ".04em",
             position: "absolute",
             transform: "translateX(-50%)",
             whiteSpace: "nowrap",
           }}
-        >
-          OR
-        </span>
+        />
       </div>
 
       {hoverCandle ? (
