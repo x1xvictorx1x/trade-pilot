@@ -42,6 +42,11 @@ const chartPrefsStorageKey = "tradePilotChartPrefs";
 const defaultChartPrefs = {
   autoFit: true,
   lockPriceScale: false,
+  showOR: true,
+  orMinutes: 15,
+  showORBox: true,
+  showORRetest: true,
+  showORLabels: true,
 };
 
 function loadChartPrefs() {
@@ -339,8 +344,26 @@ function loadNotificationPrefs() {
   }
 }
 
-const MAX_CANDLES_PER_KEY = 300;
+const MAX_CANDLES_PER_KEY = 2000;    // in-memory cap — full session history
+const MAX_CANDLES_STORAGE = 300;     // localStorage cap — seed amount, full history re-fetched on connect
 const SR_LOOKBACK_CANDLES = 100;
+
+// Safe localStorage write. When storage is full it evicts candle history
+// (the largest item) and retries once. Never throws.
+function safeLocalStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (err) {
+    const isQuota = err?.name === "QuotaExceededError" || err?.code === 22 || err?.code === 1014;
+    if (!isQuota) return;
+    try {
+      localStorage.removeItem(candleHistoryStorageKey);
+      localStorage.setItem(key, value);
+    } catch {
+      // Still full — silently drop this write rather than crashing.
+    }
+  }
+}
 
 function candleHistoryKey(symbol, timeframe) {
   const sym = String(symbol || "").trim().toUpperCase();
@@ -440,6 +463,26 @@ function appendCandle(history, key, candle) {
   }
   if (next.length > MAX_CANDLES_PER_KEY) next = next.slice(next.length - MAX_CANDLES_PER_KEY);
   return { ...history, [key]: next };
+}
+
+function bulkLoadCandles(history, key, newCandles) {
+  if (!key || !Array.isArray(newCandles) || newCandles.length === 0) return history;
+  const existing = Array.isArray(history[key]) ? history[key] : [];
+  const existingTimes = new Set(existing.map((c) => new Date(c.timestamp).getTime()));
+  const merged = [...existing];
+  for (const c of newCandles) {
+    const open = Number(c.open), high = Number(c.high), low = Number(c.low), close = Number(c.close);
+    if (![open, high, low, close].every(Number.isFinite)) continue;
+    const ts = c.timestamp ? new Date(c.timestamp).getTime() : null;
+    if (!ts || !Number.isFinite(ts)) continue;
+    if (!existingTimes.has(ts)) {
+      merged.push({ open, high, low, close, volume: Number.isFinite(Number(c.volume)) ? Number(c.volume) : null, timeframe: c.timeframe || null, timestamp: new Date(ts).toISOString() });
+      existingTimes.add(ts);
+    }
+  }
+  merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  const trimmed = merged.length > MAX_CANDLES_PER_KEY ? merged.slice(merged.length - MAX_CANDLES_PER_KEY) : merged;
+  return { ...history, [key]: trimmed };
 }
 
 function pickCandleSeries(history, symbol, timeframe) {
@@ -1612,6 +1655,7 @@ export default function App() {
   const wasTradingViewConnectedRef = useRef(false);
   const lastSignalKeyRef = useRef(null);
   const lastToastAtRef = useRef(0);
+  const historicalFetchKeyRef = useRef("");
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -1661,15 +1705,20 @@ export default function App() {
   const previousDataSourceRef = useRef(dataSource);
 
   useEffect(() => {
-    localStorage.setItem(profileStorageKey, JSON.stringify(profile));
+    safeLocalStorageSet(profileStorageKey, JSON.stringify(profile));
   }, [profile]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(candleHistoryStorageKey, JSON.stringify(candleHistory));
-    } catch {
-      // localStorage may be full or disabled.
+    // Only persist a small seed per key — full history lives in memory and is
+    // re-fetched from the API on connect. Trimming here keeps localStorage well
+    // under the 5 MB quota even with many symbols/timeframes.
+    const forStorage = {};
+    for (const [k, arr] of Object.entries(candleHistory)) {
+      if (Array.isArray(arr) && arr.length) {
+        forStorage[k] = arr.slice(-MAX_CANDLES_STORAGE);
+      }
     }
+    safeLocalStorageSet(candleHistoryStorageKey, JSON.stringify(forStorage));
   }, [candleHistory]);
 
   // Symbol switch — drop every cached candle/key that does not belong to the
@@ -1808,19 +1857,19 @@ export default function App() {
   }, [dataSource]);
 
   useEffect(() => {
-    localStorage.setItem(disciplineStorageKey, JSON.stringify(discipline));
+    safeLocalStorageSet(disciplineStorageKey, JSON.stringify(discipline));
   }, [discipline]);
 
   useEffect(() => {
     if (activePosition) {
-      localStorage.setItem(activePositionStorageKey, JSON.stringify(activePosition));
+      safeLocalStorageSet(activePositionStorageKey, JSON.stringify(activePosition));
     } else {
       localStorage.removeItem(activePositionStorageKey);
     }
   }, [activePosition]);
 
   useEffect(() => {
-    localStorage.setItem(activeTradeStorageKey, JSON.stringify(normalizeActiveTrade(activeTrade)));
+    safeLocalStorageSet(activeTradeStorageKey, JSON.stringify(normalizeActiveTrade(activeTrade)));
   }, [activeTrade]);
 
   useEffect(() => {
@@ -1836,27 +1885,27 @@ export default function App() {
   }, [plannedTrade, price, dataSource, profile.mainMarket]);
 
   useEffect(() => {
-    localStorage.setItem(feedbackStorageKey, JSON.stringify(feedbackItems));
+    safeLocalStorageSet(feedbackStorageKey, JSON.stringify(feedbackItems));
   }, [feedbackItems]);
 
   useEffect(() => {
-    localStorage.setItem(supportStorageKey, JSON.stringify(supportMessages));
+    safeLocalStorageSet(supportStorageKey, JSON.stringify(supportMessages));
   }, [supportMessages]);
 
   useEffect(() => {
-    localStorage.setItem(streamerModeStorageKey, String(streamerMode));
+    safeLocalStorageSet(streamerModeStorageKey, String(streamerMode));
   }, [streamerMode]);
 
   useEffect(() => {
-    localStorage.setItem(journalStorageKey, JSON.stringify(safeArray(journalEntries)));
+    safeLocalStorageSet(journalStorageKey, JSON.stringify(safeArray(journalEntries)));
   }, [journalEntries]);
 
   useEffect(() => {
-    localStorage.setItem(layoutStorageKey, JSON.stringify({ ...layoutPrefs, cardOrder: normalizeCardList(layoutPrefs.cardOrder) }));
+    safeLocalStorageSet(layoutStorageKey, JSON.stringify({ ...layoutPrefs, cardOrder: normalizeCardList(layoutPrefs.cardOrder) }));
   }, [layoutPrefs]);
 
   useEffect(() => {
-    localStorage.setItem(watchlistStorageKey, JSON.stringify(normalizeWatchlistItems(watchlist, profile.mainMarket)));
+    safeLocalStorageSet(watchlistStorageKey, JSON.stringify(normalizeWatchlistItems(watchlist, profile.mainMarket)));
   }, [watchlist]);
 
   useEffect(() => {
@@ -1872,9 +1921,9 @@ export default function App() {
       watchlist: normalizeWatchlistItems(watchlist, profile.mainMarket),
     });
     setWorkspace(nextWorkspace);
-    localStorage.setItem(workspaceStorageKey, JSON.stringify(nextWorkspace));
-    localStorage.setItem(tradePlanStorageKey, JSON.stringify(plannedTrade || null));
-    localStorage.setItem(connectionModeStorageKey, dataSource);
+    safeLocalStorageSet(workspaceStorageKey, JSON.stringify(nextWorkspace));
+    safeLocalStorageSet(tradePlanStorageKey, JSON.stringify(plannedTrade || null));
+    safeLocalStorageSet(connectionModeStorageKey, dataSource);
   }, [dataSource, journalEntries, layoutPrefs, plannedTrade, profile.mainMarket, watchlist]);
 
   useEffect(() => {
@@ -1894,6 +1943,7 @@ export default function App() {
 
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
+      if (data.session?.user) setActivePage("dashboard");
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
@@ -1910,6 +1960,9 @@ export default function App() {
 
   useEffect(() => {
     if (!session?.user || !supabase) return;
+
+    // Navigate to dashboard immediately — don't wait for the async workspace load.
+    setActivePage("dashboard");
 
     let cancelled = false;
     const loadWorkspace = async () => {
@@ -2367,6 +2420,24 @@ export default function App() {
 
     return () => clearInterval(timer);
   }, [autoPrice, brokerConnection.platform, dataSource, profile, resistance, riskPoints, support]);
+
+  useEffect(() => {
+    if (dataSource === "Manual Mode" || !profile.mainMarket) return undefined;
+    const fetchKey = profile.mainMarket;
+    if (historicalFetchKeyRef.current === fetchKey) return undefined;
+    historicalFetchKeyRef.current = fetchKey;
+    let cancelled = false;
+    const isLocal = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+    const histUrl = isLocal
+      ? `${marketServerUrl}/api/market/history?symbol=${encodeURIComponent(profile.mainMarket)}&interval=5m&range=1mo`
+      : `/api/market/history?symbol=${encodeURIComponent(profile.mainMarket)}&interval=5m&range=1mo`;
+    safeFetch(histUrl, {}, "candle-history").then((result) => {
+      if (cancelled || !result.ok || !Array.isArray(result.data?.candles) || result.data.candles.length === 0) return;
+      const key = candleHistoryKey(profile.mainMarket, "5");
+      setCandleHistory((current) => bulkLoadCandles(current, key, result.data.candles));
+    });
+    return () => { cancelled = true; };
+  }, [dataSource, profile.mainMarket]);
 
   const engine = useMemo(() => {
     return calculateTrade({
@@ -4263,8 +4334,10 @@ function HomePage({ onJoinAlpha, onLaunch, signedIn }) {
           <h2 className="home-title" style={styles.homeTitle}>Plan trades. Manage risk. Avoid emotional entries.</h2>
           <p style={styles.homeSubtitle}>Trade Pilot is a trading execution assistant for futures traders.</p>
           <div style={styles.heroActions}>
-            <button onClick={onLaunch} style={styles.primaryHeroButton}>Launch App</button>
-            <button onClick={onJoinAlpha} style={styles.secondaryHeroButton}>Join Alpha</button>
+            <button onClick={onLaunch} style={styles.primaryHeroButton}>{signedIn ? "Go to Dashboard" : "Launch App"}</button>
+            {!signedIn && (
+              <button onClick={onJoinAlpha} style={styles.secondaryHeroButton}>Join Alpha</button>
+            )}
           </div>
         </div>
       </section>
@@ -8980,6 +9053,52 @@ function TradeChartPanel({ candleSeries, chartOverlays = {}, chartPrefs, chartTi
                   title="Prevent vertical price-scale dragging"
                   type="button"
                 >{chartPrefs?.lockPriceScale ? "Price 🔒" : "Price 🔓"}</button>
+                <button
+                  onClick={() => setChartPrefs((current) => ({ ...current, showOR: !current.showOR }))}
+                  style={{
+                    ...styles.chartActionButton,
+                    color: chartPrefs?.showOR !== false ? "#60a5fa" : "#94a3b8",
+                  }}
+                  title="Toggle Opening Range (ORH / ORL)"
+                  type="button"
+                >OR</button>
+                {chartPrefs?.showOR !== false ? (
+                  <>
+                    {[5, 15, 30].map((min) => (
+                      <button
+                        key={min}
+                        onClick={() => setChartPrefs((current) => ({ ...current, orMinutes: min }))}
+                        style={{
+                          ...styles.chartActionButton,
+                          color: (chartPrefs?.orMinutes ?? 15) === min ? "#60a5fa" : "#94a3b8",
+                          fontVariantNumeric: "tabular-nums",
+                        }}
+                        title={`Set OR period to ${min} minutes`}
+                        type="button"
+                      >{min}m</button>
+                    ))}
+                    <button
+                      onClick={() => setChartPrefs((current) => ({ ...current, showORBox: !current.showORBox }))}
+                      style={{
+                        ...styles.chartActionButton,
+                        color: chartPrefs?.showORBox !== false ? "#60a5fa" : "#94a3b8",
+                        fontSize: "10px",
+                      }}
+                      title="Toggle OR box"
+                      type="button"
+                    >Box</button>
+                    <button
+                      onClick={() => setChartPrefs((current) => ({ ...current, showORRetest: !current.showORRetest }))}
+                      style={{
+                        ...styles.chartActionButton,
+                        color: chartPrefs?.showORRetest !== false ? "#60a5fa" : "#94a3b8",
+                        fontSize: "10px",
+                      }}
+                      title="Toggle OR retest marker"
+                      type="button"
+                    >Retest</button>
+                  </>
+                ) : null}
               </>
             ) : null}
           </div>
@@ -9011,11 +9130,16 @@ function TradeChartPanel({ candleSeries, chartOverlays = {}, chartPrefs, chartTi
           height={chartHeight}
           lockPriceScale={chartPrefs?.lockPriceScale === true}
           markers={setupMarkers}
+          orMinutes={chartPrefs?.orMinutes ?? 15}
           plan={plan}
           poc={chartOverlays.poc ?? null}
           relVol={chartOverlays.relVol ?? null}
           resetSignal={resetSignal || 0}
           resistanceZone={resistanceZone}
+          showOR={chartPrefs?.showOR !== false}
+          showORBox={chartPrefs?.showORBox !== false}
+          showORLabels={chartPrefs?.showORLabels !== false}
+          showORRetest={chartPrefs?.showORRetest !== false}
           showZones={zonesValid}
           supportZone={supportZone}
           symbol={symbol}

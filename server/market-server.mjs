@@ -152,6 +152,40 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/market/history") {
+    const yahooSymbolMap = { MNQ: "NQ=F", NQ: "NQ=F", MES: "ES=F", ES: "ES=F", YM: "YM=F", RTY: "RTY=F", CL: "CL=F", GC: "GC=F" };
+    const sym = normalizeSymbol(url.searchParams.get("symbol") || "MNQ");
+    const yahooSymbol = yahooSymbolMap[sym] || "NQ=F";
+    const interval = url.searchParams.get("interval") || "5m";
+    const range = url.searchParams.get("range") || "1mo";
+    const timeframeStr = interval.endsWith("h")
+      ? String(Number(interval.slice(0, -1)) * 60)
+      : interval.endsWith("m")
+        ? interval.slice(0, -1)
+        : "5";
+    try {
+      const histRes = await fetch(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`,
+        { headers: { "User-Agent": "TradePilot/1.0" } },
+      );
+      const payload = await histRes.json();
+      const result = payload?.chart?.result?.[0];
+      if (!result) { sendJson(response, 502, { ok: false, error: "No chart data available." }); return; }
+      const timestamps = Array.isArray(result.timestamp) ? result.timestamp : [];
+      const q = result.indicators?.quote?.[0] || {};
+      const candles = [];
+      for (let i = 0; i < timestamps.length; i++) {
+        const open = Number(q.open?.[i]), high = Number(q.high?.[i]), low = Number(q.low?.[i]), close = Number(q.close?.[i]);
+        if (![open, high, low, close].every(Number.isFinite) || close <= 0) continue;
+        candles.push({ timestamp: new Date(timestamps[i] * 1000).toISOString(), open, high, low, close, volume: Number.isFinite(Number(q.volume?.[i])) ? Number(q.volume[i]) : null, timeframe: timeframeStr });
+      }
+      sendJson(response, 200, { ok: true, market: sym, interval, timeframe: timeframeStr, range, candles, count: candles.length });
+    } catch (error) {
+      sendJson(response, 502, { ok: false, error: error.message || "History unavailable." });
+    }
+    return;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/broker/status") {
     const snapshot = brokerBridge.getSnapshot();
     sendJson(response, 200, {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   createChart,
   CandlestickSeries,
@@ -23,6 +23,11 @@ const CHART_THEME = {
   runner: "#a855f7",
   price: "#facc15",
   glow: "rgba(250, 204, 21, 0.45)",
+  orLine: "#3b82f6",
+  orBox: "rgba(59,130,246,0.08)",
+  orBoxBorder: "rgba(59,130,246,0.55)",
+  orRetest: "rgba(59,130,246,0.22)",
+  orRetestBorder: "#3b82f6",
 };
 
 const MIN_CANDLES_FOR_LIVE = 20;
@@ -45,6 +50,104 @@ function getMinVisibleRange(symbol, refPrice) {
   if (sym === "GC" || sym === "MGC") return 0.5;
   const px = Number(refPrice);
   return Number.isFinite(px) && px > 0 ? Math.max(0.01, px * 0.001) : 0.5;
+}
+
+// Decompose a Unix-seconds timestamp into ET (America/New_York) wall-clock parts.
+// Uses Intl so DST is handled correctly automatically.
+function getETComponents(unixSeconds) {
+  const d = new Date(unixSeconds * 1000);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const get = (type) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+  return {
+    year: get("year"),
+    month: get("month"),
+    day: get("day"),
+    hour: get("hour"),
+    minute: get("minute"),
+  };
+}
+
+// Compute the Opening Range from candle data.
+// Returns { orh, orl, ormid, orComplete, orStart, orEnd, orBoxEnd, retestCandle }
+function computeOR(candles, orMinutes = 15) {
+  const empty = {
+    orh: null, orl: null, ormid: null,
+    orComplete: false,
+    orStart: null, orEnd: null, orBoxEnd: null,
+    retestCandle: null,
+  };
+  if (!Array.isArray(candles) || candles.length === 0) return empty;
+
+  // Find the most recent RTH (9:30 AM ET or later) candle to identify today's session.
+  const RTH_OPEN_MIN = 9 * 60 + 30; // 570
+  let tradingDate = null;
+  for (let i = candles.length - 1; i >= 0; i--) {
+    const et = getETComponents(candles[i].time);
+    if (et.hour * 60 + et.minute >= RTH_OPEN_MIN) {
+      tradingDate = `${et.year}-${String(et.month).padStart(2, "0")}-${String(et.day).padStart(2, "0")}`;
+      break;
+    }
+  }
+  if (!tradingDate) return empty;
+
+  const orEndMin = RTH_OPEN_MIN + orMinutes;
+  let orh = null, orl = null, orStart = null, orEnd = null;
+  const postOrCandles = [];
+
+  for (const c of candles) {
+    const et = getETComponents(c.time);
+    const dateKey = `${et.year}-${String(et.month).padStart(2, "0")}-${String(et.day).padStart(2, "0")}`;
+    if (dateKey !== tradingDate) continue;
+
+    const totalMin = et.hour * 60 + et.minute;
+    if (totalMin >= RTH_OPEN_MIN && totalMin < orEndMin) {
+      if (orh === null || c.high > orh) orh = c.high;
+      if (orl === null || c.low < orl) orl = c.low;
+      if (orStart === null) orStart = c.time;
+      orEnd = c.time;
+    } else if (totalMin >= orEndMin && totalMin < 16 * 60) {
+      postOrCandles.push(c);
+    }
+  }
+
+  if (orh === null || orl === null) return empty;
+
+  const ormid = (orh + orl) / 2;
+  const orComplete = postOrCandles.length > 0;
+  const orBoxEnd = postOrCandles.length > 0 ? postOrCandles[0].time : orEnd;
+
+  // OR retest detection: price breaks ORH or ORL then returns to touch that level.
+  let retestCandle = null;
+  if (orComplete) {
+    let brokeAbove = false, brokeBelow = false;
+    let topDone = false, bottomDone = false;
+
+    for (const c of postOrCandles) {
+      if (!brokeAbove && c.high > orh) brokeAbove = true;
+      if (!brokeBelow && c.low < orl) brokeBelow = true;
+
+      // Retest ORH from above: candle range straddles ORH after an upside break.
+      if (!topDone && brokeAbove && c.low <= orh && c.high >= orh) {
+        retestCandle = { time: c.time, price: orh, side: "top" };
+        topDone = true;
+      }
+      // Retest ORL from below: candle range straddles ORL after a downside break.
+      if (!bottomDone && brokeBelow && !retestCandle && c.high >= orl && c.low <= orl) {
+        retestCandle = { time: c.time, price: orl, side: "bottom" };
+        bottomDone = true;
+      }
+    }
+  }
+
+  return { orh, orl, ormid, orComplete, orStart, orEnd, orBoxEnd, retestCandle };
 }
 
 function buildCandleSeriesData(candles, options = {}) {
@@ -148,11 +251,16 @@ export default function TradingChart({
   height = 480,
   lockPriceScale = false,
   markers,
+  orMinutes = 15,
   plan,
   poc = null,
   relVol = null,
   resetSignal = 0,
   resistanceZone,
+  showOR = true,
+  showORBox = true,
+  showORLabels = true,
+  showORRetest = true,
   showZones = true,
   supportZone,
   symbol,
@@ -180,17 +288,20 @@ export default function TradingChart({
   // without being recreated on every render.
   const fvgDataRef = useRef(fvgData);
   const fvgUpdateRef = useRef(null);
+
+  // OR overlay refs
+  const orBoxRef = useRef(null);
+  const orRetestRef = useRef(null);
+  const orDataRef = useRef(null);
+  const orUpdateRef = useRef(null);
+
   const [hoverCandle, setHoverCandle] = useState(null);
 
   const built = useMemo(
     () => buildCandleSeriesData(candles, { symbol, refPrice: currentPrice }),
     [candles, symbol, currentPrice],
   );
-  const realCandles = useMemo(() => {
-    // Hard-cap to last 300 candles — keeps the chart snappy and matches the
-    // history pipeline's MAX_CANDLES_PER_KEY.
-    return built.data.length > 300 ? built.data.slice(built.data.length - 300) : built.data;
-  }, [built]);
+  const realCandles = built.data;
   const volumeData = useMemo(() => {
     if (!Array.isArray(candles)) return [];
     const seen = new Map();
@@ -202,8 +313,7 @@ export default function TradingChart({
       const isUp = Number(c.close) >= Number(c.open);
       seen.set(time, { time, value: vol, color: isUp ? "rgba(34,197,94,0.35)" : "rgba(244,63,94,0.35)" });
     }
-    const arr = Array.from(seen.values()).sort((a, b) => a.time - b.time);
-    return arr.length > 300 ? arr.slice(arr.length - 300) : arr;
+    return Array.from(seen.values()).sort((a, b) => a.time - b.time);
   }, [candles]);
   const candleData = realCandles;
   const waitingForCandles = realCandles.length < MIN_CANDLES_FOR_LIVE;
@@ -224,36 +334,119 @@ export default function TradingChart({
     && Number.isFinite(Number(plan.entry)) && Number.isFinite(Number(plan.stop))
     && Number(plan.entry) > 0 && Number(plan.stop) > 0;
 
-  // Keep fvgDataRef current on every render so the stable update fn reads fresh data.
-  fvgDataRef.current = fvgData;
+  // Compute Opening Range from full candle data (before any display cap).
+  const orData = useMemo(
+    () => showOR ? computeOR(built.data, orMinutes) : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [showOR, built.data.length, orMinutes],
+  );
 
-  // Stable update function — reads from refs, writes directly to overlay DOM element.
-  // Called by chart event subscriptions and by the fvgData useEffect.
-  fvgUpdateRef.current = () => {
-    const el = fvgOverlayRef.current;
-    const series = seriesRef.current;
-    if (!el || !series) return;
-    const fd = fvgDataRef.current;
-    if (!fd || !Number.isFinite(Number(fd.top)) || !Number.isFinite(Number(fd.bottom))) {
-      el.style.display = "none";
-      return;
-    }
-    const topPx = series.priceToCoordinate(Number(fd.top));
-    const botPx = series.priceToCoordinate(Number(fd.bottom));
-    if (topPx === null || botPx === null) {
-      el.style.display = "none";
-      return;
-    }
-    const y1 = Math.min(topPx, botPx);
-    const y2 = Math.max(topPx, botPx);
-    const isBearish = fd.type === "bearish";
-    el.style.display = "block";
-    el.style.top = `${y1}px`;
-    el.style.height = `${Math.max(2, y2 - y1)}px`;
-    el.style.background = isBearish ? "rgba(239,83,80,0.09)" : "rgba(38,198,218,0.09)";
-    el.style.borderTop = `1px solid ${isBearish ? "rgba(239,83,80,0.55)" : "rgba(38,198,218,0.55)"}`;
-    el.style.borderBottom = `1px solid ${isBearish ? "rgba(239,83,80,0.55)" : "rgba(38,198,218,0.55)"}`;
-  };
+  // After every render: update data refs and rebuild the stable overlay update functions
+  // so they always close over the latest props without triggering re-renders.
+  useLayoutEffect(() => {
+    fvgDataRef.current = fvgData;
+    orDataRef.current = orData;
+
+    fvgUpdateRef.current = () => {
+      const el = fvgOverlayRef.current;
+      const series = seriesRef.current;
+      if (!el || !series) return;
+      const fd = fvgDataRef.current;
+      if (!fd || !Number.isFinite(Number(fd.top)) || !Number.isFinite(Number(fd.bottom))) {
+        el.style.display = "none";
+        return;
+      }
+      const topPx = series.priceToCoordinate(Number(fd.top));
+      const botPx = series.priceToCoordinate(Number(fd.bottom));
+      if (topPx === null || botPx === null) {
+        el.style.display = "none";
+        return;
+      }
+      const y1 = Math.min(topPx, botPx);
+      const y2 = Math.max(topPx, botPx);
+      const isBearish = fd.type === "bearish";
+      el.style.display = "block";
+      el.style.top = `${y1}px`;
+      el.style.height = `${Math.max(2, y2 - y1)}px`;
+      el.style.background = isBearish ? "rgba(239,83,80,0.09)" : "rgba(38,198,218,0.09)";
+      el.style.borderTop = `1px solid ${isBearish ? "rgba(239,83,80,0.55)" : "rgba(38,198,218,0.55)"}`;
+      el.style.borderBottom = `1px solid ${isBearish ? "rgba(239,83,80,0.55)" : "rgba(38,198,218,0.55)"}`;
+    };
+
+    // OR overlay update — repositions the OR box and retest rectangle on pan/zoom.
+    orUpdateRef.current = () => {
+      const chart = chartRef.current;
+      const series = seriesRef.current;
+      const od = orDataRef.current;
+      const boxEl = orBoxRef.current;
+      const retestEl = orRetestRef.current;
+
+      if (boxEl) {
+        const canDraw = showOR && showORBox && od?.orh != null && od?.orl != null && od?.orStart != null;
+        if (!canDraw || !chart || !series) {
+          boxEl.style.display = "none";
+        } else {
+          const x1 = chart.timeScale().timeToCoordinate(od.orStart);
+          const x2 = chart.timeScale().timeToCoordinate(od.orBoxEnd ?? od.orEnd);
+          const y1 = series.priceToCoordinate(od.orh);
+          const y2 = series.priceToCoordinate(od.orl);
+          if (x1 == null || x2 == null || y1 == null || y2 == null) {
+            boxEl.style.display = "none";
+          } else {
+            const left = Math.min(x1, x2);
+            const right = Math.max(x1, x2);
+            const top = Math.min(y1, y2);
+            const ht = Math.max(4, Math.abs(y2 - y1));
+            boxEl.style.display = "block";
+            boxEl.style.left = `${left}px`;
+            boxEl.style.width = `${Math.max(2, right - left)}px`;
+            boxEl.style.top = `${top}px`;
+            boxEl.style.height = `${ht}px`;
+            const labelEl = boxEl.querySelector(".or-box-label");
+            if (labelEl) labelEl.style.display = showORLabels ? "block" : "none";
+          }
+        }
+      }
+
+      if (retestEl) {
+        const canDraw = showOR && showORRetest && od?.retestCandle != null;
+        if (!canDraw || !chart || !series) {
+          retestEl.style.display = "none";
+        } else {
+          const rc = od.retestCandle;
+          const rx = chart.timeScale().timeToCoordinate(rc.time);
+          const ry = series.priceToCoordinate(rc.price);
+          if (rx == null || ry == null) {
+            retestEl.style.display = "none";
+          } else {
+            let barW = 14;
+            const cd = candleDataRef.current;
+            if (cd.length >= 2) {
+              const t1 = chart.timeScale().timeToCoordinate(cd[0].time);
+              const t2 = chart.timeScale().timeToCoordinate(cd[1].time);
+              if (t1 != null && t2 != null) barW = Math.max(8, Math.abs(t2 - t1) * 0.8);
+            }
+            const boxH = 20;
+            retestEl.style.display = "block";
+            retestEl.style.left = `${rx - barW / 2}px`;
+            retestEl.style.width = `${barW}px`;
+            retestEl.style.top = `${ry - boxH / 2}px`;
+            retestEl.style.height = `${boxH}px`;
+            const labelEl = retestEl.querySelector(".or-retest-label");
+            if (labelEl) {
+              if (rc.side === "top") {
+                labelEl.style.top = "auto";
+                labelEl.style.bottom = `${boxH + 2}px`;
+              } else {
+                labelEl.style.top = `${boxH + 2}px`;
+                labelEl.style.bottom = "auto";
+              }
+            }
+          }
+        }
+      }
+    };
+  });
 
   useEffect(() => {
     if (!containerRef.current) return undefined;
@@ -400,24 +593,25 @@ export default function TradingChart({
       observer.observe(containerRef.current);
     }
 
-    // FVG box overlay — update pixel position on every chart pan/zoom.
-    const handleFvgUpdate = () => {
+    // FVG + OR overlays — update pixel position on every chart pan/zoom.
+    const handleOverlayUpdate = () => {
       if (fvgUpdateRef.current) fvgUpdateRef.current();
+      if (orUpdateRef.current) orUpdateRef.current();
     };
-    chart.timeScale().subscribeVisibleLogicalRangeChange(handleFvgUpdate);
-    chart.subscribeCrosshairMove(handleFvgUpdate);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleOverlayUpdate);
+    chart.subscribeCrosshairMove(handleOverlayUpdate);
 
     return () => {
       window.removeEventListener("resize", handleResize);
       window.removeEventListener("orientationchange", handleOrientation);
       if (observer) observer.disconnect();
       try {
-        chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleFvgUpdate);
+        chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleOverlayUpdate);
       } catch {
         // ignore
       }
       try {
-        chart.unsubscribeCrosshairMove(handleFvgUpdate);
+        chart.unsubscribeCrosshairMove(handleOverlayUpdate);
       } catch {
         // already disposed
       }
@@ -455,10 +649,15 @@ export default function TradingChart({
     if (fvgUpdateRef.current) fvgUpdateRef.current();
   }, [fvgData]);
 
+  // Reposition OR overlays whenever orData or OR visibility settings change.
+  useEffect(() => {
+    if (orUpdateRef.current) orUpdateRef.current();
+  }, [orData, showOR, showORBox, showORRetest, showORLabels]);
+
   useEffect(() => {
     // Keep ref in sync so chart-recreation effect can access current data.
     candleDataRef.current = candleData;
-    if (process.env.NODE_ENV !== "production") {
+    if (import.meta.env.DEV) {
       console.log(
         "[TradingChart] candles →", candleData.length,
         `(rejected: ${built.rejected})`,
@@ -482,6 +681,8 @@ export default function TradingChart({
       hasInitiallyFitRef.current = true;
       lastFitKeyRef.current = fitKey;
     }
+    // Trigger OR overlay reposition after new candle data is rendered.
+    if (orUpdateRef.current) orUpdateRef.current();
   }, [candleData, autoFit, symbol, timeframe, built.rejected]);
 
   useEffect(() => {
@@ -695,7 +896,43 @@ export default function TradingChart({
       axisLabelVisible: false,
       title: "",
     } : null);
-  }, [currentPrice, cleanSupport?.min, cleanSupport?.max, cleanSupport?.center, cleanResistance?.min, cleanResistance?.max, cleanResistance?.center, planValid, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner, showZones, poc, fvgData?.type, fvgData?.top, fvgData?.bottom]);
+
+    // OR price lines — ORH and ORL extend across the full chart as dashed blue lines.
+    const orActive = showOR && orData?.orh != null;
+    ensurePriceLine(series, priceLinesRef, "orh", orActive ? {
+      price: orData.orh,
+      color: CHART_THEME.orLine,
+      lineStyle: 1,
+      lineWidth: 1,
+      axisLabelVisible: true,
+      title: showORLabels ? "ORH" : "",
+    } : null);
+    ensurePriceLine(series, priceLinesRef, "orl", orActive ? {
+      price: orData.orl,
+      color: CHART_THEME.orLine,
+      lineStyle: 1,
+      lineWidth: 1,
+      axisLabelVisible: true,
+      title: showORLabels ? "ORL" : "",
+    } : null);
+    ensurePriceLine(series, priceLinesRef, "ormid", orActive && orData.ormid != null ? {
+      price: orData.ormid,
+      color: "rgba(59,130,246,0.35)",
+      lineStyle: 2,
+      lineWidth: 1,
+      axisLabelVisible: false,
+      title: "",
+    } : null);
+  }, [
+    currentPrice,
+    cleanSupport?.min, cleanSupport?.max, cleanSupport?.center,
+    cleanResistance?.min, cleanResistance?.max, cleanResistance?.center,
+    planValid, plan?.entry, plan?.stop, plan?.tp1, plan?.tp2, plan?.runner,
+    showZones, poc,
+    fvgData?.type, fvgData?.top, fvgData?.bottom,
+    showOR, showORLabels,
+    orData?.orh, orData?.orl, orData?.ormid,
+  ]);
 
   // Tooltip placement — keep it inside the chart bounds. 12px nudge so it
   // doesn't sit directly under the cursor.
@@ -706,6 +943,7 @@ export default function TradingChart({
     color: "#d1d4dc",
     fontSize: "11px",
     fontVariantNumeric: "tabular-nums",
+    // eslint-disable-next-line react-hooks/refs
     left: Math.min(Math.max(12, hoverCandle.x + 14), Math.max(140, (containerRef.current?.clientWidth || 600) - 150)),
     lineHeight: 1.6,
     padding: "6px 10px",
@@ -717,9 +955,18 @@ export default function TradingChart({
   } : null;
   const hoverRange = hoverCandle ? Math.abs(hoverCandle.high - hoverCandle.low) : 0;
 
+  // OR debug state computed for display
+  const orDebugRows = debugMode && orData ? [
+    `ORH: ${orData.orh != null ? orData.orh.toFixed(2) : "–"}`,
+    `ORL: ${orData.orl != null ? orData.orl.toFixed(2) : "–"}`,
+    `OR Complete: ${orData.orComplete ? "Yes" : "No"}`,
+    `OR Retest: ${orData.retestCandle ? `Yes (${orData.retestCandle.side === "top" ? "ORH" : "ORL"} @ ${new Date(orData.retestCandle.time * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})` : "No"}`,
+  ] : [];
+
   return (
     <div style={{ position: "relative", width: "100%", height, touchAction: "none" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%", touchAction: "none" }} />
+
       {/* FVG transparent box fill — positioned by priceToCoordinate, updated by chart events */}
       <div
         ref={fvgOverlayRef}
@@ -732,6 +979,67 @@ export default function TradingChart({
           zIndex: 2,
         }}
       />
+
+      {/* OR box — thin blue outline from OR start to OR end, height = ORH to ORL */}
+      <div
+        ref={orBoxRef}
+        style={{
+          background: CHART_THEME.orBox,
+          border: `1px solid ${CHART_THEME.orBoxBorder}`,
+          borderRadius: "2px",
+          display: "none",
+          pointerEvents: "none",
+          position: "absolute",
+          zIndex: 2,
+        }}
+      >
+        <span
+          className="or-box-label"
+          style={{
+            color: CHART_THEME.orLine,
+            display: showORLabels ? "block" : "none",
+            fontSize: "9px",
+            fontWeight: 700,
+            left: "3px",
+            letterSpacing: ".04em",
+            position: "absolute",
+            top: "2px",
+          }}
+        >
+          OR
+        </span>
+      </div>
+
+      {/* OR retest rectangle — small blue box around the retest candle */}
+      <div
+        ref={orRetestRef}
+        style={{
+          background: CHART_THEME.orRetest,
+          border: `1.5px solid ${CHART_THEME.orRetestBorder}`,
+          borderRadius: "2px",
+          display: "none",
+          pointerEvents: "none",
+          position: "absolute",
+          zIndex: 3,
+        }}
+      >
+        <span
+          className="or-retest-label"
+          style={{
+            color: CHART_THEME.orLine,
+            fontSize: "9px",
+            fontWeight: 700,
+            left: "50%",
+            letterSpacing: ".04em",
+            position: "absolute",
+            transform: "translateX(-50%)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          OR
+        </span>
+      </div>
+
       {hoverCandle ? (
         <div style={tooltipStyle}>
           <div><span style={{ color: "#94a3b8" }}>O:</span> {hoverCandle.open.toFixed(2)}</div>
@@ -814,6 +1122,12 @@ export default function TradingChart({
               ? `${new Date(realCandles.at(-1).time * 1000).toISOString().slice(11, 16)}Z  p=${realCandles.at(-1).close.toFixed(2)}`
               : "–"}
           </div>
+          {orDebugRows.length > 0 && (
+            <>
+              <div style={{ color: "#93c5fd", fontWeight: 700, marginTop: "4px", marginBottom: "2px" }}>Opening Range</div>
+              {orDebugRows.map((row) => <div key={row}>{row}</div>)}
+            </>
+          )}
         </div>
       ) : null}
       {waitingForCandles ? (
